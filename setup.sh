@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# WarpGo v1.0 - Менеджер Cloudflare WARP для Amnezia и 3X-UI
-# Автор: redoxprison-pixel
+# WarpGo v1.1 - Менеджер Cloudflare WARP
+# Исправлен статус и добавлена проверка задержки (Ping)
 
 # Цвета
 GREEN='\033[0;32m'
@@ -23,7 +23,8 @@ MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 
 # --- ФУНКЦИИ ПРОВЕРКИ ---
 check_status() {
-    if systemctl is-active --quiet tun2socks; then
+    # Проверяем наличие интерфейса и работу службы
+    if ip link show "$TUN_DEV" >/dev/null 2>&1 && systemctl is-active --quiet tun2socks; then
         echo -e " Статус WARP: ${GREEN}● РАБОТАЕТ${NC}"
     else
         echo -e " Статус WARP: ${RED}○ ВЫКЛЮЧЕН${NC}"
@@ -31,12 +32,27 @@ check_status() {
 }
 
 check_ips() {
-    echo -e "${CYAN}--- Статус IP ---${NC}"
-    REAL_IP=$(curl -s --interface "$MAIN_IFACE" eth0.me || echo "Ошибка")
-    WARP_IP=$(curl -s --proxy socks5h://127.0.0.1:"$WARP_PORT" eth0.me || echo "ВЫКЛ")
+    echo -e "${CYAN}--- Статус сети ---${NC}"
+    # Определение IP
+    REAL_IP=$(curl -s --interface "$MAIN_IFACE" --max-time 2 eth0.me || echo "Ошибка")
+    WARP_IP=$(curl -s --proxy socks5h://127.0.0.1:"$WARP_PORT" --max-time 2 eth0.me || echo "ВЫКЛ")
+    
     echo -e " IP Сервера: ${YELLOW}$REAL_IP${NC}"
     echo -e " IP WARP:    ${GREEN}$WARP_IP${NC}"
-    echo -e "${CYAN}-----------------${NC}"
+    
+    # Проверка задержки (Ping)
+    echo -e "\n${CYAN}--- Задержка (Ping) ---${NC}"
+    PING_DIR=$(ping -c 1 -I "$MAIN_IFACE" 8.8.8.8 | grep 'time=' | awk -F'time=' '{print $2}' || echo "timeout")
+    echo -e " Прямой пинг (8.8.8.8): ${YELLOW}$PING_DIR${NC}"
+    
+    if [ "$WARP_IP" != "ВЫКЛ" ]; then
+        # Пинг через туннель (используем интерфейс туннеля)
+        PING_WARP=$(ping -c 1 -I "$TUN_DEV" 1.1.1.1 | grep 'time=' | awk -F'time=' '{print $2}' || echo "timeout")
+        echo -e " WARP пинг   (1.1.1.1): ${GREEN}$PING_WARP${NC}"
+    else
+        echo -e " WARP пинг:             ${RED}недоступно${NC}"
+    fi
+    echo -e "${CYAN}-----------------------${NC}"
 }
 
 # --- УПРАВЛЕНИЕ МАРШРУТАМИ ---
@@ -59,6 +75,7 @@ routing_down() {
     ip rule del priority 5 2>/dev/null
     ip rule del priority 6 2>/dev/null
     ip rule del priority 100 2>/dev/null
+    # Очистка iptables (опционально, если нужно)
     echo -e "${YELLOW}Маршрутизация отключена.${NC}"
     sleep 1
 }
@@ -66,7 +83,7 @@ routing_down() {
 # --- УСТАНОВКА ---
 install_all() {
     echo -e "${CYAN}Установка зависимостей...${NC}"
-    apt update && apt install -y curl wget unzip iptables conntrack wireguard-tools
+    apt update && apt install -y curl wget unzip iptables conntrack wireguard-tools iputils-ping
     
     echo -e "${CYAN}Регистрация Cloudflare WARP (wgcf)...${NC}"
     wget -q https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -O /usr/local/bin/wgcf
@@ -95,7 +112,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable tun2socks && systemctl start tun2socks
     routing_up
-    echo -e "${GREEN}Установка WarpGo v1.0 завершена!${NC}"
+    echo -e "${GREEN}Установка WarpGo v1.1 завершена!${NC}"
     read -p "Нажмите Enter..."
 }
 
@@ -103,7 +120,7 @@ EOF
 while true; do
     clear
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}             WarpGo v1.0                      ${NC}"
+    echo -e "${CYAN}             WarpGo v1.1                      ${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
     
     check_status
