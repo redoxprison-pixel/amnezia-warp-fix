@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# WarpGo v1.1 - Менеджер Cloudflare WARP
-# Исправлен статус и добавлена проверка задержки (Ping)
-
 # Цвета
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -21,9 +18,27 @@ LOG_FILE="/var/log/tun2socks.log"
 
 MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 
-# --- ФУНКЦИИ ПРОВЕРКИ ---
+# --- ПРОВЕРКА ОКРУЖЕНИЯ ---
+check_env() {
+    echo -e "${CYAN}--- Проверка ПО на сервере ---${NC}"
+    if [ -d "/opt/amnezia" ] || iptables -S | grep -q "amn0"; then
+        echo -e " Amnezia VPN: ${GREEN}Обнаружена${NC}"
+    else
+        echo -e " Amnezia VPN: ${RED}Не найдена${NC}"
+    fi
+
+    if [ -d "/usr/local/x-ui" ] || lsof -i :2053 >/dev/null 2>&1; then
+        echo -e " 3X-UI:       ${GREEN}Обнаружен${NC}"
+    else
+        echo -e " 3X-UI:       ${RED}Не найден${NC}"
+    fi
+    
+    echo -e "${CYAN}--- Компоненты WarpGo ---${NC}"
+    [ -f "/usr/local/bin/tun2socks" ] && echo -e " tun2socks:   ${GREEN}Установлен${NC}" || echo -e " tun2socks:   ${RED}Отсутствует${NC}"
+    [ -f "/usr/local/bin/wgcf" ] && echo -e " wgcf (WARP): ${GREEN}Установлен${NC}" || echo -e " wgcf (WARP): ${RED}Отсутствует${NC}"
+}
+
 check_status() {
-    # Проверяем наличие интерфейса и работу службы
     if ip link show "$TUN_DEV" >/dev/null 2>&1 && systemctl is-active --quiet tun2socks; then
         echo -e " Статус WARP: ${GREEN}● РАБОТАЕТ${NC}"
     else
@@ -33,29 +48,72 @@ check_status() {
 
 check_ips() {
     echo -e "${CYAN}--- Статус сети ---${NC}"
-    # Определение IP
     REAL_IP=$(curl -s --interface "$MAIN_IFACE" --max-time 2 eth0.me || echo "Ошибка")
     WARP_IP=$(curl -s --proxy socks5h://127.0.0.1:"$WARP_PORT" --max-time 2 eth0.me || echo "ВЫКЛ")
-    
     echo -e " IP Сервера: ${YELLOW}$REAL_IP${NC}"
     echo -e " IP WARP:    ${GREEN}$WARP_IP${NC}"
     
-    # Проверка задержки (Ping)
-    echo -e "\n${CYAN}--- Задержка (Ping) ---${NC}"
-    PING_DIR=$(ping -c 1 -I "$MAIN_IFACE" 8.8.8.8 | grep 'time=' | awk -F'time=' '{print $2}' || echo "timeout")
-    echo -e " Прямой пинг (8.8.8.8): ${YELLOW}$PING_DIR${NC}"
-    
     if [ "$WARP_IP" != "ВЫКЛ" ]; then
-        # Пинг через туннель (используем интерфейс туннеля)
         PING_WARP=$(ping -c 1 -I "$TUN_DEV" 1.1.1.1 | grep 'time=' | awk -F'time=' '{print $2}' || echo "timeout")
-        echo -e " WARP пинг   (1.1.1.1): ${GREEN}$PING_WARP${NC}"
-    else
-        echo -e " WARP пинг:             ${RED}недоступно${NC}"
+        echo -e " Пинг WARP:  ${GREEN}$PING_WARP${NC}"
     fi
-    echo -e "${CYAN}-----------------------${NC}"
 }
 
-# --- УПРАВЛЕНИЕ МАРШРУТАМИ ---
+# --- МОДУЛЬНАЯ УСТАНОВКА ---
+install_wgcf() {
+    echo -e "${YELLOW}Установка/Перевыпуск ключей WARP...${NC}"
+    apt update && apt install -y wget wireguard-tools
+    wget -q https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -O /usr/local/bin/wgcf
+    chmod +x /usr/local/bin/wgcf
+    mkdir -p /etc/WarpGo && cd /etc/WarpGo || exit
+    rm -f wgcf-account.json wgcf-profile.conf
+    yes | wgcf register && wgcf generate
+    echo -e "${GREEN}Ключи обновлены в /etc/WarpGo/${NC}"
+    sleep 2
+}
+
+install_tun2socks() {
+    echo -e "${YELLOW}Установка tun2socks...${NC}"
+    apt update && apt install -y unzip curl
+    V=$(curl -s https://api.github.com/repos/xjasonlyu/tun2socks/releases/latest | grep tag_name | cut -d '"' -f 4)
+    wget -q "https://github.com/xjasonlyu/tun2socks/releases/download/$V/tun2socks-linux-amd64.zip" -O t2s.zip
+    unzip -o t2s.zip && mv tun2socks-linux-amd64 /usr/local/bin/tun2socks && chmod +x /usr/local/bin/tun2socks
+    rm t2s.zip
+    
+    cat <<EOF > /etc/systemd/system/tun2socks.service
+[Unit]
+Description=WarpGo Tun2Socks
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/tun2socks -device $TUN_DEV -proxy socks5://127.0.0.1:$WARP_PORT -interface $MAIN_IFACE
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload && systemctl enable tun2socks && systemctl restart tun2socks
+    echo -e "${GREEN}Сервис tun2socks готов.${NC}"
+    sleep 2
+}
+
+# --- ОБНОВЛЕНИЕ СКРИПТА ---
+self_update() {
+    echo -e "${YELLOW}Проверка новой версии WarpGo...${NC}"
+    curl -sL "$GITHUB_RAW" -o /tmp/WarpGo_new
+    if ! diff -q "$LOCAL_PATH" /tmp/WarpGo_new > /dev/null; then
+        echo -e "${CYAN}Найдено обновление! Устанавливаю...${NC}"
+        mv /tmp/WarpGo_new "$LOCAL_PATH"
+        chmod +x "$LOCAL_PATH"
+        echo -e "${GREEN}Скрипт обновлен. Перезапустите его командой WarpGo${NC}"
+        exit 0
+    else
+        echo -e "${GREEN}У вас актуальная версия.${NC}"
+        sleep 1.5
+    fi
+}
+
+# --- МАРШРУТЫ ---
 routing_up() {
     if ! grep -q "100 warp" /etc/iproute2/rt_tables; then echo "100 warp" >> /etc/iproute2/rt_tables; fi
     ip route flush table warp
@@ -67,7 +125,7 @@ routing_up() {
     iptables -t nat -I PREROUTING -i amn0 -p udp --dport 53 -j DNAT --to-destination 1.1.1.1
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     conntrack -F &>/dev/null
-    echo -e "${GREEN}Маршрутизация включена!${NC}"
+    echo -e "${GREEN}Маршруты подняты.${NC}"
     sleep 1
 }
 
@@ -75,90 +133,51 @@ routing_down() {
     ip rule del priority 5 2>/dev/null
     ip rule del priority 6 2>/dev/null
     ip rule del priority 100 2>/dev/null
-    # Очистка iptables (опционально, если нужно)
-    echo -e "${YELLOW}Маршрутизация отключена.${NC}"
+    echo -e "${YELLOW}Маршруты удалены.${NC}"
     sleep 1
 }
 
-# --- УСТАНОВКА ---
-install_all() {
-    echo -e "${CYAN}Установка зависимостей...${NC}"
-    apt update && apt install -y curl wget unzip iptables conntrack wireguard-tools iputils-ping
-    
-    echo -e "${CYAN}Регистрация Cloudflare WARP (wgcf)...${NC}"
-    wget -q https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -O /usr/local/bin/wgcf
-    chmod +x /usr/local/bin/wgcf
-    mkdir -p /etc/WarpGo && cd /etc/WarpGo || exit
-    yes | wgcf register && wgcf generate
-    
-    echo -e "${CYAN}Установка tun2socks...${NC}"
-    V=$(curl -s https://api.github.com/repos/xjasonlyu/tun2socks/releases/latest | grep tag_name | cut -d '"' -f 4)
-    wget -q "https://github.com/xjasonlyu/tun2socks/releases/download/$V/tun2socks-linux-amd64.zip" -O t2s.zip
-    unzip -o t2s.zip && mv tun2socks-linux-amd64 /usr/local/bin/tun2socks && chmod +x /usr/local/bin/tun2socks
-    
-    cat <<EOF > /etc/systemd/system/tun2socks.service
-[Unit]
-Description=WarpGo Tun2Socks Service
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/tun2socks -device $TUN_DEV -proxy socks5://127.0.0.1:$WARP_PORT -interface $MAIN_IFACE
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload && systemctl enable tun2socks && systemctl start tun2socks
-    routing_up
-    echo -e "${GREEN}Установка WarpGo v1.1 завершена!${NC}"
-    read -p "Нажмите Enter..."
-}
-
-# --- ГЛАВНЫЙ ЦИКЛ МЕНЮ ---
+# --- МЕНЮ ---
 while true; do
     clear
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}             WarpGo v1.1                      ${NC}"
+    echo -e "${CYAN}             WarpGo v1.2 (Modular)            ${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
     
     check_status
     check_ips
-    
-    echo -e "${YELLOW} УПРАВЛЕНИЕ:${NC}"
-    echo -e "  1) ${GREEN}Полная установка (Soft + WARP)${NC}"
+    check_env
+
+    echo -e "\n${YELLOW} [1] УПРАВЛЕНИЕ ТРАФИКОМ:${NC}"
     echo -e "  2) Включить маршруты (UP)"
     echo -e "  3) Выключить маршруты (DOWN)"
-    echo ""
-    echo -e "${YELLOW} ИНСТРУМЕНТЫ:${NC}"
-    echo -e "  4) Настройки 3X-UI (JSON)"
-    echo -e "  5) Перевыпустить ключи (WGCF)"
-    echo -e "  6) Показать логи"
-    echo ""
-    echo -e "${YELLOW} СИСТЕМА:${NC}"
-    echo -e " 11) ${RED}Полное удаление${NC}"
-    echo -e "  0) Выход"
+    
+    echo -e "\n${YELLOW} [2] УСТАНОВКА КОМПОНЕНТОВ:${NC}"
+    echo -e "  4) Установить/Обновить tun2socks"
+    echo -e "  5) Регистрация/Сброс ключей WARP"
+    
+    echo -e "\n${YELLOW} [3] СЕРВИС И ОБНОВЛЕНИЯ:${NC}"
+    echo -e "  6) Показать логи | 7) JSON 3X-UI"
+    echo -e " 12) ОБНОВИТЬ СКРИПТ (WarpGo)"
+    echo -e " 11) ${RED}Удалить всё${NC} | 0) Выход"
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
     
     read -p " Выберите пункт: " choice
 
     case $choice in
-        1) install_all ;;
         2) routing_up ;;
         3) routing_down ;;
-        4) 
-            echo -e "\n${YELLOW}Добавьте этот Outbound в 3X-UI:${NC}"
-            echo '{"protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":40000}]},"tag":"warp"}'
-            read -p "Enter..." ;;
-        5) cd /etc/WarpGo && wgcf register --force && wgcf generate && read -p "Готово. Enter..." ;;
+        4) install_tun2socks ;;
+        5) install_wgcf ;;
         6) tail -n 50 "$LOG_FILE" && read -p "Enter..." ;;
+        7) echo '{"protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":40000}]},"tag":"warp"}' && read -p "Enter..." ;;
         11) 
             systemctl stop tun2socks && systemctl disable tun2socks
             rm -f /etc/systemd/system/tun2socks.service /usr/local/bin/tun2socks /usr/local/bin/wgcf
             rm -rf /etc/WarpGo
             routing_down
             echo -e "${RED}Удалено.${NC}" && sleep 2 ;;
+        12) self_update ;;
         0) exit 0 ;;
         *) echo -e "${RED}Ошибка!${NC}" && sleep 1 ;;
     esac
