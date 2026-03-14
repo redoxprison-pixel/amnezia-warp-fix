@@ -8,8 +8,9 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 # Конфигурация
-VERSION="3.9"
+VERSION="4.0"
 WARP_PORT="40000"
+BIN_PATH="/usr/local/bin/warp-plus"
 MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 
 get_header() {
@@ -19,8 +20,8 @@ get_header() {
     W_IP=$(curl -s --proxy socks5h://127.0.0.1:"$WARP_PORT" --max-time 2 eth0.me || echo -e "${RED}ВЫКЛ${NC}")
     
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
-    echo -e " WarpGo v$VERSION | Gool Engine Mode"
-    echo -e " Architecture: $(uname -m)"
+    echo -e " WarpGo v$VERSION | Fix Arch Mode"
+    echo -e " Архитектура: $(uname -m)"
     echo -e " Main IP: ${YELLOW}$S_IP${NC}"
     echo -e " WARP IP: $W_IP"
     echo -e " Status:  $W_STAT"
@@ -28,58 +29,66 @@ get_header() {
 }
 
 routing_down() {
-    echo -e "${YELLOW}Остановка...${NC}"
+    echo -e "${YELLOW}Остановка сервисов...${NC}"
     systemctl stop warp-plus >/dev/null 2>&1
     killall warp-plus >/dev/null 2>&1
-    iptables -t nat -F
 }
 
 routing_up() {
     routing_down
-    if [ ! -f /usr/local/bin/warp-plus ]; then
-        echo -e "${RED}Файл не найден! Сначала пункт 1.${NC}"; sleep 2; return
+    if [ ! -s "$BIN_PATH" ]; then
+        echo -e "${RED}Файл бинарника пуст или отсутствует! Сначала пункт 1.${NC}"
+        sleep 2; return
     fi
-    echo -e "${YELLOW}Запуск Gool...${NC}"
+    echo -e "${YELLOW}Запуск Gool Engine...${NC}"
     systemctl start warp-plus
     sleep 5
     
     if curl -s --proxy socks5h://127.0.0.1:"$WARP_PORT" --max-time 10 google.com > /dev/null; then
-        echo -e "${GREEN}✓ ГОТОВО! WARP активен.${NC}"
+        echo -e "${GREEN}✓ УСПЕХ! WARP работает.${NC}"
     else
-        echo -e "${RED}✗ ОШИБКА: Прокси не отвечает. Проверь логи (п.6)${NC}"
+        echo -e "${RED}✗ ОШИБКА: Коннекта нет. Проверь логи (п. 6)${NC}"
         read -p "Нажми Enter..."
     fi
 }
 
 full_install() {
     routing_down
-    echo -e "${BLUE}Определяю архитектуру и скачиваю Gool...${NC}"
+    echo -e "${BLUE}Определяю архитектуру системы...${NC}"
     
     ARCH=$(uname -m)
-    URL=""
+    case "$ARCH" in
+        x86_64)  URL="https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-amd64" ;;
+        aarch64|arm64) URL="https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-arm64" ;;
+        i386|i686) URL="https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-386" ;;
+        *) echo -e "${RED}Неподдерживаемая архитектура: $ARCH${NC}"; return ;;
+    esac
+
+    echo -e "${YELLOW}Скачиваю: $URL${NC}"
+    # Используем -L для редиректов и -f чтобы упасть при ошибке 404
+    curl -Lf "$URL" -o "$BIN_PATH"
     
-    if [[ "$ARCH" == "x86_64" ]]; then
-        URL="https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-amd64"
-    elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
-        URL="https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-arm64"
-    else
-        echo -e "${RED}Неизвестная архитектура: $ARCH${NC}"; return
+    if [ ! -s "$BIN_PATH" ]; then
+        echo -e "${RED}Ошибка: Файл не скачался или пуст!${NC}"
+        return
     fi
 
-    # Скачивание с проверкой
-    wget -qO /usr/local/bin/warp-plus "$URL"
-    if [ $? -ne 0 ]; then echo -e "${RED}Ошибка загрузки!${NC}"; return; fi
-    
-    chmod +x /usr/local/bin/warp-plus
+    chmod +x "$BIN_PATH"
 
-    # ПРОВЕРКА ЗАПУСКАЕМОСТИ (Тот самый фикс Exec format error)
-    if ! /usr/local/bin/warp-plus --version >/dev/null 2>&1; then
-        echo -e "${RED}ОШИБКА: Файл скачан, но не запускается (Exec format error).${NC}"
-        echo -e "${YELLOW}Пробую альтернативный метод...${NC}"
-        # Если amd64 не пошел, возможно нужна 386 версия (редко, но бывает)
-        wget -qO /usr/local/bin/warp-plus "https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-386"
-        chmod +x /usr/local/bin/warp-plus
+    # Прямая проверка: может ли файл запуститься?
+    echo -e "${YELLOW}Проверка совместимости бинарника...${NC}"
+    if ! "$BIN_PATH" --version >/dev/null 2>&1; then
+        echo -e "${RED}Критическая ошибка: Файл скачан, но система не может его выполнить (Exec format error).${NC}"
+        echo -e "${YELLOW}Попробуем альтернативный метод (32-bit)...${NC}"
+        curl -Lf "https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus-linux-386" -o "$BIN_PATH"
+        chmod +x "$BIN_PATH"
+        if ! "$BIN_PATH" --version >/dev/null 2>&1; then
+             echo -e "${RED}Альтернативный метод тоже не помог. Проверь права доступа к /usr/local/bin.${NC}"
+             return
+        fi
     fi
+
+    echo -e "${GREEN}Бинарник проверен и готов к работе.${NC}"
 
     # Создание сервиса
     cat <<EOF > /etc/systemd/system/warp-plus.service
@@ -88,7 +97,7 @@ Description=Warp-Plus Gool Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/warp-plus --socks-addr 127.0.0.1:$WARP_PORT --gool
+ExecStart=$BIN_PATH --socks-addr 127.0.0.1:$WARP_PORT --gool
 Restart=always
 User=root
 
@@ -97,18 +106,18 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable warp-plus
-    echo -e "${GREEN}Установка завершена успешно!${NC}"
+    echo -e "${GREEN}Установка завершена!${NC}"
     sleep 2
 }
 
 # --- МЕНЮ ---
 while true; do
     get_header
-    echo -e " 1) Установить Gool (Fix Exec Format)"
+    echo -e " 1) ПЕРЕУСТАНОВИТЬ (Fix 203/EXEC)"
     echo -e " 2) ЗАПУСТИТЬ WARP"
     echo -e " 3) ОСТАНОВИТЬ"
     echo -e " 6) Логи (Journalctl)"
-    echo -e " 13) ПОЛНОЕ УДАЛЕНИЕ"
+    echo -e " 13) СБРОС СЕТИ И УДАЛЕНИЕ"
     echo -e " 0) Выход"
     
     read -p " Выбор: " choice
@@ -117,7 +126,7 @@ while true; do
         2) routing_up ;;
         3) routing_down ;;
         6) journalctl -u warp-plus -n 20 --no-pager; read -p "Enter..." ;;
-        13) routing_down; rm -f /usr/local/bin/warp-plus /etc/systemd/system/warp-plus.service; echo "Очищено."; sleep 1 ;;
+        13) routing_down; rm -f "$BIN_PATH" /etc/systemd/system/warp-plus.service; echo "Стерто."; sleep 1 ;;
         0) exit 0 ;;
     esac
 done
