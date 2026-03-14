@@ -9,95 +9,94 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Конфигурация
-VERSION="3.0"
+VERSION="3.1"
 WARP_PORT="40000"
 TUN_DEV="tun0"
+# Авто-определение интерфейса
 MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
 
 get_header() {
     clear
     ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1 && S_STAT="${GREEN}● OK${NC}" || S_STAT="${RED}● OFF${NC}"
-    pgrep -x "tun2socks" >/dev/null && W_STAT="${GREEN}● RUNNING${NC}" || W_STAT="${RED}● STOPPED${NC}"
+    pgrep -x "tun2socks" >/dev/null && W_STAT="${GREEN}● OK${NC}" || W_STAT="${RED}● OFF${NC}"
     
     S_IP=$(curl -s --max-time 2 eth0.me || echo "Error")
     W_IP=$(curl -s --proxy socks5h://127.0.0.1:"$WARP_PORT" --max-time 2 eth0.me || echo "ВЫКЛ")
+    DNS_CUR=$(grep nameserver /etc/resolv.conf | awk '{print $2}' | head -n1)
     
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
-    echo -e " WarpGo v$VERSION | Server IP: ${YELLOW}$S_IP${NC}"
-    echo -e " WARP Status: $W_STAT | WARP IP: ${GREEN}$W_IP${NC}"
+    echo -e " WarpGo v$VERSION | Interface: $MAIN_IFACE"
+    echo -e " Сервер: $S_STAT | IP: ${YELLOW}$S_IP${NC}"
+    echo -e " WARP:   $W_STAT | IP: ${GREEN}$W_IP${NC}"
+    echo -e " DNS:    ${CYAN}$DNS_CUR${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════${NC}"
 }
 
-# --- ИСПРАВЛЕННЫЙ СБРОС (Пункт 13) ---
+# --- ПОЛНЫЙ СБРОС (Пункт 13) ---
 routing_down() {
-    echo -e "${YELLOW}Принудительная очистка сети...${NC}"
+    echo -e "${YELLOW}Очистка сетевых правил и остановка сервисов...${NC}"
     systemctl stop tun2socks >/dev/null 2>&1
     killall tun2socks >/dev/null 2>&1
     
-    # Удаляем правила по приоритетам
     while ip rule del priority 100 2>/dev/null; do :; done
+    while ip rule del priority 101 2>/dev/null; do :; done
     while ip rule del priority 500 2>/dev/null; do :; done
     
-    # Полная чистка NAT и таблиц
     iptables -t nat -F
     ip route flush table 100 2>/dev/null
     ip link delete $TUN_DEV >/dev/null 2>&1
     
-    # Сброс DNS
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    echo -e "${GREEN}✓ Сеть полностью восстановлена.${NC}"
+    echo -e "${GREEN}✓ Система очищена.${NC}"
     sleep 1
 }
 
-# --- ИСПРАВЛЕННЫЙ ЗАПУСК (Пункт 2) ---
+# --- ЗАПУСК (Пункт 2) ---
 routing_up() {
-    routing_down # Сначала чистим всё
+    if [ ! -f /usr/local/bin/tun2socks ]; then
+        echo -e "${RED}Файл tun2socks не найден! Нажми пункт 1.${NC}"; sleep 2; return
+    fi
     
-    echo -e "${YELLOW}Запуск WARP...${NC}"
+    routing_down
+    chmod +x /usr/local/bin/tun2socks
+    
+    echo -e "${YELLOW}Запуск туннеля...${NC}"
     systemctl start tun2socks
     sleep 3
 
     if ! pgrep -x "tun2socks" >/dev/null; then
-        echo -e "${RED}Ошибка: tun2socks не запустился! Проверь пункт 6.${NC}"
+        echo -e "${RED}Критическая ошибка: tun2socks не смог запуститься!${NC}"
+        echo -e "${YELLOW}Лог ошибки:${NC}"
+        journalctl -u tun2socks -n 5 --no-pager
+        read -p "Нажми Enter..."
         return
     fi
 
-    # Настройка интерфейса
+    # Настройка сети
     ip link set dev "$TUN_DEV" mtu 1280
-    ip addr add 192.168.100.1/24 dev "$TUN_DEV" 2>/dev/null
-    ip link set dev "$TUN_DEV" up
-
-    # Создаем таблицу маршрутизации
     if ! grep -q "100 warp" /etc/iproute2/rt_tables; then echo "100 warp" >> /etc/iproute2/rt_tables; fi
-    ip route flush table warp
-    ip route add default dev "$TUN_DEV" table warp
+    ip route flush table 100
+    ip route add default dev "$TUN_DEV" table 100
 
-    # --- ПРАВИЛА ИСКЛЮЧЕНИЙ (Чтобы не потерять доступ) ---
-    # 1. Оставляем SSH и локальный трафик в основной таблице
+    # Правила (Исключаем SSH и запросы к самому Cloudflare)
     MY_IP=$(curl -s eth0.me)
     ip rule add to $MY_IP priority 100 table main
-    
-    # 2. Исключаем трафик до самого Cloudflare (чтобы WARP не пытался идти через самого себя)
-    # Это критически важно для коннекта!
     ip rule add to 162.159.0.0/16 priority 101 table main
-    
-    # 3. Всё остальное — в WARP
-    ip rule add from all priority 500 table warp
+    ip rule add from all priority 500 table 100
 
-    # NAT (Маскарад)
     iptables -t nat -A POSTROUTING -o "$TUN_DEV" -j MASQUERADE
     
-    echo -e "${GREEN}✓ Маршрутизация настроена.${NC}"
+    echo -e "${GREEN}✓ WARP запущен и маршруты настроены.${NC}"
     sleep 2
 }
 
-# --- МЕНЮ (Восстановленное оформление) ---
+# --- МЕНЮ ---
 while true; do
     get_header
     echo -e "${YELLOW} [1] УПРАВЛЕНИЕ WARP:${NC}"
-    echo -e "  1) ПОЛНАЯ УСТАНОВКА (tun2 + wgcf + keys)"
-    echo -e "  2) ЗАПУСТИТЬ ТУННЕЛЬ (UP)"
-    echo -e "  3) ОСТАНОВИТЬ ТУННЕЛЬ (DOWN)"
+    echo -e "  1) Установить WARP (Все компоненты + Ключи)"
+    echo -e "  2) Запустить WARP (UP)"
+    echo -e "  3) Остановить WARP (DOWN)"
     
     echo -e "\n${YELLOW} [2] СЕРВИС И КОНФИГИ:${NC}"
     echo -e "  5) Обновить ключи CloudFlare"
@@ -114,17 +113,17 @@ while true; do
     
     read -p " Выберите пункт: " choice
     case $choice in
-        1) # Упрощенная установка из v2.9
+        1) # Установка
            apt update && apt install -y wget unzip curl
            V=$(curl -s https://api.github.com/repos/xjasonlyu/tun2socks/releases/latest | grep tag_name | cut -d '"' -f 4)
            wget -q "https://github.com/xjasonlyu/tun2socks/releases/download/$V/tun2socks-linux-amd64.zip" -O t2s.zip
            unzip -o t2s.zip && mv tun2socks-linux-amd64 /usr/local/bin/tun2socks && chmod 755 /usr/local/bin/tun2socks; rm t2s.zip
            wget -q https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -O /usr/local/bin/wgcf && chmod 755 /usr/local/bin/wgcf
            mkdir -p /etc/WarpGo && cd /etc/WarpGo && /usr/local/bin/wgcf register --accept-tos && /usr/local/bin/wgcf generate
-           # Создаем сервис заново
+           
            cat <<EOF > /etc/systemd/system/tun2socks.service
 [Unit]
-Description=tun2socks
+Description=tun2socks for WarpGo
 After=network.target
 [Service]
 ExecStart=/usr/local/bin/tun2socks -device $TUN_DEV -proxy socks5://127.0.0.1:$WARP_PORT -interface $MAIN_IFACE
