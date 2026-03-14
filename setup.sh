@@ -130,19 +130,19 @@ EOF
     systemctl daemon-reload && systemctl enable tun2socks && systemctl start tun2socks
     routing_up
     echo -e "${GREEN}Установка завершена!${NC}"
-    read -p "Нажмите Enter..."
+    read -p "Нажмите Enter для возврата..."
 }
 
 # --- ОБНОВЛЕНИЕ ---
 check_update() {
-    echo -e "${YELLOW}Проверка...${NC}"
+    echo -e "${YELLOW}Проверка обновлений...${NC}"
     curl -sL "$GITHUB_RAW" -o /tmp/WarpGo_upd.sh
     if ! diff -q "$LOCAL_PATH" /tmp/WarpGo_upd.sh > /dev/null; then
         echo -e "${CYAN}Найдена новая версия!${NC}"
         read -p "Обновить? (y/n): " confirm
         if [[ $confirm == "y" ]]; then
             mv /tmp/WarpGo_upd.sh "$LOCAL_PATH" && chmod +x "$LOCAL_PATH"
-            echo -e "${GREEN}Обновлено. Перезапустите WarpGo.${NC}"
+            echo -e "${GREEN}WarpGo обновлен. Перезапустите его.${NC}"
             exit 0
         fi
     else
@@ -151,7 +151,7 @@ check_update() {
     fi
 }
 
-# --- МЕНЮ ---
+# --- ГЛАВНЫЙ ЦИКЛ МЕНЮ ---
 while true; do
     clear
     echo -e "${CYAN}═══ WarpGo v3.1 ═══${NC}"
@@ -172,16 +172,17 @@ while true; do
         1) install_all ;;
         2) routing_up ;;
         3) routing_down ;;
-        4) echo '{"protocol": "socks","settings": {"servers": [{ "address": "127.0.0.1", "port": 40000 }]},"tag": "warp"}' && read -p "Enter..." ;;
+        4) echo '{"protocol": "socks","settings": {"servers": [{ "address": "127.0.0.1", "port": 40000 }]},"tag": "warp"}' && read -p "Нажмите Enter..." ;;
         5) register_warp ;;
         6) manage_logs ;;
         11) 
             systemctl stop tun2socks && systemctl disable tun2socks
-            rm /etc/systemd/system/tun2socks.service /usr/local/bin/tun2socks /usr/local/bin/wgcf
+            rm -f /etc/systemd/system/tun2socks.service /usr/local/bin/tun2socks /usr/local/bin/wgcf
             rm -rf /etc/WarpGo
             routing_down
-            echo "Удалено." && sleep 2 ;;
+            echo "Все компоненты удалены." && sleep 2 ;;
         12) check_update ;;
         0) exit 0 ;;
+        *) echo -e "${RED}Неверный пункт!${NC}" && sleep 1 ;;
     esac
 done
