@@ -120,4 +120,8 @@ while true; do
         3) fix_warp_daemon; warp-cli --accept-tos status; read -p "Enter..." ;;
         4) echo -e "${YELLOW}Логи Tun2Socks:${NC}"; tail -n 20 /tmp/tun2socks.log; echo -e "\n${YELLOW}Статус службы WARP:${NC}"; systemctl status warp-svc --no-pager; read -p "Enter..." ;;
         5) curl -sL "$GITHUB_RAW/menu.sh" -o /usr/local/bin/warp && chmod +x /usr/local/bin/warp
-           curl -sL "$GITHUB_RAW/setup.sh" -o /usr/local/bin/warp-setup && chmod +x /usr/local
+           curl -sL "$GITHUB_RAW/setup.sh" -o /usr/local/bin/warp-setup && chmod +x /usr/local/bin/warp-setup
+           echo -e "${GREEN}Обновлено!${NC}"; exit 0 ;;
+        0) exit 0 ;;
+    esac
+done
