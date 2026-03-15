@@ -214,7 +214,7 @@ proxy_ip() {
 }
 
 overlay_active() {
-    ip rule show 2>/dev/null | grep -q "fwmark ${MARK_ID} .* lookup ${TABLE_ID}"
+    ip rule show 2>/dev/null | grep -Eq "lookup ${TABLE_ID}($| )"
 }
 
 legacy_process_hint() {
@@ -238,7 +238,7 @@ status_cmd() {
     echo
     echo -e "${CYAN}ROUTING${NC}"
     if overlay_active; then
-        ip rule show 2>/dev/null | grep -E "fwmark ${MARK_ID}|lookup ${TABLE_ID}" || true
+        ip rule show 2>/dev/null | grep -E "lookup ${TABLE_ID}($| )" || true
         ip route show table "$TABLE_ID" 2>/dev/null || true
     else
         echo "overlay inactive"
