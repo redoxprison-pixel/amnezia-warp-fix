@@ -110,6 +110,12 @@ get_warp_status_text() {
     fi
 }
 
+registration_missing() {
+    local status
+    status="$(run_warp status || true)"
+    echo "$status" | grep -qi "registration missing"
+}
+
 proxy_port_cmd() {
     run_warp set-proxy-port "$SOCKS_PORT" || run_warp proxy port "$SOCKS_PORT"
 }
@@ -136,27 +142,31 @@ ensure_warp_service() {
 }
 
 ensure_warp_registration() {
-    local status
-    status="$(run_warp status || true)"
-    if ! echo "$status" | grep -qi "registration missing"; then
+    if ! registration_missing; then
         return 0
     fi
 
     ensure_warp_service
     run_warp disconnect || true
 
-    if run_warp registration new; then
+    run_warp registration new || true
+    sleep 2
+    if ! registration_missing; then
         return 0
     fi
 
     restart_warp_daemon
-    if run_warp registration new; then
+    run_warp registration new || true
+    sleep 2
+    if ! registration_missing; then
         return 0
     fi
 
     reset_warp_registration_state
     restart_warp_daemon
-    run_warp registration new
+    run_warp registration new || true
+    sleep 2
+    ! registration_missing
 }
 
 configure_warp_proxy() {
