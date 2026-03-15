@@ -3,13 +3,13 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.0"
-INSTALL_BIN="/usr/local/bin/warp"
+APP_VERSION="2.1.1"
+INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="/var/log/warp-manager.log"
 DEFAULT_PORT=40000
-RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/main}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
