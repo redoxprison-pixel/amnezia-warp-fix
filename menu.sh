@@ -2,72 +2,84 @@
 
 # Цвета
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-PORT=40000
-TUN_IP="10.0.0.1"
-TUN_NET="10.0.0.0/24"
 
-# 1. Установка Tun2Socks
-install_tun2socks() {
-    echo -e "${YELLOW}Установка Tun2Socks...${NC}"
-    ARCH=$(uname -m)
-    URL=""
-    if [[ "$ARCH" == "x86_64" ]]; then
-        URL="https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip"
-    elif [[ "$ARCH" == "aarch64" ]]; then
-        URL="https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-arm64.zip"
+# Параметры
+PORT=40000
+TUN_DEV="tun0"
+SSH_PORT=$(ss -tlnp | grep sshd | awk '{print $4}' | awk -F: '{print $NF}' | head -n1 || echo 22)
+
+# Функция защиты SSH
+setup_ssh_safety() {
+    echo -e "${YELLOW}Настройка защиты SSH (порт $SSH_PORT)...${NC}"
+    # Получаем IP шлюза и интерфейс провайдера
+    GATEWAY=$(ip route show default | awk '/default/ {print $3}')
+    INTERFACE=$(ip route show default | awk '/default/ {print $5}')
+    
+    # Прямой маршрут для твоего текущего подключения, чтобы не вылететь
+    CURRENT_IP=$(echo $SSH_CLIENT | awk '{print $1}')
+    if [ ! -z "$CURRENT_IP" ]; then
+        ip route add $CURRENT_IP via $GATEWAY dev $INTERFACE > /dev/null 2>&1
     fi
     
-    apt install unzip -y > /dev/null
-    curl -L "$URL" -o /tmp/t2s.zip
-    unzip -o /tmp/t2s.zip -d /tmp/
-    mv /tmp/tun2socks-linux-* /usr/local/bin/tun2socks
-    chmod +x /usr/local/bin/tun2socks
-    echo -e "${GREEN}Tun2Socks установлен.${NC}"
+    # Общее правило: трафик SSH всегда идет через основной шлюз
+    iptables -t mangle -A OUTPUT -p tcp --sport $SSH_PORT -j ACCEPT
+    echo -e "${GREEN}SSH защищен.${NC}"
 }
 
-# 2. Создание интерфейса и маршрутизация
 up_tun() {
-    echo -e "${YELLOW}Поднятие интерфейса tun0...${NC}"
-    
-    # Создаем виртуальную сетевую карту
-    ip tuntap add dev tun0 mode tun
-    ip addr add $TUN_IP/24 dev tun0
-    ip link set tun0 up
+    echo -e "${YELLOW}Очистка ресурсов...${NC}"
+    killall tun2socks > /dev/null 2>&1
+    ip link delete $TUN_DEV > /dev/null 2>&1
+    sleep 1
 
-    # Запускаем tun2socks в фоне
-    nohup /usr/local/bin/tun2socks -proxy socks5://127.0.0.1:$PORT -interface tun0 > /dev/null 2>&1 &
+    setup_ssh_safety
+
+    echo -e "${YELLOW}Запуск Tun2Socks на $TUN_DEV...${NC}"
     
-    # Настройка маршрутизации (чтобы не убить SSH)
-    # Создаем отдельную таблицу 100 для WARP
-    ip rule add from $TUN_NET lookup 100
-    ip route add default dev tun0 table 100
+    # 1. Создаем интерфейс
+    ip tuntap add dev $TUN_DEV mode tun
+    ip addr add 10.0.0.1/24 dev $TUN_DEV
+    ip link set $TUN_DEV up
+
+    # 2. Запускаем tun2socks (используем логи для отладки)
+    nohup tun2socks -proxy socks5://127.0.0.1:$PORT -interface $TUN_DEV -loglevel info > /var/log/tun2socks.log 2>&1 &
+    sleep 2
+
+    # 3. Маршрутизация через таблицу 100
+    # Мы не меняем основной шлюз системы (default), чтобы не потерять SSH.
+    # Мы создаем маршрут только для тех, кто явно хочет идти через tun0.
+    ip route add default dev $TUN_DEV table 100
+    ip rule add from 10.0.0.0/24 lookup 100
     
-    # Трюк: направляем только определенный трафик или весь, кроме SSH
-    # Для начала просто создадим интерфейс.
-    echo -e "${GREEN}Интерфейс tun0 готов.${NC}"
+    # Тестовый пинг через туннель
+    echo -e "${CYAN}Проверка туннеля...${NC}"
+    if ping -I $TUN_DEV -c 2 8.8.8.8 > /dev/null 2>&1; then
+        echo -e "${GREEN}УСПЕХ: Туннель работает!${NC}"
+    else
+        echo -e "${RED}ОШИБКА: Пинг через туннель не прошел.${NC}"
+        echo -e "Проверь: warp-cli status"
+    fi
 }
 
-# 3. Полная очистка
 down_tun() {
-    echo -e "${YELLOW}Удаление интерфейса...${NC}"
-    killall tun2socks 2>/dev/null
-    ip link delete tun0 2>/dev/null
-    ip rule del from $TUN_NET lookup 100 2>/dev/null
-    echo -e "${GREEN}Очищено.${NC}"
+    echo -e "${YELLOW}Отключение туннеля...${NC}"
+    killall tun2socks > /dev/null 2>&1
+    ip rule del lookup 100 > /dev/null 2>&1
+    ip route flush table 100 > /dev/null 2>&1
+    ip link delete $TUN_DEV > /dev/null 2>&1
+    echo -e "${GREEN}Готово. Система в исходном состоянии.${NC}"
 }
 
-# --- МЕНЮ ---
+# Меню
 clear
-echo -e "${CYAN}Управление Tun2Socks + WARP${NC}"
-echo -e "1) Полная установка (Tun2Socks + Маршруты)"
-echo -e "2) Поднять tun0"
-echo -e "3) Положить tun0"
+echo -e "${CYAN}=== Tun2Socks Safe Manager ===${NC}"
+echo -e "1) Поднять туннель (с защитой SSH)"
+echo -e "2) Положить туннель"
 echo -e "0) Выход"
 read -p "Выбор: " ch
 
 case $ch in
-    1) install_tun2socks && up_tun ;;
-    2) up_tun ;;
-    3) down_tun ;;
-    0) exit 0 ;;
+    1) up_tun ;;
+    2) down_tun ;;
+    *) exit 0 ;;
 esac
