@@ -31,7 +31,7 @@ detect_pkg_manager() {
 install_packages() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y curl ca-certificates gnupg lsb-release iproute2 iptables procps badvpn || true
+    apt-get install -y curl ca-certificates gnupg lsb-release iproute2 iptables procps || true
 }
 
 install_warp_repo() {
@@ -62,21 +62,8 @@ write_default_config() {
 
     cat >"$CONFIG_PATH" <<'EOF'
 PORT="40000"
-WARP_TUN="tun-warp"
-TABLE_ID="51820"
-MARK_ID="51820"
-RULE_PRIORITY="10020"
-CLIENT_IF="awg0"
-CLIENT_SUBNET=""
-CHAIN_NAME="AMNEZIA_WARP"
-LOG_FILE="/var/log/amnezia-warp-tun2socks.log"
+LOG_FILE="/var/log/amnezia-warp.log"
 EOF
-}
-
-post_checks() {
-    if ! command -v tun2socks >/dev/null 2>&1 && ! command -v badvpn-tun2socks >/dev/null 2>&1 && [ ! -x /usr/local/bin/tun2socks ]; then
-        echo -e "${YELLOW}WARN:${NC} tun2socks not found. Install tun2socks manually or ensure badvpn-tun2socks is available."
-    fi
 }
 
 main() {
@@ -86,13 +73,13 @@ main() {
     install_warp_repo
     install_menu
     write_default_config
-    post_checks
 
     echo -e "${GREEN}OK:${NC} installed"
     echo "Config: $CONFIG_PATH"
     echo "Run:"
     echo "  sudo warp"
-    echo "  sudo warp configure"
+    echo "  sudo warp enable"
+    echo "  sudo warp 3x-ui"
 }
 
 main "$@"
