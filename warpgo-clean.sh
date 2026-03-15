@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.3"
+APP_VERSION="2.1.4"
 INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -126,6 +126,24 @@ registration_missing() {
     echo "$status" | grep -qi "registration missing"
 }
 
+daemon_starting() {
+    local status
+    status="$(run_warp status || true)"
+    echo "$status" | grep -qi "daemon startup"
+}
+
+wait_for_registration_ready() {
+    local attempts="${1:-15}"
+    while [ "$attempts" -gt 0 ]; do
+        if ! registration_missing; then
+            return 0
+        fi
+        sleep 2
+        attempts=$((attempts - 1))
+    done
+    return 1
+}
+
 proxy_port_cmd() {
     run_warp set-proxy-port "$SOCKS_PORT" || run_warp proxy port "$SOCKS_PORT"
 }
@@ -185,23 +203,20 @@ ensure_warp_registration() {
     run_warp disconnect || true
 
     run_warp registration new || true
-    sleep 2
-    if ! registration_missing; then
+    if wait_for_registration_ready 20; then
         return 0
     fi
 
     restart_warp_daemon
     run_warp registration new || true
-    sleep 2
-    if ! registration_missing; then
+    if wait_for_registration_ready 20; then
         return 0
     fi
 
     reset_warp_registration_state
     restart_warp_daemon
     run_warp registration new || true
-    sleep 2
-    if ! registration_missing; then
+    if wait_for_registration_ready 20; then
         return 0
     fi
 
