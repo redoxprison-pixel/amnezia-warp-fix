@@ -1,99 +1,107 @@
 #!/bin/bash
 
-# Цвета
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; WHITE='\033[1;37m'; NC='\033[0m'
-
+# --- НАСТРОЙКИ ---
+GITHUB_USER="ТВОЙ_ЛОГИН"
+GITHUB_REPO="ТВОЙ_РЕПО"
 PORT=40000
 TUN_DEV="tun0"
 TABLE_ID=100
 MARK_ID=51820
 
+# Цвета
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; WHITE='\033[1;37m'; NC='\033[0m'
+
 draw_logo() {
     clear
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "  ${WHITE}WARP MANAGER v6.0 — Official Engine + Tun2Socks${NC}"
-    echo -e "  ${CYAN}Защита SSH: Активна (FWMARK)${NC}"
+    echo -e "  ${WHITE}WARP MANAGER v6.1 PRO — Amnezia Edition${NC}"
+    echo -e "  ${CYAN}Защита SSH: Активна (FWMARK + IPTABLES)${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
 }
 
 check_status() {
     if pgrep -x "tun2socks" > /dev/null; then
         TUN_STATUS="${GREEN}● ТУННЕЛЬ ПОДНЯТ${NC}"
+        T_IP=$(curl -s4 --interface $TUN_DEV --max-time 2 eth0.me || echo "Ошибка")
     else
         TUN_STATUS="${RED}○ ТУННЕЛЬ ВЫКЛЮЧЕН${NC}"
+        T_IP="N/A"
     fi
-    
-    # Проверка IP через туннель
-    T_IP=$(curl -s4 --interface $TUN_DEV --max-time 2 eth0.me || echo "N/A")
 }
 
 up_tun() {
-    echo -e "${YELLOW}Очистка старых ресурсов...${NC}"
+    echo -e "${YELLOW}Очистка старых правил...${NC}"
     down_tun > /dev/null 2>&1
     sleep 1
 
-    echo -e "${YELLOW}Настройка правил исключения SSH...${NC}"
-    # 1. Помечаем весь трафик меткой 1
-    # 2. Но трафик SSH (порт 22) оставляем без метки (или помечаем иначе)
+    echo -e "${YELLOW}Настройка исключений SSH...${NC}"
+    iptables -t mangle -F
+    # Весь трафик SSH идет мимо туннеля (порт 22)
     iptables -t mangle -A OUTPUT -p tcp --sport 22 -j ACCEPT
+    iptables -t mangle -A OUTPUT -p tcp --dport 22 -j ACCEPT
+    # Маркируем всё остальное для таблицы 100
     iptables -t mangle -A OUTPUT -j MARK --set-mark $MARK_ID
 
-    echo -e "${YELLOW}Запуск интерфейса $TUN_DEV...${NC}"
+    echo -e "${YELLOW}Поднятие интерфейса $TUN_DEV...${NC}"
     ip tuntap add dev $TUN_DEV mode tun
     ip addr add 10.0.0.1/24 dev $TUN_DEV
     ip link set $TUN_DEV up
 
-    # Запуск Tun2Socks
-    nohup tun2socks -proxy socks5://127.0.0.1:$PORT -interface $TUN_DEV > /dev/null 2>&1 &
-    sleep 2
+    echo -e "${YELLOW}Запуск Tun2Socks (DNS 8.8.8.8)...${NC}"
+    nohup tun2socks -proxy socks5://127.0.0.1:$PORT -interface $TUN_DEV -dns 8.8.8.8 > /tmp/tun2socks.log 2>&1 &
+    sleep 3
 
-    echo -e "${YELLOW}Настройка маршрутизации (Таблица $TABLE_ID)...${NC}"
+    echo -e "${YELLOW}Маршрутизация...${NC}"
     ip route add default dev $TUN_DEV table $TABLE_ID
-    # Направляем в таблицу 100 только помеченный трафик
     ip rule add fwmark $MARK_ID lookup $TABLE_ID
     
-    # Чтобы сам сервер (local process) тоже ходил в туннель
-    ip route add default dev $TUN_DEV table $TABLE_ID
-    
-    echo -e "${GREEN}Готово! Проверь доступ.${NC}"
+    # Чтобы сам Tun2Socks мог достучаться до 127.0.0.1 (локальный выход)
+    ip route add 127.0.0.1 dev lo table $TABLE_ID 2>/dev/null
+
+    echo -e "${GREEN}Готово!${NC}"
     sleep 2
 }
 
 down_tun() {
-    echo -e "${YELLOW}Сброс всех настроек...${NC}"
+    echo -e "${YELLOW}Отключение и очистка...${NC}"
     killall tun2socks > /dev/null 2>&1
     ip rule del fwmark $MARK_ID lookup $TABLE_ID > /dev/null 2>&1
     ip route flush table $TABLE_ID > /dev/null 2>&1
     ip link delete $TUN_DEV > /dev/null 2>&1
     iptables -t mangle -F
     echo -e "${GREEN}Система очищена.${NC}"
-    sleep 2
+    sleep 1
 }
 
 while true; do
     draw_logo
     check_status
     echo -e "  Статус: $TUN_STATUS"
-    echo -e "  IP в туннеле: ${GREEN}$T_IP${NC}"
+    echo -e "  IP через WARP: ${GREEN}$T_IP${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "  1) ${GREEN}ПОДНЯТЬ ТУННЕЛЬ${NC} (Весь трафик в WARP)"
-    echo -e "  2) ${RED}ОТКЛЮЧИТЬ ТУННЕЛЬ${NC} (Вернуть как было)"
-    echo -e "  3) Логи Tun2Socks"
-    echo -e "  4) Обновить скрипт с GitHub"
-    echo -e "  0) Выход"
+    echo -e "  ${WHITE}1)${NC} ${GREEN}ПОДНЯТЬ ТУННЕЛЬ${NC} (Весь трафик в WARP)"
+    echo -e "  ${WHITE}2)${NC} ${RED}ОТКЛЮЧИТЬ ТУННЕЛЬ${NC}"
+    echo -e "  ${WHITE}3)${NC} Проверить статус WARP-CLI"
+    echo -e "  ${WHITE}4)${NC} ${YELLOW}ОБНОВИТЬ СКРИПТ С GITHUB${NC}"
+    echo -e "  ${WHITE}0)${NC} Выход"
     echo -e "${CYAN}──────────────────────────────────────────────────────────────${NC}"
     read -p " Выберите действие: " choice
 
     case $choice in
         1) up_tun ;;
         2) down_tun ;;
-        3) journalctl -xe | grep tun2socks | tail -n 20; read -p "Enter..." ;;
+        3) warp-cli status; read -p "Enter..." ;;
         4) 
-            echo "Обновление..."
-            curl -sL https://raw.githubusercontent.com/ТВОЙ_ЛОГИН/ТВОЙ_РЕПО/main/menu.sh -o /usr/local/bin/warp
-            chmod +x /usr/local/bin/warp
-            echo "Обновлено! Перезапусти команду warp."
-            exit 0 ;;
+            echo -e "${YELLOW}Обновление...${NC}"
+            URL="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/menu.sh"
+            if curl -sL "$URL" -o /usr/local/bin/warp; then
+                chmod +x /usr/local/bin/warp
+                echo -e "${GREEN}Успешно! Перезапустите команду 'warp'.${NC}"
+                exit 0
+            else
+                echo -e "${RED}Ошибка загрузки! Проверьте URL.${NC}"
+                read
+            fi ;;
         0) exit 0 ;;
     esac
 done
