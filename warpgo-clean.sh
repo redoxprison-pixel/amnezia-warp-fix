@@ -3,11 +3,12 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.2"
+APP_VERSION="2.1.3"
 INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="/var/log/warp-manager.log"
+DEBUG_FILE="/var/log/warp-manager-debug.log"
 DEFAULT_PORT=40000
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main}"
 
@@ -40,8 +41,17 @@ log_action() {
     echo "[$(date '+%F %T')] $*" >>"$LOG_FILE"
 }
 
+log_debug() {
+    mkdir -p "$(dirname "$DEBUG_FILE")"
+    echo "[$(date '+%F %T')] $*" >>"$DEBUG_FILE"
+}
+
 run_warp() {
     warp-cli --accept-tos "$@" 2>/dev/null
+}
+
+capture_cmd() {
+    "$@" 2>&1 || true
 }
 
 init_config() {
@@ -133,6 +143,31 @@ reset_warp_registration_state() {
     rm -f /run/cloudflare-warp/warp_service_ipc
 }
 
+show_warp_diagnostics() {
+    local status_text service_text journal_text
+    status_text="$(capture_cmd warp-cli --accept-tos status)"
+    service_text="$(capture_cmd systemctl status warp-svc --no-pager)"
+    journal_text="$(capture_cmd journalctl -u warp-svc -n 40 --no-pager)"
+
+    log_debug "warp-cli status:"
+    log_debug "$status_text"
+    log_debug "systemctl status warp-svc:"
+    log_debug "$service_text"
+    log_debug "journalctl -u warp-svc -n 40:"
+    log_debug "$journal_text"
+
+    echo ""
+    echo -e "${RED}Диагностика регистрации WARP:${NC}"
+    echo -e "${CYAN}--- warp-cli status ---${NC}"
+    echo "$status_text"
+    echo -e "${CYAN}--- systemctl status warp-svc ---${NC}"
+    echo "$service_text" | tail -n 20
+    echo -e "${CYAN}--- journalctl -u warp-svc ---${NC}"
+    echo "$journal_text" | tail -n 20
+    echo ""
+    echo -e "${YELLOW}Полный debug log:${NC} ${WHITE}${DEBUG_FILE}${NC}"
+}
+
 ensure_warp_service() {
     systemctl enable --now warp-svc >/dev/null 2>&1 || true
     sleep 2
@@ -166,7 +201,12 @@ ensure_warp_registration() {
     restart_warp_daemon
     run_warp registration new || true
     sleep 2
-    ! registration_missing
+    if ! registration_missing; then
+        return 0
+    fi
+
+    show_warp_diagnostics
+    return 1
 }
 
 configure_warp_proxy() {
