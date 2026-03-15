@@ -37,10 +37,31 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
+autodetect_client_if() {
+    local candidate=""
+
+    for candidate in awg0 amneziawg0 wg0; do
+        if ip link show "$candidate" >/dev/null 2>&1; then
+            echo "$candidate"
+            return
+        fi
+    done
+
+    candidate="$(ip -o link show | awk -F': ' '$2 ~ /^(awg|amneziawg|wg)[0-9]+$/ {print $2; exit}')"
+    if [ -n "$candidate" ]; then
+        echo "$candidate"
+    fi
+}
+
 load_config() {
     if [ -f "$CONFIG_PATH" ]; then
         # shellcheck disable=SC1090
         source "$CONFIG_PATH"
+    fi
+
+    if [ -z "${CLIENT_IF:-}" ] || ! ip link show "$CLIENT_IF" >/dev/null 2>&1; then
+        CLIENT_IF="$(autodetect_client_if || true)"
+        CLIENT_IF="${CLIENT_IF:-awg0}"
     fi
 }
 
@@ -66,6 +87,15 @@ detect_client_subnet() {
 
     CLIENT_SUBNET="$(ip -4 -o addr show dev "$CLIENT_IF" 2>/dev/null | awk '{print $4}' | head -n1 || true)"
     [ -n "$CLIENT_SUBNET" ] || die "set CLIENT_SUBNET in $CONFIG_PATH or assign IPv4 to $CLIENT_IF"
+}
+
+try_detect_client_subnet() {
+    if [ -z "${CLIENT_IF:-}" ]; then
+        return 1
+    fi
+
+    CLIENT_SUBNET="$(ip -4 -o addr show dev "$CLIENT_IF" 2>/dev/null | awk '{print $4}' | head -n1 || true)"
+    [ -n "$CLIENT_SUBNET" ]
 }
 
 find_tun2socks() {
@@ -183,6 +213,18 @@ proxy_ip() {
     fi
 }
 
+overlay_active() {
+    ip rule show 2>/dev/null | grep -q "fwmark ${MARK_ID} .* lookup ${TABLE_ID}"
+}
+
+legacy_process_hint() {
+    local proc_line=""
+    proc_line="$(pgrep -af 'tun2socks|badvpn-tun2socks' 2>/dev/null | head -n1 || true)"
+    if [ -n "$proc_line" ] && [[ "$proc_line" != *"$WARP_TUN"* ]]; then
+        echo "legacy tun2socks process detected"
+    fi
+}
+
 status_cmd() {
     load_config
 
@@ -195,14 +237,23 @@ status_cmd() {
     echo "PORT=$PORT"
     echo
     echo -e "${CYAN}ROUTING${NC}"
-    ip rule show | grep -E "fwmark ${MARK_ID}|lookup ${TABLE_ID}" || true
-    ip route show table "$TABLE_ID" || true
+    if overlay_active; then
+        ip rule show 2>/dev/null | grep -E "fwmark ${MARK_ID}|lookup ${TABLE_ID}" || true
+        ip route show table "$TABLE_ID" 2>/dev/null || true
+    else
+        echo "overlay inactive"
+    fi
     echo
     echo -e "${CYAN}PROXY IP${NC}"
     proxy_ip
     echo
     echo -e "${CYAN}PROCESS${NC}"
     pgrep -af 'tun2socks|badvpn-tun2socks' || echo "not running"
+    if [ -n "$(legacy_process_hint)" ]; then
+        echo
+        echo -e "${YELLOW}NOTE:${NC} $(legacy_process_hint)"
+        echo "Run 'warp down' once, then 'warp up' from this menu."
+    fi
 }
 
 up_cmd() {
@@ -214,6 +265,7 @@ up_cmd() {
     need_cmd warp-cli
     load_config
     detect_client_subnet
+    save_config
     apply_sysctls
     ensure_warp_proxy
     start_tun2socks
@@ -243,11 +295,13 @@ logs_cmd() {
 configure_cmd() {
     need_root
     load_config
+    try_detect_client_subnet || true
 
     local input=""
     read -r -p "Amnezia interface [$CLIENT_IF]: " input
     CLIENT_IF="${input:-$CLIENT_IF}"
 
+    try_detect_client_subnet || true
     read -r -p "Amnezia subnet [$CLIENT_SUBNET]: " input
     CLIENT_SUBNET="${input:-$CLIENT_SUBNET}"
 
@@ -256,6 +310,17 @@ configure_cmd() {
 
     save_config
     echo -e "${GREEN}OK:${NC} saved to $CONFIG_PATH"
+}
+
+auto_configure_cmd() {
+    need_root
+    load_config
+    detect_client_subnet
+    save_config
+    echo -e "${GREEN}OK:${NC} auto-detected config saved"
+    echo "CLIENT_IF=$CLIENT_IF"
+    echo "CLIENT_SUBNET=$CLIENT_SUBNET"
+    echo "PORT=$PORT"
 }
 
 update_cmd() {
@@ -282,11 +347,12 @@ render_menu() {
     echo -e " Proxy IP:  ${GREEN}$(proxy_ip)${NC}"
     echo -e "${CYAN}────────────────────────────────────────────${NC}"
     echo " 1) Configure"
-    echo " 2) Enable WARP overlay"
-    echo " 3) Disable WARP overlay"
-    echo " 4) Status"
-    echo " 5) Logs"
-    echo " 6) Update menu"
+    echo " 2) Auto-configure"
+    echo " 3) Enable WARP overlay"
+    echo " 4) Disable WARP overlay"
+    echo " 5) Status"
+    echo " 6) Logs"
+    echo " 7) Update menu"
     echo " 0) Exit"
     echo -e "${CYAN}────────────────────────────────────────────${NC}"
 }
@@ -297,11 +363,12 @@ interactive_menu() {
         read -r -p "Choice: " choice
         case "${choice:-}" in
             1) configure_cmd ;;
-            2) up_cmd ;;
-            3) down_cmd ;;
-            4) status_cmd ;;
-            5) logs_cmd ;;
-            6) update_cmd ;;
+            2) auto_configure_cmd ;;
+            3) up_cmd ;;
+            4) down_cmd ;;
+            5) status_cmd ;;
+            6) logs_cmd ;;
+            7) update_cmd ;;
             0) exit 0 ;;
             *) echo "Unknown choice" ;;
         esac
@@ -319,6 +386,7 @@ Usage:
   $0 status
   $0 logs
   $0 configure
+  $0 auto-configure
   $0 update
 EOF
 }
@@ -329,6 +397,7 @@ case "${1:-menu}" in
     status) status_cmd ;;
     logs) logs_cmd ;;
     configure) configure_cmd ;;
+    auto-configure) auto_configure_cmd ;;
     update) update_cmd ;;
     menu) interactive_menu ;;
     *) usage; exit 1 ;;
