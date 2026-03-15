@@ -2,14 +2,25 @@
 
 set -Eeuo pipefail
 
+APP_NAME="WARP Manager"
+APP_VERSION="2.1.0"
+INSTALL_BIN="/usr/local/bin/warp"
+CONFIG_DIR="/etc/warp-manager"
+CONFIG_FILE="$CONFIG_DIR/config"
+LOG_FILE="/var/log/warp-manager.log"
+DEFAULT_PORT=40000
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/main}"
-INSTALL_PATH="${INSTALL_PATH:-/usr/local/bin/amnezia-warp-menu}"
-CONFIG_PATH="${CONFIG_PATH:-/etc/amnezia-warp.conf}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
+
+SOCKS_PORT="$DEFAULT_PORT"
+MY_IP="N/A"
 
 die() {
     echo -e "${RED}ERROR:${NC} $*" >&2
@@ -20,66 +31,408 @@ need_root() {
     [ "${EUID}" -eq 0 ] || die "run as root"
 }
 
-detect_pkg_manager() {
-    if command -v apt-get >/dev/null 2>&1; then
-        PKG_MANAGER="apt"
-        return
-    fi
-    die "only Debian/Ubuntu with apt-get are supported"
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
-install_packages() {
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y curl ca-certificates gnupg lsb-release iproute2 iptables procps || true
+log_action() {
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "[$(date '+%F %T')] $*" >>"$LOG_FILE"
 }
 
-install_warp_repo() {
-    if command -v warp-cli >/dev/null 2>&1; then
+init_config() {
+    mkdir -p "$CONFIG_DIR"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat >"$CONFIG_FILE" <<EOF
+SOCKS_PORT="${DEFAULT_PORT}"
+EOF
+    fi
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    SOCKS_PORT="${SOCKS_PORT:-$DEFAULT_PORT}"
+}
+
+save_config_val() {
+    local key="$1" value="$2"
+    mkdir -p "$CONFIG_DIR"
+    touch "$CONFIG_FILE"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
+    else
+        echo "${key}=\"${value}\"" >>"$CONFIG_FILE"
+    fi
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+}
+
+get_my_ip() {
+    MY_IP="$(curl -4fsS --max-time 5 https://ifconfig.co 2>/dev/null || echo "N/A")"
+}
+
+get_warp_ip() {
+    curl -4fsS --max-time 8 --proxy "socks5h://127.0.0.1:${SOCKS_PORT}" https://ifconfig.co 2>/dev/null || echo "N/A"
+}
+
+is_warp_installed() {
+    command -v warp-cli >/dev/null 2>&1
+}
+
+is_warp_running() {
+    local st
+    st="$(warp-cli --accept-tos status 2>/dev/null || true)"
+    echo "$st" | grep -qi "connected" && ! echo "$st" | grep -qi "disconnected"
+}
+
+proxy_listening() {
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$SOCKS_PORT$"
+}
+
+get_warp_status_text() {
+    if ! is_warp_installed; then
+        echo "Не установлен"
         return
     fi
 
+    local status
+    status="$(warp-cli --accept-tos status 2>/dev/null || true)"
+    if echo "$status" | grep -qi "registration missing"; then
+        echo "Нет регистрации"
+    elif echo "$status" | grep -qi "connected"; then
+        echo "Подключён"
+    elif echo "$status" | grep -qi "disconnected"; then
+        echo "Отключён"
+    else
+        echo "Неизвестно"
+    fi
+}
+
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        OS_ID="${ID:-unknown}"
+        OS_VERSION="${VERSION_ID:-unknown}"
+        OS_CODENAME="${VERSION_CODENAME:-}"
+    else
+        OS_ID="unknown"
+        OS_VERSION="unknown"
+        OS_CODENAME=""
+    fi
+}
+
+check_deps() {
+    local missing=()
+    for cmd in curl gpg ss sed awk grep; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y curl ca-certificates gnupg iproute2 procps >/dev/null 2>&1
+    fi
+}
+
+install_self() {
+    if [ "$(readlink -f "$0" 2>/dev/null || echo "$0")" != "$INSTALL_BIN" ]; then
+        install -m 755 "$0" "$INSTALL_BIN"
+    fi
+}
+
+install_warp() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка Cloudflare WARP ━━━${NC}\n"
+
+    if is_warp_installed; then
+        echo -e "${YELLOW}WARP уже установлен.${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    detect_os
+    if [[ "$OS_ID" != "ubuntu" && "$OS_ID" != "debian" ]]; then
+        echo -e "${RED}Поддерживаются только Debian/Ubuntu.${NC}"
+        echo -e "${WHITE}Текущая ОС: ${YELLOW}${OS_ID} ${OS_VERSION}${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    echo -e "${YELLOW}[1/5]${NC} Установка зависимостей..."
+    check_deps
+
+    echo -e "${YELLOW}[2/5]${NC} Добавление репозитория Cloudflare..."
     install -d -m 755 /usr/share/keyrings
-    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" >/etc/apt/sources.list.d/cloudflare-client.list
-    apt-get update -y
-    apt-get install -y cloudflare-warp
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    local codename="$OS_CODENAME"
+    if [ -z "$codename" ]; then
+        codename="$(lsb_release -cs 2>/dev/null || echo "bookworm")"
+    fi
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${codename} main" >/etc/apt/sources.list.d/cloudflare-client.list
+
+    echo -e "${YELLOW}[3/5]${NC} Установка cloudflare-warp..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y cloudflare-warp >/dev/null 2>&1
+    is_warp_installed || die "cloudflare-warp install failed"
+
+    echo -e "${YELLOW}[4/5]${NC} Регистрация WARP..."
+    warp-cli --accept-tos register >/dev/null 2>&1 || warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+
+    echo -e "${YELLOW}[5/5]${NC} Настройка SOCKS5..."
+    warp-cli --accept-tos mode proxy >/dev/null 2>&1
+    warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1
+    warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    sleep 3
+
+    echo -e "${GREEN}WARP установлен.${NC}"
+    if proxy_listening; then
+        echo -e "${WHITE}SOCKS5: ${GREEN}127.0.0.1:${SOCKS_PORT}${NC}"
+        echo -e "${WHITE}WARP IP: ${GREEN}$(get_warp_ip)${NC}"
+    fi
+    log_action "INSTALL: warp installed on port ${SOCKS_PORT}"
+    read -r -p "Нажмите Enter..."
 }
 
-install_menu() {
+start_warp() {
+    if ! is_warp_installed; then
+        echo -e "\n${RED}WARP не установлен.${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    warp-cli --accept-tos mode proxy >/dev/null 2>&1
+    warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1
+    warp-cli --accept-tos connect >/dev/null 2>&1
+    sleep 3
+
+    if proxy_listening; then
+        echo -e "\n${GREEN}[OK] WARP proxy поднят.${NC}"
+        echo -e "${WHITE}SOCKS5: ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
+        echo -e "${WHITE}WARP IP: ${GREEN}$(get_warp_ip)${NC}"
+        log_action "START: warp connected"
+    else
+        echo -e "\n${RED}[ERROR] WARP proxy не поднялся.${NC}"
+    fi
+    read -r -p "Нажмите Enter..."
+}
+
+stop_warp() {
+    if ! is_warp_installed; then
+        echo -e "\n${RED}WARP не установлен.${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+    echo -e "\n${GREEN}[OK] WARP отключён.${NC}"
+    log_action "STOP: warp disconnected"
+    read -r -p "Нажмите Enter..."
+}
+
+show_status() {
+    clear
+    get_my_ip
+    echo -e "\n${CYAN}━━━ Статус WARP ━━━${NC}\n"
+    echo -e "  ${WHITE}Статус:      ${GREEN}$(get_warp_status_text)${NC}"
+    echo -e "  ${WHITE}Сервер IP:   ${GREEN}${MY_IP}${NC}"
+    echo -e "  ${WHITE}SOCKS5:      ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
+    echo -e "  ${WHITE}Proxy:       ${GREEN}$(proxy_listening && echo listening || echo not-listening)${NC}"
+    if proxy_listening; then
+        echo -e "  ${WHITE}WARP IP:     ${GREEN}$(get_warp_ip)${NC}"
+    fi
+    echo ""
+    warp-cli --accept-tos status 2>/dev/null || true
+    echo ""
+    read -r -p "Нажмите Enter..."
+}
+
+show_xui_json() {
+    clear
+    echo -e "\n${CYAN}━━━ Конфигурация для 3x-ui / Xray ━━━${NC}\n"
+    cat <<EOF
+{
+  "tag": "warp",
+  "protocol": "socks",
+  "settings": {
+    "servers": [
+      {
+        "address": "127.0.0.1",
+        "port": ${SOCKS_PORT}
+      }
+    ]
+  }
+}
+EOF
+    echo ""
+    cat <<'EOF'
+Пример routing rule:
+{
+  "outboundTag": "warp",
+  "domain": [
+    "geosite:openai",
+    "geosite:netflix",
+    "domain:chat.openai.com",
+    "domain:claude.ai"
+  ]
+}
+EOF
+    echo ""
+    echo -e "${YELLOW}Важно:${NC} режим WARP proxy нормально подходит для TCP-трафика 3x-ui."
+    echo -e "${YELLOW}UDP через этот режим ограничен самим warp-cli.${NC}"
+    echo ""
+    read -r -p "Нажмите Enter..."
+}
+
+rekey_warp() {
+    if ! is_warp_installed; then
+        echo -e "\n${RED}WARP не установлен.${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    echo -e "\n${YELLOW}Текущая регистрация будет удалена и создана заново.${NC}"
+    read -r -p "Продолжить? (y/n): " confirm
+    [ "$confirm" = "y" ] || return
+
+    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+    warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+    warp-cli --accept-tos register >/dev/null 2>&1 || warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+    warp-cli --accept-tos mode proxy >/dev/null 2>&1
+    warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1
+    warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    sleep 3
+
+    echo -e "\n${GREEN}[OK] Регистрация обновлена.${NC}"
+    [ "$(proxy_listening && echo yes || echo no)" = "yes" ] && echo -e "${WHITE}WARP IP: ${GREEN}$(get_warp_ip)${NC}"
+    log_action "REKEY: registration renewed"
+    read -r -p "Нажмите Enter..."
+}
+
+change_port() {
+    local new_port
+    echo -e "\n${WHITE}Текущий порт: ${GREEN}${SOCKS_PORT}${NC}"
+    while true; do
+        read -r -p "Новый порт (1024-65535): " new_port
+        if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 1024 && new_port <= 65535 )); then
+            break
+        fi
+        echo -e "${RED}Некорректный порт.${NC}"
+    done
+
+    save_config_val "SOCKS_PORT" "$new_port"
+    SOCKS_PORT="$new_port"
+
+    if is_warp_installed; then
+        warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1 || true
+    fi
+
+    echo -e "\n${GREEN}[OK] Порт изменён на ${SOCKS_PORT}.${NC}"
+    log_action "PORT: changed to ${SOCKS_PORT}"
+    read -r -p "Нажмите Enter..."
+}
+
+update_self() {
+    need_root
+    need_cmd curl
     local tmp
     tmp="$(mktemp)"
-    curl -fsSL "$RAW_BASE/menu.sh" -o "$tmp"
-    install -m 755 "$tmp" "$INSTALL_PATH"
-    ln -sf "$INSTALL_PATH" /usr/local/bin/warp
+    curl -fsSL "$RAW_BASE/warpgo-clean.sh" -o "$tmp" || die "failed to download update"
+    install -m 755 "$tmp" "$INSTALL_BIN"
     rm -f "$tmp"
+    echo -e "\n${GREEN}[OK] Скрипт обновлён.${NC}"
+    read -r -p "Нажмите Enter..."
 }
 
-write_default_config() {
-    if [ -f "$CONFIG_PATH" ]; then
-        return
-    fi
+full_uninstall() {
+    echo -e "\n${RED}Будет удалён WARP и конфиг менеджера.${NC}"
+    read -r -p "Удалить? (y/n): " confirm
+    [ "$confirm" = "y" ] || return
 
-    cat >"$CONFIG_PATH" <<'EOF'
-PORT="40000"
-LOG_FILE="/var/log/amnezia-warp.log"
-EOF
+    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+    warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+    apt-get remove -y cloudflare-warp >/dev/null 2>&1 || true
+    apt-get autoremove -y >/dev/null 2>&1 || true
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    rm -rf "$CONFIG_DIR"
+    rm -f "$LOG_FILE"
+    rm -f "$INSTALL_BIN"
+    echo -e "\n${GREEN}[OK] WARP Manager удалён.${NC}"
+    exit 0
 }
 
-main() {
+show_info() {
+    clear
+    echo -e "\n${CYAN}━━━ О скрипте ━━━${NC}\n"
+    echo -e "${WHITE}Схема работы:${NC}"
+    echo -e "  ${GREEN}Клиент 3x-ui/Xray${NC} -> ${CYAN}SOCKS5 127.0.0.1:${SOCKS_PORT}${NC} -> ${GREEN}Cloudflare WARP${NC}"
+    echo ""
+    echo -e "${WHITE}Что делает скрипт:${NC}"
+    echo -e "  1) Ставит cloudflare-warp"
+    echo -e "  2) Переключает WARP в режим SOCKS5 proxy"
+    echo -e "  3) Показывает готовый outbound для 3x-ui"
+    echo ""
+    read -r -p "Нажмите Enter..."
+}
+
+show_menu() {
+    while true; do
+        clear
+        get_my_ip
+        local status_text
+        status_text="$(get_warp_status_text)"
+
+        echo -e "${MAGENTA}******************************************************${NC}"
+        echo -e " ${WHITE}${APP_NAME} v${APP_VERSION}${NC}"
+        echo -e " ${WHITE}Server IP:${NC} ${GREEN}${MY_IP}${NC}"
+        echo -e " ${WHITE}WARP:${NC} ${GREEN}${status_text}${NC}"
+        echo -e " ${WHITE}SOCKS5:${NC} ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
+        echo -e "${MAGENTA}******************************************************${NC}"
+        echo -e " 1) ${GREEN}Установить WARP${NC}"
+        echo -e " 2) ${CYAN}Запустить WARP${NC}"
+        echo -e " 3) ${YELLOW}Остановить WARP${NC}"
+        echo -e " 4) ${WHITE}Статус${NC}"
+        echo -e " 5) ${CYAN}JSON для 3x-ui${NC}"
+        echo -e " 6) ${YELLOW}Перевыпуск ключа${NC}"
+        echo -e " 7) ${WHITE}Изменить порт SOCKS5${NC}"
+        echo -e " 8) ${CYAN}Обновить скрипт${NC}"
+        echo -e " 9) ${WHITE}Информация${NC}"
+        echo -e "10) ${RED}Удалить WARP Manager${NC}"
+        echo -e " 0) Выход"
+        echo -e "------------------------------------------------------"
+        read -r -p "Выбор: " choice
+        case "$choice" in
+            1) install_warp ;;
+            2) start_warp ;;
+            3) stop_warp ;;
+            4) show_status ;;
+            5) show_xui_json ;;
+            6) rekey_warp ;;
+            7) change_port ;;
+            8) update_self ;;
+            9) show_info ;;
+            10) full_uninstall ;;
+            0) exit 0 ;;
+        esac
+    done
+}
+
+run_startup() {
     need_root
-    detect_pkg_manager
-    install_packages
-    install_warp_repo
-    install_menu
-    write_default_config
-
-    echo -e "${GREEN}OK:${NC} installed"
-    echo "Config: $CONFIG_PATH"
-    echo "Run:"
-    echo "  sudo warp"
-    echo "  sudo warp enable"
-    echo "  sudo warp 3x-ui"
+    init_config
+    install_self
+    get_my_ip
+    show_menu
 }
 
-main "$@"
+case "${1:-}" in
+    install) need_root; init_config; install_self; install_warp ;;
+    start) need_root; init_config; start_warp ;;
+    stop) need_root; init_config; stop_warp ;;
+    status) need_root; init_config; show_status ;;
+    xui) need_root; init_config; show_xui_json ;;
+    rekey) need_root; init_config; rekey_warp ;;
+    port) need_root; init_config; change_port ;;
+    update) need_root; init_config; update_self ;;
+    uninstall) need_root; init_config; full_uninstall ;;
+    *) run_startup ;;
+esac
