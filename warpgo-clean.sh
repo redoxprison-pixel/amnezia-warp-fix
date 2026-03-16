@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.4"
+APP_VERSION="2.1.5"
 INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -132,6 +132,12 @@ daemon_starting() {
     echo "$status" | grep -qi "daemon startup"
 }
 
+api_mismatch() {
+    local status
+    status="$(run_warp status || true)"
+    echo "$status" | grep -qi "apimismatch"
+}
+
 wait_for_registration_ready() {
     local attempts="${1:-15}"
     while [ "$attempts" -gt 0 ]; do
@@ -194,6 +200,13 @@ ensure_warp_service() {
     fi
 }
 
+reinstall_warp_package() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y --reinstall cloudflare-warp >/dev/null 2>&1 || true
+    restart_warp_daemon
+}
+
 ensure_warp_registration() {
     if ! registration_missing; then
         return 0
@@ -218,6 +231,16 @@ ensure_warp_registration() {
     run_warp registration new || true
     if wait_for_registration_ready 20; then
         return 0
+    fi
+
+    if api_mismatch; then
+        log_action "REPAIR: detected ApiMismatch, reinstalling cloudflare-warp"
+        reinstall_warp_package
+        reset_warp_registration_state
+        run_warp registration new || true
+        if wait_for_registration_ready 25; then
+            return 0
+        fi
     fi
 
     show_warp_diagnostics
