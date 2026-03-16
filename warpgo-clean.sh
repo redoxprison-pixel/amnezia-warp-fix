@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.6"
+APP_VERSION="2.1.6.1"
 INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -11,6 +11,7 @@ LOG_FILE="/var/log/warp-manager.log"
 DEBUG_FILE="/var/log/warp-manager-debug.log"
 DEFAULT_PORT=40000
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main}"
+FALLBACK_WARP_VERSION="${FALLBACK_WARP_VERSION:-2025.10.186.0}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -207,6 +208,28 @@ reinstall_warp_package() {
     configure_warp_repo
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y --reinstall cloudflare-warp >/dev/null 2>&1 || true
+    restart_warp_daemon
+}
+
+package_version_available() {
+    apt-cache madison cloudflare-warp 2>/dev/null | awk '{print $3}' | grep -Fxq "$1"
+}
+
+install_warp_package_version() {
+    local version="$1"
+    export DEBIAN_FRONTEND=noninteractive
+    detect_os
+    ensure_supported_os
+    configure_warp_repo
+    apt-get update -y >/dev/null 2>&1 || true
+
+    if ! package_version_available "$version"; then
+        echo -e "${RED}Версия ${version} недоступна в APT-репозитории Cloudflare для ${OS_CODENAME}.${NC}"
+        echo -e "${YELLOW}Проверь apt-cache madison cloudflare-warp или попробуй другую fallback-версию.${NC}"
+        return 1
+    fi
+
+    apt-get install -y --allow-downgrades "cloudflare-warp=${version}" >/dev/null 2>&1 || return 1
     restart_warp_daemon
 }
 
@@ -521,6 +544,40 @@ full_uninstall() {
     exit 0
 }
 
+install_fallback_warp() {
+    clear
+    detect_os
+    ensure_supported_os
+    echo -e "\n${CYAN}━━━ Fallback установка Cloudflare WARP ━━━${NC}\n"
+    echo -e "${WHITE}Пробуем предыдущий stable release:${NC} ${GREEN}${FALLBACK_WARP_VERSION}${NC}"
+    echo ""
+
+    check_deps
+
+    if ! install_warp_package_version "$FALLBACK_WARP_VERSION"; then
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    echo -e "${YELLOW}[1/3]${NC} Подготовка сервиса warp-svc..."
+    ensure_warp_service
+    echo -e "${YELLOW}[2/3]${NC} Регистрация WARP..."
+    ensure_warp_registration || die "WARP registration failed on fallback version"
+    echo -e "${YELLOW}[3/3]${NC} Настройка SOCKS5 и подключение..."
+    configure_warp_proxy
+    run_warp connect >/dev/null 2>&1 || true
+    sleep 3
+
+    echo -e "\n${GREEN}[OK] Fallback-версия WARP установлена.${NC}"
+    echo -e "${WHITE}Версия пакета:${NC} ${GREEN}${FALLBACK_WARP_VERSION}${NC}"
+    if proxy_listening; then
+        echo -e "${WHITE}SOCKS5:${NC} ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
+        echo -e "${WHITE}WARP IP:${NC} ${GREEN}$(get_warp_ip)${NC}"
+    fi
+    log_action "FALLBACK: installed cloudflare-warp=${FALLBACK_WARP_VERSION}"
+    read -r -p "Нажмите Enter..."
+}
+
 show_info() {
     clear
     echo -e "\n${CYAN}━━━ О скрипте ━━━${NC}\n"
@@ -556,8 +613,9 @@ show_menu() {
         echo -e " 6) ${YELLOW}Перевыпуск ключа${NC}"
         echo -e " 7) ${WHITE}Изменить порт SOCKS5${NC}"
         echo -e " 8) ${CYAN}Обновить скрипт${NC}"
-        echo -e " 9) ${WHITE}Информация${NC}"
-        echo -e "10) ${RED}Удалить WARP Manager${NC}"
+        echo -e " 9) ${YELLOW}Fallback WARP ${FALLBACK_WARP_VERSION}${NC}"
+        echo -e "10) ${WHITE}Информация${NC}"
+        echo -e "11) ${RED}Удалить WARP Manager${NC}"
         echo -e " 0) Выход"
         echo -e "------------------------------------------------------"
         read -r -p "Выбор: " choice
@@ -570,8 +628,9 @@ show_menu() {
             6) rekey_warp ;;
             7) change_port ;;
             8) update_self ;;
-            9) show_info ;;
-            10) full_uninstall ;;
+            9) install_fallback_warp ;;
+            10) show_info ;;
+            11) full_uninstall ;;
             0) exit 0 ;;
         esac
     done
@@ -594,6 +653,7 @@ case "${1:-}" in
     rekey) need_root; init_config; rekey_warp ;;
     port) need_root; init_config; change_port ;;
     update) need_root; init_config; update_self ;;
+    fallback) need_root; init_config; install_fallback_warp ;;
     uninstall) need_root; init_config; full_uninstall ;;
     *) run_startup ;;
 esac
