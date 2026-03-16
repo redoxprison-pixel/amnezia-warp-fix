@@ -3,13 +3,14 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.0"
-INSTALL_BIN="/usr/local/bin/warp"
+APP_VERSION="2.1.6"
+INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="/var/log/warp-manager.log"
+DEBUG_FILE="/var/log/warp-manager-debug.log"
 DEFAULT_PORT=40000
-RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/main}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,6 +39,19 @@ need_cmd() {
 log_action() {
     mkdir -p "$(dirname "$LOG_FILE")"
     echo "[$(date '+%F %T')] $*" >>"$LOG_FILE"
+}
+
+log_debug() {
+    mkdir -p "$(dirname "$DEBUG_FILE")"
+    echo "[$(date '+%F %T')] $*" >>"$DEBUG_FILE"
+}
+
+run_warp() {
+    warp-cli --accept-tos "$@" 2>/dev/null
+}
+
+capture_cmd() {
+    "$@" 2>&1 || true
 }
 
 init_config() {
@@ -79,7 +93,7 @@ is_warp_installed() {
 
 is_warp_running() {
     local st
-    st="$(warp-cli --accept-tos status 2>/dev/null || true)"
+    st="$(run_warp status || true)"
     echo "$st" | grep -qi "connected" && ! echo "$st" | grep -qi "disconnected"
 }
 
@@ -94,7 +108,7 @@ get_warp_status_text() {
     fi
 
     local status
-    status="$(warp-cli --accept-tos status 2>/dev/null || true)"
+    status="$(run_warp status || true)"
     if echo "$status" | grep -qi "registration missing"; then
         echo "Нет регистрации"
     elif echo "$status" | grep -qi "connected"; then
@@ -104,6 +118,149 @@ get_warp_status_text() {
     else
         echo "Неизвестно"
     fi
+}
+
+registration_missing() {
+    local status
+    status="$(run_warp status || true)"
+    echo "$status" | grep -qi "registration missing"
+}
+
+daemon_starting() {
+    local status
+    status="$(run_warp status || true)"
+    echo "$status" | grep -qi "daemon startup"
+}
+
+api_mismatch() {
+    local status
+    status="$(run_warp status || true)"
+    echo "$status" | grep -qi "apimismatch"
+}
+
+wait_for_registration_ready() {
+    local attempts="${1:-15}"
+    while [ "$attempts" -gt 0 ]; do
+        if ! registration_missing; then
+            return 0
+        fi
+        sleep 2
+        attempts=$((attempts - 1))
+    done
+    return 1
+}
+
+proxy_port_cmd() {
+    run_warp set-proxy-port "$SOCKS_PORT" || run_warp proxy port "$SOCKS_PORT"
+}
+
+restart_warp_daemon() {
+    systemctl stop warp-svc >/dev/null 2>&1 || true
+    rm -f /run/cloudflare-warp/warp_service_ipc
+    systemctl start warp-svc >/dev/null 2>&1 || true
+    sleep 3
+}
+
+reset_warp_registration_state() {
+    rm -f /var/lib/cloudflare-warp/reg.json
+    rm -f /var/lib/cloudflare-warp/settings.json
+    rm -f /run/cloudflare-warp/warp_service_ipc
+}
+
+show_warp_diagnostics() {
+    local status_text service_text journal_text
+    status_text="$(capture_cmd warp-cli --accept-tos status)"
+    service_text="$(capture_cmd systemctl status warp-svc --no-pager)"
+    journal_text="$(capture_cmd journalctl -u warp-svc -n 40 --no-pager)"
+
+    log_debug "warp-cli status:"
+    log_debug "$status_text"
+    log_debug "systemctl status warp-svc:"
+    log_debug "$service_text"
+    log_debug "journalctl -u warp-svc -n 40:"
+    log_debug "$journal_text"
+
+    echo ""
+    echo -e "${RED}Диагностика регистрации WARP:${NC}"
+    echo -e "${CYAN}--- warp-cli status ---${NC}"
+    echo "$status_text"
+    echo -e "${CYAN}--- systemctl status warp-svc ---${NC}"
+    echo "$service_text" | tail -n 20
+    echo -e "${CYAN}--- journalctl -u warp-svc ---${NC}"
+    echo "$journal_text" | tail -n 20
+    echo ""
+    echo -e "${YELLOW}Полный debug log:${NC} ${WHITE}${DEBUG_FILE}${NC}"
+}
+
+ensure_warp_service() {
+    systemctl enable --now warp-svc >/dev/null 2>&1 || true
+    sleep 2
+    if ! systemctl is-active --quiet warp-svc; then
+        restart_warp_daemon
+    fi
+}
+
+reinstall_warp_package() {
+    export DEBIAN_FRONTEND=noninteractive
+    detect_os
+    ensure_supported_os
+    configure_warp_repo
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y --reinstall cloudflare-warp >/dev/null 2>&1 || true
+    restart_warp_daemon
+}
+
+ensure_warp_registration() {
+    if ! registration_missing; then
+        return 0
+    fi
+
+    ensure_warp_service
+    run_warp disconnect || true
+
+    run_warp registration new || true
+    if wait_for_registration_ready 20; then
+        return 0
+    fi
+
+    restart_warp_daemon
+    run_warp registration new || true
+    if wait_for_registration_ready 20; then
+        return 0
+    fi
+
+    reset_warp_registration_state
+    restart_warp_daemon
+    run_warp registration new || true
+    if wait_for_registration_ready 20; then
+        return 0
+    fi
+
+    if api_mismatch; then
+        log_action "REPAIR: detected ApiMismatch, reinstalling cloudflare-warp"
+        reinstall_warp_package
+        reset_warp_registration_state
+        run_warp registration new || true
+        if wait_for_registration_ready 25; then
+            return 0
+        fi
+    fi
+
+    show_warp_diagnostics
+    return 1
+}
+
+configure_warp_proxy() {
+    run_warp mode proxy || die "failed to switch WARP to proxy mode"
+    proxy_port_cmd || die "failed to set SOCKS5 port"
+}
+
+connect_warp() {
+    ensure_warp_service
+    ensure_warp_registration || die "failed to register WARP"
+    configure_warp_proxy
+    run_warp connect || die "failed to connect WARP"
+    sleep 3
 }
 
 detect_os() {
@@ -118,6 +275,23 @@ detect_os() {
         OS_VERSION="unknown"
         OS_CODENAME=""
     fi
+}
+
+ensure_supported_os() {
+    case "${OS_ID}:${OS_CODENAME}" in
+        debian:bullseye|debian:bookworm|debian:trixie|ubuntu:focal|ubuntu:jammy|ubuntu:noble)
+            return 0
+            ;;
+        *)
+            die "unsupported OS for current Cloudflare WARP packages: ${OS_ID} ${OS_VERSION} (${OS_CODENAME:-no-codename})"
+            ;;
+    esac
+}
+
+configure_warp_repo() {
+    install -d -m 755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${OS_CODENAME} main" >/etc/apt/sources.list.d/cloudflare-client.list
 }
 
 check_deps() {
@@ -142,13 +316,8 @@ install_warp() {
     clear
     echo -e "\n${CYAN}━━━ Установка Cloudflare WARP ━━━${NC}\n"
 
-    if is_warp_installed; then
-        echo -e "${YELLOW}WARP уже установлен.${NC}"
-        read -r -p "Нажмите Enter..."
-        return
-    fi
-
     detect_os
+    ensure_supported_os
     if [[ "$OS_ID" != "ubuntu" && "$OS_ID" != "debian" ]]; then
         echo -e "${RED}Поддерживаются только Debian/Ubuntu.${NC}"
         echo -e "${WHITE}Текущая ОС: ${YELLOW}${OS_ID} ${OS_VERSION}${NC}"
@@ -159,28 +328,24 @@ install_warp() {
     echo -e "${YELLOW}[1/5]${NC} Установка зависимостей..."
     check_deps
 
-    echo -e "${YELLOW}[2/5]${NC} Добавление репозитория Cloudflare..."
-    install -d -m 755 /usr/share/keyrings
-    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    local codename="$OS_CODENAME"
-    if [ -z "$codename" ]; then
-        codename="$(lsb_release -cs 2>/dev/null || echo "bookworm")"
+    echo -e "${YELLOW}[2/5]${NC} Установка пакета cloudflare-warp..."
+    if ! is_warp_installed; then
+        configure_warp_repo
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y cloudflare-warp >/dev/null 2>&1
     fi
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${codename} main" >/etc/apt/sources.list.d/cloudflare-client.list
-
-    echo -e "${YELLOW}[3/5]${NC} Установка cloudflare-warp..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y cloudflare-warp >/dev/null 2>&1
     is_warp_installed || die "cloudflare-warp install failed"
 
-    echo -e "${YELLOW}[4/5]${NC} Регистрация WARP..."
-    warp-cli --accept-tos register >/dev/null 2>&1 || warp-cli --accept-tos registration new >/dev/null 2>&1 || true
+    echo -e "${YELLOW}[3/5]${NC} Подготовка сервиса warp-svc..."
+    ensure_warp_service
 
-    echo -e "${YELLOW}[5/5]${NC} Настройка SOCKS5..."
-    warp-cli --accept-tos mode proxy >/dev/null 2>&1
-    warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1
-    warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    echo -e "${YELLOW}[4/5]${NC} Регистрация WARP..."
+    ensure_warp_registration || die "WARP registration failed"
+
+    echo -e "${YELLOW}[5/5]${NC} Настройка SOCKS5 и подключение..."
+    configure_warp_proxy
+    run_warp connect >/dev/null 2>&1 || true
     sleep 3
 
     echo -e "${GREEN}WARP установлен.${NC}"
@@ -199,9 +364,7 @@ start_warp() {
         return
     fi
 
-    warp-cli --accept-tos mode proxy >/dev/null 2>&1
-    warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1
-    warp-cli --accept-tos connect >/dev/null 2>&1
+    connect_warp
     sleep 3
 
     if proxy_listening; then
@@ -222,7 +385,7 @@ stop_warp() {
         return
     fi
 
-    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+    run_warp disconnect >/dev/null 2>&1 || true
     echo -e "\n${GREEN}[OK] WARP отключён.${NC}"
     log_action "STOP: warp disconnected"
     read -r -p "Нажмите Enter..."
@@ -240,7 +403,7 @@ show_status() {
         echo -e "  ${WHITE}WARP IP:     ${GREEN}$(get_warp_ip)${NC}"
     fi
     echo ""
-    warp-cli --accept-tos status 2>/dev/null || true
+    run_warp status || true
     echo ""
     read -r -p "Нажмите Enter..."
 }
@@ -293,12 +456,10 @@ rekey_warp() {
     read -r -p "Продолжить? (y/n): " confirm
     [ "$confirm" = "y" ] || return
 
-    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
-    warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
-    warp-cli --accept-tos register >/dev/null 2>&1 || warp-cli --accept-tos registration new >/dev/null 2>&1 || true
-    warp-cli --accept-tos mode proxy >/dev/null 2>&1
-    warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1
-    warp-cli --accept-tos connect >/dev/null 2>&1 || true
+    run_warp disconnect >/dev/null 2>&1 || true
+    run_warp registration delete >/dev/null 2>&1 || true
+    reset_warp_registration_state
+    connect_warp
     sleep 3
 
     echo -e "\n${GREEN}[OK] Регистрация обновлена.${NC}"
@@ -322,7 +483,7 @@ change_port() {
     SOCKS_PORT="$new_port"
 
     if is_warp_installed; then
-        warp-cli --accept-tos set-proxy-port "$SOCKS_PORT" >/dev/null 2>&1 || warp-cli --accept-tos proxy port "$SOCKS_PORT" >/dev/null 2>&1 || true
+        proxy_port_cmd >/dev/null 2>&1 || true
     fi
 
     echo -e "\n${GREEN}[OK] Порт изменён на ${SOCKS_PORT}.${NC}"
@@ -347,8 +508,8 @@ full_uninstall() {
     read -r -p "Удалить? (y/n): " confirm
     [ "$confirm" = "y" ] || return
 
-    warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
-    warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+    run_warp disconnect >/dev/null 2>&1 || true
+    run_warp registration delete >/dev/null 2>&1 || true
     apt-get remove -y cloudflare-warp >/dev/null 2>&1 || true
     apt-get autoremove -y >/dev/null 2>&1 || true
     rm -f /etc/apt/sources.list.d/cloudflare-client.list
