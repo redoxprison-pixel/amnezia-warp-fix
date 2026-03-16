@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 APP_NAME="WARP Manager"
-APP_VERSION="2.1.5"
+APP_VERSION="2.1.6"
 INSTALL_BIN="/usr/local/bin/warpgo"
 CONFIG_DIR="/etc/warp-manager"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -202,6 +202,9 @@ ensure_warp_service() {
 
 reinstall_warp_package() {
     export DEBIAN_FRONTEND=noninteractive
+    detect_os
+    ensure_supported_os
+    configure_warp_repo
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y --reinstall cloudflare-warp >/dev/null 2>&1 || true
     restart_warp_daemon
@@ -274,6 +277,23 @@ detect_os() {
     fi
 }
 
+ensure_supported_os() {
+    case "${OS_ID}:${OS_CODENAME}" in
+        debian:bullseye|debian:bookworm|debian:trixie|ubuntu:focal|ubuntu:jammy|ubuntu:noble)
+            return 0
+            ;;
+        *)
+            die "unsupported OS for current Cloudflare WARP packages: ${OS_ID} ${OS_VERSION} (${OS_CODENAME:-no-codename})"
+            ;;
+    esac
+}
+
+configure_warp_repo() {
+    install -d -m 755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${OS_CODENAME} main" >/etc/apt/sources.list.d/cloudflare-client.list
+}
+
 check_deps() {
     local missing=()
     for cmd in curl gpg ss sed awk grep; do
@@ -297,6 +317,7 @@ install_warp() {
     echo -e "\n${CYAN}━━━ Установка Cloudflare WARP ━━━${NC}\n"
 
     detect_os
+    ensure_supported_os
     if [[ "$OS_ID" != "ubuntu" && "$OS_ID" != "debian" ]]; then
         echo -e "${RED}Поддерживаются только Debian/Ubuntu.${NC}"
         echo -e "${WHITE}Текущая ОС: ${YELLOW}${OS_ID} ${OS_VERSION}${NC}"
@@ -309,13 +330,7 @@ install_warp() {
 
     echo -e "${YELLOW}[2/5]${NC} Установка пакета cloudflare-warp..."
     if ! is_warp_installed; then
-        install -d -m 755 /usr/share/keyrings
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        local codename="$OS_CODENAME"
-        if [ -z "$codename" ]; then
-            codename="$(lsb_release -cs 2>/dev/null || echo "bookworm")"
-        fi
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${codename} main" >/etc/apt/sources.list.d/cloudflare-client.list
+        configure_warp_repo
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y >/dev/null 2>&1
         apt-get install -y cloudflare-warp >/dev/null 2>&1
