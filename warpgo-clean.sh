@@ -1,439 +1,413 @@
-#!/usr/bin/env bash
+#!/bin/bash
+set -o pipefail
 
-set -Eeuo pipefail
+# ══════════════════════════════════════════════════════════════
+#  GoVPN Manager v1.0
+#  WARP · iptables cascade · 3x-ui/x-ui-pro · AmneziaWG
+#  Безопасная установка: бэкап → патч → валидация → rollback
+# ══════════════════════════════════════════════════════════════
 
-APP_NAME="WARP Manager"
-APP_VERSION="2.1.6.1"
-INSTALL_BIN="/usr/local/bin/warpgo"
-CONFIG_DIR="/etc/warp-manager"
-CONFIG_FILE="$CONFIG_DIR/config"
-LOG_FILE="/var/log/warp-manager.log"
-DEBUG_FILE="/var/log/warp-manager-debug.log"
-DEFAULT_PORT=40000
-RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main}"
-FALLBACK_WARP_VERSION="${FALLBACK_WARP_VERSION:-2025.10.186.0}"
+VERSION="1.0"
+SCRIPT_NAME="govpn"
+INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
+CONF_DIR="/etc/${SCRIPT_NAME}"
+CONF_FILE="${CONF_DIR}/config"
+ALIASES_FILE="${CONF_DIR}/aliases"
+BACKUP_DIR="${CONF_DIR}/backups"
+LOG_FILE="/var/log/${SCRIPT_NAME}.log"
+MONITOR_DIR="${CONF_DIR}/monitors"
+BOT_PID_FILE="/var/run/${SCRIPT_NAME}_bot.pid"
+MONITOR_PID_FILE="/var/run/${SCRIPT_NAME}_monitor.pid"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
+DEFAULT_WARP_PORT=40000
+WARP_SOCKS_PORT=""
+MY_IP=""
+IFACE=""
+BOT_TOKEN=""
+BOT_CHAT_ID=""
 
-SOCKS_PORT="$DEFAULT_PORT"
-MY_IP="N/A"
+RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
+YELLOW='\033[1;33m'; MAGENTA='\033[0;35m'; WHITE='\033[1;37m'
+BLUE='\033[0;34m'; NC='\033[0m'
 
-die() {
-    echo -e "${RED}ERROR:${NC} $*" >&2
-    exit 1
-}
-
-need_root() {
-    [ "${EUID}" -eq 0 ] || die "run as root"
-}
-
-need_cmd() {
-    command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
-}
+# ═══════════════════════════════════════════════════════════════
+#  LOGGING
+# ═══════════════════════════════════════════════════════════════
 
 log_action() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "[$(date '+%F %T')] $*" >>"$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
 }
 
-log_debug() {
-    mkdir -p "$(dirname "$DEBUG_FILE")"
-    echo "[$(date '+%F %T')] $*" >>"$DEBUG_FILE"
-}
-
-run_warp() {
-    warp-cli --accept-tos "$@" 2>/dev/null
-}
-
-capture_cmd() {
-    "$@" 2>&1 || true
-}
+# ═══════════════════════════════════════════════════════════════
+#  CONFIG
+# ═══════════════════════════════════════════════════════════════
 
 init_config() {
-    mkdir -p "$CONFIG_DIR"
-    if [ ! -f "$CONFIG_FILE" ]; then
-        cat >"$CONFIG_FILE" <<EOF
-SOCKS_PORT="${DEFAULT_PORT}"
-EOF
+    mkdir -p "$CONF_DIR" "$BACKUP_DIR" "$MONITOR_DIR"
+    touch "$ALIASES_FILE"
+    if [ ! -f "$CONF_FILE" ]; then
+        cat > "$CONF_FILE" <<'CONF'
+WARP_SOCKS_PORT="40000"
+BOT_TOKEN=""
+BOT_CHAT_ID=""
+CONF
     fi
-    # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
-    SOCKS_PORT="${SOCKS_PORT:-$DEFAULT_PORT}"
+    source "$CONF_FILE"
+    WARP_SOCKS_PORT="${WARP_SOCKS_PORT:-$DEFAULT_WARP_PORT}"
 }
 
 save_config_val() {
     local key="$1" value="$2"
-    mkdir -p "$CONFIG_DIR"
-    touch "$CONFIG_FILE"
-    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONFIG_FILE"
+    if grep -q "^${key}=" "$CONF_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CONF_FILE"
     else
-        echo "${key}=\"${value}\"" >>"$CONFIG_FILE"
+        echo "${key}=\"${value}\"" >> "$CONF_FILE"
     fi
-    # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
+    source "$CONF_FILE"
 }
 
-get_my_ip() {
-    MY_IP="$(curl -4fsS --max-time 5 https://ifconfig.co 2>/dev/null || echo "N/A")"
-}
+# ═══════════════════════════════════════════════════════════════
+#  SYSTEM CHECKS
+# ═══════════════════════════════════════════════════════════════
 
-get_warp_ip() {
-    curl -4fsS --max-time 8 --proxy "socks5h://127.0.0.1:${SOCKS_PORT}" https://ifconfig.co 2>/dev/null || echo "N/A"
-}
-
-is_warp_installed() {
-    command -v warp-cli >/dev/null 2>&1
-}
-
-is_warp_running() {
-    local st
-    st="$(run_warp status || true)"
-    echo "$st" | grep -qi "connected" && ! echo "$st" | grep -qi "disconnected"
-}
-
-proxy_listening() {
-    ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$SOCKS_PORT$"
-}
-
-get_warp_status_text() {
-    if ! is_warp_installed; then
-        echo "Не установлен"
-        return
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}[ERROR] Запустите скрипт с правами root!${NC}"; exit 1
     fi
-
-    local status
-    status="$(run_warp status || true)"
-    if echo "$status" | grep -qi "registration missing"; then
-        echo "Нет регистрации"
-    elif echo "$status" | grep -qi "connected"; then
-        echo "Подключён"
-    elif echo "$status" | grep -qi "disconnected"; then
-        echo "Отключён"
-    else
-        echo "Неизвестно"
-    fi
-}
-
-registration_missing() {
-    local status
-    status="$(run_warp status || true)"
-    echo "$status" | grep -qi "registration missing"
-}
-
-daemon_starting() {
-    local status
-    status="$(run_warp status || true)"
-    echo "$status" | grep -qi "daemon startup"
-}
-
-api_mismatch() {
-    local status
-    status="$(run_warp status || true)"
-    echo "$status" | grep -qi "apimismatch"
-}
-
-wait_for_registration_ready() {
-    local attempts="${1:-15}"
-    while [ "$attempts" -gt 0 ]; do
-        if ! registration_missing; then
-            return 0
-        fi
-        sleep 2
-        attempts=$((attempts - 1))
-    done
-    return 1
-}
-
-proxy_port_cmd() {
-    run_warp set-proxy-port "$SOCKS_PORT" || run_warp proxy port "$SOCKS_PORT"
-}
-
-restart_warp_daemon() {
-    systemctl stop warp-svc >/dev/null 2>&1 || true
-    rm -f /run/cloudflare-warp/warp_service_ipc
-    systemctl start warp-svc >/dev/null 2>&1 || true
-    sleep 3
-}
-
-reset_warp_registration_state() {
-    rm -f /var/lib/cloudflare-warp/reg.json
-    rm -f /var/lib/cloudflare-warp/settings.json
-    rm -f /run/cloudflare-warp/warp_service_ipc
-}
-
-show_warp_diagnostics() {
-    local status_text service_text journal_text
-    status_text="$(capture_cmd warp-cli --accept-tos status)"
-    service_text="$(capture_cmd systemctl status warp-svc --no-pager)"
-    journal_text="$(capture_cmd journalctl -u warp-svc -n 40 --no-pager)"
-
-    log_debug "warp-cli status:"
-    log_debug "$status_text"
-    log_debug "systemctl status warp-svc:"
-    log_debug "$service_text"
-    log_debug "journalctl -u warp-svc -n 40:"
-    log_debug "$journal_text"
-
-    echo ""
-    echo -e "${RED}Диагностика регистрации WARP:${NC}"
-    echo -e "${CYAN}--- warp-cli status ---${NC}"
-    echo "$status_text"
-    echo -e "${CYAN}--- systemctl status warp-svc ---${NC}"
-    echo "$service_text" | tail -n 20
-    echo -e "${CYAN}--- journalctl -u warp-svc ---${NC}"
-    echo "$journal_text" | tail -n 20
-    echo ""
-    echo -e "${YELLOW}Полный debug log:${NC} ${WHITE}${DEBUG_FILE}${NC}"
-}
-
-ensure_warp_service() {
-    systemctl enable --now warp-svc >/dev/null 2>&1 || true
-    sleep 2
-    if ! systemctl is-active --quiet warp-svc; then
-        restart_warp_daemon
-    fi
-}
-
-reinstall_warp_package() {
-    export DEBIAN_FRONTEND=noninteractive
-    detect_os
-    ensure_supported_os
-    configure_warp_repo
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y --reinstall cloudflare-warp >/dev/null 2>&1 || true
-    restart_warp_daemon
-}
-
-package_version_available() {
-    apt-cache madison cloudflare-warp 2>/dev/null | awk '{print $3}' | grep -Fxq "$1"
-}
-
-install_warp_package_version() {
-    local version="$1"
-    export DEBIAN_FRONTEND=noninteractive
-    detect_os
-    ensure_supported_os
-    configure_warp_repo
-    apt-get update -y >/dev/null 2>&1 || true
-
-    if ! package_version_available "$version"; then
-        echo -e "${RED}Версия ${version} недоступна в APT-репозитории Cloudflare для ${OS_CODENAME}.${NC}"
-        echo -e "${YELLOW}Проверь apt-cache madison cloudflare-warp или попробуй другую fallback-версию.${NC}"
-        return 1
-    fi
-
-    apt-get install -y --allow-downgrades "cloudflare-warp=${version}" >/dev/null 2>&1 || return 1
-    restart_warp_daemon
-}
-
-ensure_warp_registration() {
-    if ! registration_missing; then
-        return 0
-    fi
-
-    ensure_warp_service
-    run_warp disconnect || true
-
-    run_warp registration new || true
-    if wait_for_registration_ready 20; then
-        return 0
-    fi
-
-    restart_warp_daemon
-    run_warp registration new || true
-    if wait_for_registration_ready 20; then
-        return 0
-    fi
-
-    reset_warp_registration_state
-    restart_warp_daemon
-    run_warp registration new || true
-    if wait_for_registration_ready 20; then
-        return 0
-    fi
-
-    if api_mismatch; then
-        log_action "REPAIR: detected ApiMismatch, reinstalling cloudflare-warp"
-        reinstall_warp_package
-        reset_warp_registration_state
-        run_warp registration new || true
-        if wait_for_registration_ready 25; then
-            return 0
-        fi
-    fi
-
-    show_warp_diagnostics
-    return 1
-}
-
-configure_warp_proxy() {
-    run_warp mode proxy || die "failed to switch WARP to proxy mode"
-    proxy_port_cmd || die "failed to set SOCKS5 port"
-}
-
-connect_warp() {
-    ensure_warp_service
-    ensure_warp_registration || die "failed to register WARP"
-    configure_warp_proxy
-    run_warp connect || die "failed to connect WARP"
-    sleep 3
 }
 
 detect_os() {
     if [ -f /etc/os-release ]; then
-        # shellcheck disable=SC1091
         . /etc/os-release
-        OS_ID="${ID:-unknown}"
-        OS_VERSION="${VERSION_ID:-unknown}"
+        OS_ID="$ID"
+        OS_VERSION="${VERSION_ID:-}"
         OS_CODENAME="${VERSION_CODENAME:-}"
     else
         OS_ID="unknown"
-        OS_VERSION="unknown"
+        OS_VERSION=""
         OS_CODENAME=""
     fi
 }
 
-ensure_supported_os() {
-    case "${OS_ID}:${OS_CODENAME}" in
-        debian:bullseye|debian:bookworm|debian:trixie|ubuntu:focal|ubuntu:jammy|ubuntu:noble)
-            return 0
-            ;;
-        *)
-            die "unsupported OS for current Cloudflare WARP packages: ${OS_ID} ${OS_VERSION} (${OS_CODENAME:-no-codename})"
-            ;;
-    esac
+detect_interface() {
+    IFACE=$(ip route get 8.8.8.8 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+    if [ -z "$IFACE" ]; then
+        echo -e "${RED}[ERROR] Не удалось определить сетевой интерфейс!${NC}"
+        exit 1
+    fi
 }
 
-configure_warp_repo() {
-    install -d -m 755 /usr/share/keyrings
-    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${OS_CODENAME} main" >/etc/apt/sources.list.d/cloudflare-client.list
+get_my_ip() {
+    MY_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || \
+            curl -s4 --max-time 5 icanhazip.com 2>/dev/null || \
+            echo "N/A")
 }
 
 check_deps() {
     local missing=()
-    for cmd in curl gpg ss sed awk grep; do
-        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    for cmd in jq curl python3 iptables; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
-    if [ "${#missing[@]}" -gt 0 ]; then
+    dpkg -s iptables-persistent &>/dev/null 2>&1 || missing+=("iptables-persistent")
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${YELLOW}[*] Установка зависимостей: ${missing[*]}${NC}"
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y curl ca-certificates gnupg iproute2 procps >/dev/null 2>&1
+        if command -v apt-get &>/dev/null; then
+            apt-get update -y > /dev/null 2>&1
+            apt-get install -y jq curl python3 iptables iptables-persistent \
+                netfilter-persistent procps > /dev/null 2>&1
+        elif command -v dnf &>/dev/null; then
+            dnf install -y jq curl python3 iptables-services procps-ng > /dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y jq curl python3 iptables-services procps-ng > /dev/null 2>&1
+        else
+            echo -e "${RED}[ERROR] Неподдерживаемый пакетный менеджер!${NC}"; exit 1
+        fi
     fi
 }
 
-install_self() {
-    if [ "$(readlink -f "$0" 2>/dev/null || echo "$0")" != "$INSTALL_BIN" ]; then
-        install -m 755 "$0" "$INSTALL_BIN"
-    fi
-}
-
-install_warp() {
-    clear
-    echo -e "\n${CYAN}━━━ Установка Cloudflare WARP ━━━${NC}\n"
-
-    detect_os
-    ensure_supported_os
-    if [[ "$OS_ID" != "ubuntu" && "$OS_ID" != "debian" ]]; then
-        echo -e "${RED}Поддерживаются только Debian/Ubuntu.${NC}"
-        echo -e "${WHITE}Текущая ОС: ${YELLOW}${OS_ID} ${OS_VERSION}${NC}"
-        read -r -p "Нажмите Enter..."
-        return
-    fi
-
-    echo -e "${YELLOW}[1/5]${NC} Установка зависимостей..."
-    check_deps
-
-    echo -e "${YELLOW}[2/5]${NC} Установка пакета cloudflare-warp..."
-    if ! is_warp_installed; then
-        configure_warp_repo
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y cloudflare-warp >/dev/null 2>&1
-    fi
-    is_warp_installed || die "cloudflare-warp install failed"
-
-    echo -e "${YELLOW}[3/5]${NC} Подготовка сервиса warp-svc..."
-    ensure_warp_service
-
-    echo -e "${YELLOW}[4/5]${NC} Регистрация WARP..."
-    ensure_warp_registration || die "WARP registration failed"
-
-    echo -e "${YELLOW}[5/5]${NC} Настройка SOCKS5 и подключение..."
-    configure_warp_proxy
-    run_warp connect >/dev/null 2>&1 || true
-    sleep 3
-
-    echo -e "${GREEN}WARP установлен.${NC}"
-    if proxy_listening; then
-        echo -e "${WHITE}SOCKS5: ${GREEN}127.0.0.1:${SOCKS_PORT}${NC}"
-        echo -e "${WHITE}WARP IP: ${GREEN}$(get_warp_ip)${NC}"
-    fi
-    log_action "INSTALL: warp installed on port ${SOCKS_PORT}"
-    read -r -p "Нажмите Enter..."
-}
-
-start_warp() {
-    if ! is_warp_installed; then
-        echo -e "\n${RED}WARP не установлен.${NC}"
-        read -r -p "Нажмите Enter..."
-        return
-    fi
-
-    connect_warp
-    sleep 3
-
-    if proxy_listening; then
-        echo -e "\n${GREEN}[OK] WARP proxy поднят.${NC}"
-        echo -e "${WHITE}SOCKS5: ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
-        echo -e "${WHITE}WARP IP: ${GREEN}$(get_warp_ip)${NC}"
-        log_action "START: warp connected"
+prepare_system() {
+    # BBR + ip_forward (идемпотентно)
+    if grep -qE '^[[:space:]]*#?[[:space:]]*net\.ipv4\.ip_forward' /etc/sysctl.conf 2>/dev/null; then
+        sed -i 's/^#*\s*net\.ipv4\.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
     else
-        echo -e "\n${RED}[ERROR] WARP proxy не поднялся.${NC}"
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
     fi
-    read -r -p "Нажмите Enter..."
+    grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || \
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null || \
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p > /dev/null 2>&1
 }
 
-stop_warp() {
-    if ! is_warp_installed; then
-        echo -e "\n${RED}WARP не установлен.${NC}"
-        read -r -p "Нажмите Enter..."
-        return
+save_iptables() {
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save > /dev/null 2>&1
+    elif command -v service &>/dev/null && service iptables status &>/dev/null 2>&1; then
+        service iptables save > /dev/null 2>&1
     fi
-
-    run_warp disconnect >/dev/null 2>&1 || true
-    echo -e "\n${GREEN}[OK] WARP отключён.${NC}"
-    log_action "STOP: warp disconnected"
-    read -r -p "Нажмите Enter..."
 }
 
-show_status() {
+# ═══════════════════════════════════════════════════════════════
+#  CONFLICT CHECK
+# ═══════════════════════════════════════════════════════════════
+
+check_conflicts() {
     clear
-    get_my_ip
-    echo -e "\n${CYAN}━━━ Статус WARP ━━━${NC}\n"
-    echo -e "  ${WHITE}Статус:      ${GREEN}$(get_warp_status_text)${NC}"
-    echo -e "  ${WHITE}Сервер IP:   ${GREEN}${MY_IP}${NC}"
-    echo -e "  ${WHITE}SOCKS5:      ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
-    echo -e "  ${WHITE}Proxy:       ${GREEN}$(proxy_listening && echo listening || echo not-listening)${NC}"
-    if proxy_listening; then
-        echo -e "  ${WHITE}WARP IP:     ${GREEN}$(get_warp_ip)${NC}"
+    echo -e "\n${CYAN}━━━ Проверка конфликтов ━━━${NC}\n"
+    local has_blocker=0
+
+    # 1. Другие WARP реализации
+    local warp_variants=("warp-go" "amnezia-warp" "wireproxy" "wgcf")
+    for v in "${warp_variants[@]}"; do
+        if command -v "$v" &>/dev/null || systemctl is-active "$v" &>/dev/null 2>&1; then
+            echo -e "  ${RED}[BLOCKER]${NC} Найден конфликтующий сервис: ${WHITE}${v}${NC}"
+            has_blocker=1
+        else
+            echo -e "  ${GREEN}[✓]${NC} ${v} — не установлен"
+        fi
+    done
+
+    # 2. WireGuard интерфейсы (WARP использует WireGuard)
+    local wg_ifaces
+    wg_ifaces=$(ip link show 2>/dev/null | grep -E "warp[0-9]|^[0-9]+: wg[0-9]" | awk -F': ' '{print $2}')
+    if [ -n "$wg_ifaces" ]; then
+        echo -e "  ${YELLOW}[WARN]${NC} Активные WireGuard интерфейсы: ${WHITE}${wg_ifaces}${NC}"
+        echo -e "         Может конфликтовать с WARP"
+    else
+        echo -e "  ${GREEN}[✓]${NC} WireGuard интерфейсы — не найдены"
     fi
+
+    # 3. Порт WARP занят
+    if ss -tlnp 2>/dev/null | grep -q ":${WARP_SOCKS_PORT} "; then
+        local occupant
+        occupant=$(ss -tlnp 2>/dev/null | grep ":${WARP_SOCKS_PORT} " | \
+            sed 's/.*users:(("//' | cut -d'"' -f1)
+        echo -e "  ${RED}[BLOCKER]${NC} Порт ${WARP_SOCKS_PORT} занят процессом: ${WHITE}${occupant}${NC}"
+        has_blocker=1
+    else
+        echo -e "  ${GREEN}[✓]${NC} Порт ${WARP_SOCKS_PORT} — свободен"
+    fi
+
+    # 4. Старая версия этого скрипта
+    if [ -f "$INSTALL_PATH" ] && [ "$(readlink -f "$0")" != "$INSTALL_PATH" ]; then
+        local old_ver
+        old_ver=$(grep 'VERSION=' "$INSTALL_PATH" 2>/dev/null | head -1 | cut -d'"' -f2)
+        echo -e "  ${YELLOW}[WARN]${NC} Найдена старая версия ${SCRIPT_NAME}: ${WHITE}v${old_ver:-?}${NC}"
+        echo -e "         Путь: ${WHITE}${INSTALL_PATH}${NC}"
+    else
+        echo -e "  ${GREEN}[✓]${NC} Старых версий скрипта — нет"
+    fi
+
+    # 5. Orphan warp outbound в xray config
+    local xray_cfg
+    xray_cfg=$(detect_xray_config 2>/dev/null)
+    if [ -n "$xray_cfg" ]; then
+        local warp_count
+        warp_count=$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open('${xray_cfg}'))
+    outs = [o for o in cfg.get('outbounds',[]) if o.get('tag')=='warp']
+    print(len(outs))
+except: print(0)
+" 2>/dev/null)
+        if [ "${warp_count:-0}" -gt 0 ] && ! is_warp_running; then
+            echo -e "  ${YELLOW}[WARN]${NC} Найден orphan outbound 'warp' в xray config"
+            echo -e "         WARP не запущен — трафик уходит в никуда"
+            echo -e "         Файл: ${WHITE}${xray_cfg}${NC}"
+        elif [ "${warp_count:-0}" -gt 0 ] && is_warp_running; then
+            echo -e "  ${GREEN}[✓]${NC} outbound 'warp' в xray config — WARP запущен, OK"
+        else
+            echo -e "  ${GREEN}[✓]${NC} Orphan warp outbound — не найден"
+        fi
+    fi
+
     echo ""
-    run_warp status || true
-    echo ""
-    read -r -p "Нажмите Enter..."
+    if [ "$has_blocker" -eq 1 ]; then
+        echo -e "${RED}[!] Обнаружены BLOCKER-конфликты. Разрешите их перед установкой WARP.${NC}"
+        echo ""
+        read -p "Нажмите Enter..."
+        return 1
+    else
+        echo -e "${GREEN}[✓] Критических конфликтов не обнаружено.${NC}"
+        echo ""
+        read -p "Нажмите Enter..."
+        return 0
+    fi
 }
 
-show_xui_json() {
+# ═══════════════════════════════════════════════════════════════
+#  XRAY CONFIG — безопасный патч
+# ═══════════════════════════════════════════════════════════════
+
+detect_xray_config() {
+    local candidates=(
+        "/usr/local/x-ui/bin/config.json"
+        "/etc/x-ui/config.json"
+        "/usr/local/3x-ui/bin/config.json"
+        "/etc/3x-ui/config.json"
+        "/usr/local/xray/config.json"
+    )
+    for f in "${candidates[@]}"; do
+        [ -f "$f" ] && echo "$f" && return 0
+    done
+    return 1
+}
+
+backup_xray_config() {
+    local cfg="$1"
+    local bak="${BACKUP_DIR}/config.json.bak.$(date +%s)"
+    cp "$cfg" "$bak" || { echo -e "${RED}[ERROR] Не удалось создать бэкап!${NC}"; return 1; }
+    echo "$bak"
+    log_action "BACKUP: ${cfg} → ${bak}"
+}
+
+validate_xray_config() {
+    local cfg="$1"
+    python3 -c "import json; json.load(open('${cfg}'))" 2>/dev/null && return 0
+    return 1
+}
+
+rollback_xray_config() {
+    local bak="$1"
+    local cfg="${bak##*/}"          # config.json.bak.TIMESTAMP
+    local orig
+    orig=$(detect_xray_config)
+    if [ -z "$orig" ]; then
+        echo -e "${RED}[ERROR] Оригинальный config не найден!${NC}"; return 1
+    fi
+    cp "$bak" "$orig" || { echo -e "${RED}[ERROR] Rollback не удался!${NC}"; return 1; }
+    systemctl restart x-ui 2>/dev/null
+    echo -e "${GREEN}[OK] Rollback выполнен из: ${bak}${NC}"
+    log_action "ROLLBACK: restored from ${bak}"
+}
+
+patch_xray_warp_outbound() {
+    local cfg="$1" port="$2"
+    python3 - <<EOF
+import json, sys
+try:
+    with open('${cfg}') as f:
+        c = json.load(f)
+    # Удалить старый warp если есть
+    c['outbounds'] = [o for o in c.get('outbounds', []) if o.get('tag') != 'warp']
+    # Добавить новый
+    c['outbounds'].append({
+        "tag": "warp",
+        "protocol": "socks",
+        "settings": {
+            "servers": [{"address": "127.0.0.1", "port": ${port}}]
+        }
+    })
+    with open('${cfg}', 'w') as f:
+        json.dump(c, f, ensure_ascii=False, indent=2)
+    print("OK")
+    sys.exit(0)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+EOF
+}
+
+remove_xray_warp_outbound() {
+    local cfg="$1"
+    python3 - <<EOF
+import json, sys
+try:
+    with open('${cfg}') as f:
+        c = json.load(f)
+    before = len(c.get('outbounds', []))
+    c['outbounds'] = [o for o in c.get('outbounds', []) if o.get('tag') != 'warp']
+    after = len(c.get('outbounds', []))
+    with open('${cfg}', 'w') as f:
+        json.dump(c, f, ensure_ascii=False, indent=2)
+    print(f"Removed {before - after} warp outbound(s)")
+    sys.exit(0)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+EOF
+}
+
+apply_xray_warp() {
+    local cfg
+    cfg=$(detect_xray_config)
+    if [ -z "$cfg" ]; then
+        echo -e "${RED}[ERROR] xray config.json не найден.${NC}"
+        echo -e "${WHITE}Проверен: /usr/local/x-ui/bin/config.json и другие пути.${NC}"
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    echo -e "${CYAN}[*] Конфиг: ${WHITE}${cfg}${NC}"
+
+    if ! is_warp_running; then
+        echo -e "${RED}[ERROR] WARP не запущен! Сначала запустите WARP (п.9).${NC}"
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    # Бэкап
+    local bak
+    bak=$(backup_xray_config "$cfg")
+    if [ $? -ne 0 ]; then read -p "Нажмите Enter..."; return 1; fi
+    echo -e "${GREEN}[✓] Бэкап: ${bak}${NC}"
+
+    # Патч
+    echo -e "${YELLOW}[*] Добавление outbound warp → 127.0.0.1:${WARP_SOCKS_PORT}...${NC}"
+    local result
+    result=$(patch_xray_warp_outbound "$cfg" "$WARP_SOCKS_PORT")
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[ERROR] Патч не удался: ${result}${NC}"
+        echo -e "${YELLOW}[*] Откат...${NC}"
+        rollback_xray_config "$bak"
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    # Валидация JSON
+    if ! validate_xray_config "$cfg"; then
+        echo -e "${RED}[ERROR] JSON невалиден после патча!${NC}"
+        echo -e "${YELLOW}[*] Автоматический откат...${NC}"
+        rollback_xray_config "$bak"
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    # Перезапуск xray
+    echo -e "${YELLOW}[*] Перезапуск x-ui...${NC}"
+    systemctl restart x-ui 2>/dev/null
+    sleep 2
+
+    # Проверка
+    if systemctl is-active x-ui &>/dev/null; then
+        echo -e "${GREEN}[✓] x-ui запущен успешно!${NC}"
+        log_action "XRAY PATCH: warp outbound added, port=${WARP_SOCKS_PORT}, cfg=${cfg}"
+    else
+        echo -e "${RED}[ERROR] x-ui не запустился после патча!${NC}"
+        echo -e "${YELLOW}[*] Автоматический откат...${NC}"
+        rollback_xray_config "$bak"
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    echo ""
+    echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  Outbound 'warp' успешно добавлен!${NC}"
+    echo -e "${WHITE}  SOCKS5: 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+    echo -e "${WHITE}  Бэкап:  ${bak}${NC}"
+    echo -e "${WHITE}  Rollback: govpn rollback ${bak}${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${CYAN}Теперь добавьте routing rule в 3x-ui UI:${NC}"
+    echo -e "  outboundTag: warp"
+    echo -e "  domain: geosite:openai, geosite:netflix, ..."
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+show_xray_json() {
     clear
-    echo -e "\n${CYAN}━━━ Конфигурация для 3x-ui / Xray ━━━${NC}\n"
+    echo -e "\n${CYAN}━━━ JSON для 3X-UI / x-ui-pro ━━━${NC}\n"
+    echo -e "${WHITE}Xray Settings → Outbounds → добавить:${NC}\n"
+    echo -e "${GREEN}── Outbound (warp) ──${NC}\n"
     cat <<EOF
 {
   "tag": "warp",
@@ -442,218 +416,1141 @@ show_xui_json() {
     "servers": [
       {
         "address": "127.0.0.1",
-        "port": ${SOCKS_PORT}
+        "port": ${WARP_SOCKS_PORT}
       }
     ]
   }
 }
 EOF
-    echo ""
-    cat <<'EOF'
-Пример routing rule:
+    echo -e "\n${GREEN}── Routing Rule (примеры) ──${NC}\n"
+    cat <<EOF
 {
   "outboundTag": "warp",
   "domain": [
     "geosite:openai",
     "geosite:netflix",
+    "geosite:disney",
+    "geosite:spotify",
     "domain:chat.openai.com",
     "domain:claude.ai"
   ]
 }
 EOF
     echo ""
-    echo -e "${YELLOW}Важно:${NC} режим WARP proxy нормально подходит для TCP-трафика 3x-ui."
-    echo -e "${YELLOW}UDP через этот режим ограничен самим warp-cli.${NC}"
+    if is_warp_running; then
+        local wip; wip=$(get_warp_ip)
+        echo -e "${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+    fi
+    echo -e "${WHITE}SOCKS5:  ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
     echo ""
-    read -r -p "Нажмите Enter..."
+    read -p "Нажмите Enter..."
+}
+
+show_backups() {
+    clear
+    echo -e "\n${CYAN}━━━ Бэкапы xray config ━━━${NC}\n"
+    local baks
+    baks=$(ls -t "${BACKUP_DIR}"/config.json.bak.* 2>/dev/null)
+    if [ -z "$baks" ]; then
+        echo -e "${YELLOW}Бэкапов нет.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    local i=1
+    declare -a bak_arr=()
+    while IFS= read -r b; do
+        local ts; ts=$(echo "$b" | grep -oE '[0-9]+$')
+        local dt; dt=$(date -d "@${ts}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "${ts}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")
+        echo -e "  ${YELLOW}[${i}]${NC} ${dt}  ${WHITE}${b}${NC}"
+        bak_arr+=("$b")
+        ((i++))
+    done <<< "$baks"
+    echo -e "  ${YELLOW}[0]${NC} Назад"
+    echo ""
+    read -p "Восстановить из бэкапа (номер или 0): " ch
+    [[ "$ch" == "0" || -z "$ch" ]] && return
+    local idx=$((ch - 1))
+    [ -z "${bak_arr[$idx]:-}" ] && return
+    echo ""
+    read -p "Восстановить из ${bak_arr[$idx]}? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
+    rollback_xray_config "${bak_arr[$idx]}"
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  WARP
+# ═══════════════════════════════════════════════════════════════
+
+is_warp_installed() {
+    command -v warp-cli &>/dev/null
+}
+
+is_warp_running() {
+    local st
+    st=$(warp-cli --accept-tos status 2>/dev/null)
+    echo "$st" | grep -qi "status.*connected" && ! echo "$st" | grep -qi "disconnected"
+}
+
+get_warp_status_text() {
+    if ! is_warp_installed; then echo "Не установлен"; return; fi
+    local st
+    st=$(warp-cli --accept-tos status 2>/dev/null | head -3)
+    if echo "$st" | grep -qi "disconnected"; then echo "Отключён"
+    elif echo "$st" | grep -qi "connected"; then echo "Подключён"
+    elif echo "$st" | grep -qi "registration missing"; then echo "Нет регистрации"
+    else echo "Неизвестно"; fi
+}
+
+get_warp_ip() {
+    curl -s4 --max-time 5 --proxy "socks5h://127.0.0.1:${WARP_SOCKS_PORT}" \
+        ifconfig.me 2>/dev/null || echo "N/A"
+}
+
+install_warp() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка Cloudflare WARP ━━━${NC}\n"
+
+    if is_warp_installed; then
+        echo -e "${YELLOW}WARP уже установлен. Версия:${NC}"
+        warp-cli --version 2>/dev/null || true
+        echo ""
+        read -p "Нажмите Enter..."; return
+    fi
+
+    # Проверка конфликтов перед установкой
+    check_conflicts || return
+
+    detect_os
+    if [[ "$OS_ID" != "ubuntu" && "$OS_ID" != "debian" ]]; then
+        echo -e "${RED}[ERROR] Поддерживаются только Ubuntu и Debian.${NC}"
+        echo -e "${WHITE}Ваша ОС: ${YELLOW}${OS_ID} ${OS_VERSION}${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    echo -e "${YELLOW}[1/6]${NC} Добавление GPG-ключа Cloudflare..."
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | \
+        gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[ERROR] Не удалось добавить GPG-ключ.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "${GREEN}  ✓ GPG-ключ добавлен${NC}"
+
+    echo -e "${YELLOW}[2/6]${NC} Добавление репозитория..."
+    local codename="${OS_CODENAME}"
+    [ -z "$codename" ] && codename=$(lsb_release -cs 2>/dev/null || echo "focal")
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
+https://pkg.cloudflareclient.com/ ${codename} main" \
+        > /etc/apt/sources.list.d/cloudflare-client.list
+    echo -e "${GREEN}  ✓ Репозиторий (${codename})${NC}"
+
+    echo -e "${YELLOW}[3/6]${NC} Установка пакета..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y > /dev/null 2>&1
+    apt-get install -y cloudflare-warp > /dev/null 2>&1
+    if ! command -v warp-cli &>/dev/null; then
+        echo -e "${RED}[ERROR] Установка не удалась.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "${GREEN}  ✓ cloudflare-warp установлен${NC}"
+
+    echo -e "${YELLOW}[4/6]${NC} Регистрация аккаунта..."
+    warp-cli --accept-tos registration new > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[ERROR] Регистрация не удалась.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
+
+    echo -e "${YELLOW}[5/6]${NC} Настройка SOCKS5-прокси на порту ${WARP_SOCKS_PORT}..."
+    warp-cli --accept-tos mode proxy > /dev/null 2>&1
+    warp-cli --accept-tos proxy port "${WARP_SOCKS_PORT}" > /dev/null 2>&1
+    save_config_val "WARP_SOCKS_PORT" "${WARP_SOCKS_PORT}"
+    echo -e "${GREEN}  ✓ SOCKS5: 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+
+    echo -e "${YELLOW}[6/6]${NC} Подключение..."
+    warp-cli --accept-tos connect > /dev/null 2>&1
+    sleep 3
+
+    if is_warp_running; then
+        local wip; wip=$(get_warp_ip)
+        echo -e "${GREEN}  ✓ WARP подключён!${NC}"
+        echo -e "    ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+        log_action "WARP INSTALL: port=${WARP_SOCKS_PORT}, warp_ip=${wip}"
+    else
+        echo -e "${YELLOW}  ⚠ WARP установлен, но подключение не подтверждено.${NC}"
+        echo -e "  ${WHITE}Попробуйте: ${CYAN}warp-cli --accept-tos connect${NC}"
+        log_action "WARP INSTALL: installed, connection unconfirmed"
+    fi
+
+    echo ""
+    echo -e "${CYAN}Следующий шаг: п.13 — применить в xray config автоматически.${NC}"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+start_warp() {
+    if ! is_warp_installed; then
+        echo -e "\n${RED}WARP не установлен. Выполните п.8.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    if is_warp_running; then
+        echo -e "\n${YELLOW}WARP уже подключён.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "\n${YELLOW}[*] Подключение WARP...${NC}"
+    warp-cli --accept-tos connect > /dev/null 2>&1
+    sleep 3
+    if is_warp_running; then
+        echo -e "${GREEN}[OK] WARP подключён.${NC}"
+        log_action "WARP START"
+    else
+        echo -e "${RED}[ERROR] Не удалось подключить.${NC}"
+        echo -e "${WHITE}Диагностика: ${CYAN}warp-cli --accept-tos status${NC}"
+    fi
+    read -p "Нажмите Enter..."
+}
+
+stop_warp() {
+    if ! is_warp_installed; then
+        echo -e "\n${RED}WARP не установлен.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "\n${YELLOW}[*] Отключение WARP...${NC}"
+    warp-cli --accept-tos disconnect > /dev/null 2>&1
+    echo -e "${GREEN}[OK] WARP отключён.${NC}"
+    log_action "WARP STOP"
+    read -p "Нажмите Enter..."
+}
+
+show_warp_status() {
+    clear
+    echo -e "\n${CYAN}━━━ Статус WARP ━━━${NC}\n"
+    if ! is_warp_installed; then
+        echo -e "  ${WHITE}Статус: ${RED}Не установлен${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    local st_text st_color
+    st_text=$(get_warp_status_text)
+    st_color="$RED"
+    [[ "$st_text" == "Подключён" ]] && st_color="$GREEN"
+    [[ "$st_text" == "Отключён" ]] && st_color="$YELLOW"
+
+    echo -e "  ${WHITE}Статус:      ${st_color}${st_text}${NC}"
+    echo -e "  ${WHITE}Порт SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+    echo -e "  ${WHITE}Реальный IP: ${GREEN}${MY_IP}${NC}"
+
+    if is_warp_running; then
+        local wip; wip=$(get_warp_ip)
+        echo -e "  ${WHITE}WARP IP:     ${GREEN}${wip}${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}── warp-cli status ──${NC}"
+    warp-cli --accept-tos status 2>/dev/null | while IFS= read -r line; do
+        echo -e "  ${WHITE}${line}${NC}"
+    done
+    echo ""
+    read -p "Нажмите Enter..."
 }
 
 rekey_warp() {
     if ! is_warp_installed; then
         echo -e "\n${RED}WARP не установлен.${NC}"
-        read -r -p "Нажмите Enter..."
-        return
+        read -p "Нажмите Enter..."; return
     fi
+    echo -e "\n${CYAN}━━━ Перевыпуск ключа WARP ━━━${NC}\n"
+    echo -e "${YELLOW}Регистрация будет пересоздана. WARP временно отключится.${NC}"
+    read -p "Продолжить? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
 
-    echo -e "\n${YELLOW}Текущая регистрация будет удалена и создана заново.${NC}"
-    read -r -p "Продолжить? (y/n): " confirm
-    [ "$confirm" = "y" ] || return
-
-    run_warp disconnect >/dev/null 2>&1 || true
-    run_warp registration delete >/dev/null 2>&1 || true
-    reset_warp_registration_state
-    connect_warp
+    echo -e "${YELLOW}[1/4] Отключение...${NC}"
+    warp-cli --accept-tos disconnect > /dev/null 2>&1
+    echo -e "${YELLOW}[2/4] Удаление регистрации...${NC}"
+    warp-cli --accept-tos registration delete > /dev/null 2>&1
+    echo -e "${YELLOW}[3/4] Новая регистрация...${NC}"
+    warp-cli --accept-tos registration new > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[ERROR] Регистрация не удалась.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "${YELLOW}[4/4] Подключение...${NC}"
+    warp-cli --accept-tos mode proxy > /dev/null 2>&1
+    warp-cli --accept-tos proxy port "${WARP_SOCKS_PORT}" > /dev/null 2>&1
+    warp-cli --accept-tos connect > /dev/null 2>&1
     sleep 3
 
-    echo -e "\n${GREEN}[OK] Регистрация обновлена.${NC}"
-    [ "$(proxy_listening && echo yes || echo no)" = "yes" ] && echo -e "${WHITE}WARP IP: ${GREEN}$(get_warp_ip)${NC}"
-    log_action "REKEY: registration renewed"
-    read -r -p "Нажмите Enter..."
+    if is_warp_running; then
+        local wip; wip=$(get_warp_ip)
+        echo -e "${GREEN}[OK] Новый WARP IP: ${wip}${NC}"
+        log_action "WARP REKEY: warp_ip=${wip}"
+    else
+        echo -e "${YELLOW}[WARN] Подключение не подтверждено.${NC}"
+    fi
+    read -p "Нажмите Enter..."
 }
 
-change_port() {
+change_warp_port() {
+    if ! is_warp_installed; then
+        echo -e "\n${RED}WARP не установлен.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "\n${CYAN}━━━ Изменение порта SOCKS5 ━━━${NC}\n"
+    echo -e "${WHITE}Текущий порт: ${GREEN}${WARP_SOCKS_PORT}${NC}\n"
     local new_port
-    echo -e "\n${WHITE}Текущий порт: ${GREEN}${SOCKS_PORT}${NC}"
     while true; do
-        read -r -p "Новый порт (1024-65535): " new_port
-        if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 1024 && new_port <= 65535 )); then
-            break
-        fi
+        read -p "Новый порт (1024-65535): " new_port
+        [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 1024 && new_port <= 65535 )) && break
         echo -e "${RED}Некорректный порт.${NC}"
     done
-
-    save_config_val "SOCKS_PORT" "$new_port"
-    SOCKS_PORT="$new_port"
-
-    if is_warp_installed; then
-        proxy_port_cmd >/dev/null 2>&1 || true
+    # Проверка что порт свободен
+    if ss -tlnp 2>/dev/null | grep -q ":${new_port} "; then
+        echo -e "${RED}[ERROR] Порт ${new_port} уже занят!${NC}"
+        ss -tlnp 2>/dev/null | grep ":${new_port} "
+        read -p "Нажмите Enter..."; return
     fi
-
-    echo -e "\n${GREEN}[OK] Порт изменён на ${SOCKS_PORT}.${NC}"
-    log_action "PORT: changed to ${SOCKS_PORT}"
-    read -r -p "Нажмите Enter..."
+    warp-cli --accept-tos proxy port "$new_port" > /dev/null 2>&1
+    save_config_val "WARP_SOCKS_PORT" "$new_port"
+    WARP_SOCKS_PORT="$new_port"
+    echo -e "${GREEN}[OK] Порт изменён на ${new_port}.${NC}"
+    echo -e "${YELLOW}Не забудьте обновить outbound в xray config (п.13)!${NC}"
+    log_action "WARP PORT: changed to ${new_port}"
+    read -p "Нажмите Enter..."
 }
 
-update_self() {
-    need_root
-    need_cmd curl
-    local tmp
-    tmp="$(mktemp)"
-    curl -fsSL "$RAW_BASE/warpgo-clean.sh" -o "$tmp" || die "failed to download update"
-    install -m 755 "$tmp" "$INSTALL_BIN"
-    rm -f "$tmp"
-    echo -e "\n${GREEN}[OK] Скрипт обновлён.${NC}"
-    read -r -p "Нажмите Enter..."
-}
-
-full_uninstall() {
-    echo -e "\n${RED}Будет удалён WARP и конфиг менеджера.${NC}"
-    read -r -p "Удалить? (y/n): " confirm
-    [ "$confirm" = "y" ] || return
-
-    run_warp disconnect >/dev/null 2>&1 || true
-    run_warp registration delete >/dev/null 2>&1 || true
-    apt-get remove -y cloudflare-warp >/dev/null 2>&1 || true
-    apt-get autoremove -y >/dev/null 2>&1 || true
+uninstall_warp() {
+    clear
+    echo -e "\n${RED}━━━ Удаление WARP ━━━${NC}\n"
+    echo -e "${WHITE}Будут удалены:${NC}"
+    echo -e "  ${RED}•${NC} Пакет cloudflare-warp"
+    echo -e "  ${RED}•${NC} Репозиторий и GPG-ключ"
+    echo -e "${GREEN}НЕ будет затронуто:${NC}"
+    echo -e "  ${GREEN}•${NC} 3X-UI / xray (outbound 'warp' нужно убрать вручную или через п.13)"
+    echo -e "  ${GREEN}•${NC} Конфигурация ${SCRIPT_NAME}"
+    echo ""
+    read -p "Удалить WARP? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
+    warp-cli --accept-tos disconnect > /dev/null 2>&1
+    warp-cli --accept-tos registration delete > /dev/null 2>&1
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get remove -y cloudflare-warp > /dev/null 2>&1
+    apt-get autoremove -y > /dev/null 2>&1
     rm -f /etc/apt/sources.list.d/cloudflare-client.list
     rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    rm -rf "$CONFIG_DIR"
+    echo -e "${GREEN}[OK] WARP удалён.${NC}"
+    log_action "WARP UNINSTALL"
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  VALIDATION & IP UTILS
+# ═══════════════════════════════════════════════════════════════
+
+validate_ip() {
+    local ip="$1"
+    if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        IFS='.' read -r -a octets <<< "$ip"
+        for o in "${octets[@]}"; do (( o > 255 )) && return 1; done
+        return 0
+    fi
+    return 1
+}
+
+validate_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+read_validated_ip() {
+    local prompt="${1:-Введите IP:}"
+    while true; do
+        echo -e "$prompt"
+        read -p "> " _RET_IP
+        validate_ip "$_RET_IP" && return 0
+        echo -e "${RED}Некорректный IP-адрес!${NC}"
+    done
+}
+
+read_validated_port() {
+    local prompt="${1:-Введите порт:}"
+    while true; do
+        echo -e "$prompt"
+        read -p "> " _RET_PORT
+        validate_port "$_RET_PORT" && return 0
+        echo -e "${RED}Порт должен быть числом от 1 до 65535!${NC}"
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  ALIASES (имена серверов)
+# ═══════════════════════════════════════════════════════════════
+
+set_alias_full() {
+    local ip="$1" name="$2" note="${3:-}" country="${4:-}" isp="${5:-}"
+    local val="${name}|${note}|${country}|${isp}"
+    if grep -q "^${ip}=" "$ALIASES_FILE" 2>/dev/null; then
+        sed -i "s|^${ip}=.*|${ip}=${val}|" "$ALIASES_FILE"
+    else
+        echo "${ip}=${val}" >> "$ALIASES_FILE"
+    fi
+}
+
+set_alias()      { local e; e=$(grep "^${1}=" "$ALIASES_FILE" 2>/dev/null | cut -d= -f2-); local _n _o _c _i; IFS='|' read -r _ _o _c _i <<< "$e"; set_alias_full "$1" "$2" "${_o}" "${_c}" "${_i}"; }
+set_alias_note() { local e; e=$(grep "^${1}=" "$ALIASES_FILE" 2>/dev/null | cut -d= -f2-); local _n _o _c _i; IFS='|' read -r _n _ _c _i <<< "$e"; set_alias_full "$1" "${_n}" "$2" "${_c}" "${_i}"; }
+set_alias_geo()  { local e; e=$(grep "^${1}=" "$ALIASES_FILE" 2>/dev/null | cut -d= -f2-); local _n _o _c _i; IFS='|' read -r _n _o _ _ <<< "$e"; set_alias_full "$1" "${_n}" "${_o}" "$2" "$3"; }
+
+get_alias_field() {
+    local ip="$1" field="$2"
+    local raw; raw=$(grep "^${ip}=" "$ALIASES_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+    local f_name f_note f_country f_isp
+    IFS='|' read -r f_name f_note f_country f_isp <<< "$raw"
+    case "$field" in
+        name) echo "$f_name" ;; note) echo "$f_note" ;;
+        country) echo "$f_country" ;; isp) echo "$f_isp" ;;
+        *) echo "$f_name" ;;
+    esac
+}
+
+get_alias() { get_alias_field "$1" "name"; }
+
+fmt_ip() {
+    local ip="$1"
+    local name country isp
+    name=$(get_alias_field "$ip" "name")
+    country=$(get_alias_field "$ip" "country")
+    isp=$(get_alias_field "$ip" "isp")
+    local r=""
+    [ -n "$name" ] && r="${name} " || r=""
+    r+="($ip)"
+    ( [ -n "$country" ] || [ -n "$isp" ] ) && r+=" " && \
+        [ -n "$country" ] && r+="$country" && [ -n "$isp" ] && r+=" | $isp"
+    echo "$r"
+}
+
+fmt_ip_short() {
+    local name; name=$(get_alias_field "$1" "name")
+    [ -n "$name" ] && echo "$name ($1)" || echo "$1"
+}
+
+manage_aliases_menu() {
+    while true; do
+        clear
+        echo -e "${CYAN}━━━ Имена серверов ━━━${NC}"
+        local -a ips=()
+        while read -r ip; do [ -n "$ip" ] && ips+=("$ip"); done <<< "$(get_target_ips)"
+        if [ ${#ips[@]} -eq 0 ]; then
+            echo -e "${YELLOW}Нет серверов в правилах.${NC}"
+            read -p "Enter..."; return
+        fi
+        for i in "${!ips[@]}"; do
+            echo -e "  ${YELLOW}[$((i+1))]${NC} $(fmt_ip "${ips[$i]}")"
+            local note; note=$(get_alias_field "${ips[$i]}" "note")
+            [ -n "$note" ] && echo -e "       ${WHITE}${note}${NC}"
+        done
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        read -p "Сервер: " choice
+        [[ "$choice" == "0" || -z "$choice" ]] && return
+        local idx=$((choice - 1))
+        [ -z "${ips[$idx]:-}" ] && continue
+        local sel="${ips[$idx]}"
+        echo -e "Новое имя (Enter — оставить):"
+        read -p "> " nn; [ -n "$nn" ] && set_alias "$sel" "$nn"
+        echo -e "Примечание (Enter — оставить):"
+        read -p "> " nt; [ -n "$nt" ] && set_alias_note "$sel" "$nt"
+        echo -e "${GREEN}[OK]${NC}"; read -p "Enter..."
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  GEOIP + PROBE
+# ═══════════════════════════════════════════════════════════════
+
+geoip_lookup() {
+    curl -s --max-time 5 \
+        "http://ip-api.com/json/${1}?fields=status,country,regionName,city,isp,org" 2>/dev/null
+}
+
+tcp_ping() {
+    local ip="$1" port="$2" tout="${3:-3}"
+    local raw
+    raw=$(curl -so /dev/null -w '%{time_connect}' \
+        --max-time "$tout" --connect-timeout "$tout" \
+        "http://${ip}:${port}/" 2>/dev/null)
+    [ -z "$raw" ] && return 1
+    local ms
+    ms=$(awk "BEGIN {v=$raw*1000; if(v<0.5) exit 1; printf \"%.2f\", v}" 2>/dev/null) || return 1
+    echo "$ms"
+}
+
+smart_ping() {
+    local ip="$1" tout="${2:-3}" port="${3:-}"
+    local ms
+    ms=$(ping -c 1 -W "$tout" "$ip" 2>/dev/null | \
+        sed -n 's/.*time=\([0-9.]*\).*/\1/p')
+    if [ -n "$ms" ]; then echo "ICMP|$ms"; return 0; fi
+    [ -z "$port" ] && port=$(get_port_for_ip "$ip")
+    [ -z "$port" ] && return 1
+    ms=$(tcp_ping "$ip" "$port" "$tout")
+    if [ -n "$ms" ]; then echo "TCP:${port}|$ms"; return 0; fi
+    return 1
+}
+
+probe_server_cli() {
+    local ip="$1" port="${2:-}"
+    echo -e "\n${CYAN}━━━ Проверка ${ip} ━━━${NC}"
+
+    echo -e "${YELLOW}[*] GeoIP...${NC}"
+    local geo; geo=$(geoip_lookup "$ip")
+    local geo_status; geo_status=$(echo "$geo" | jq -r '.status // "fail"' 2>/dev/null)
+    if [ "$geo_status" = "success" ]; then
+        local country city isp org loc provider
+        country=$(echo "$geo" | jq -r '.country // ""')
+        city=$(echo "$geo" | jq -r '.city // ""')
+        isp=$(echo "$geo" | jq -r '.isp // ""')
+        org=$(echo "$geo" | jq -r '.org // ""')
+        loc="$country"; [ -n "$city" ] && loc+=", $city"
+        provider="$isp"; [ -n "$org" ] && [ "$org" != "$isp" ] && provider+=" ($org)"
+        echo -e "  ${WHITE}GeoIP:${NC} ${GREEN}${loc}${NC} | ${CYAN}${provider}${NC}"
+        set_alias_geo "$ip" "$country" "$isp"
+    else
+        echo -e "  ${RED}GeoIP: не удалось определить${NC}"
+    fi
+
+    echo -e "${YELLOW}[*] Ping (3x)...${NC}"
+    local -a pings=()
+    local plost=0
+    for n in 1 2 3; do
+        local raw method="" ms=""
+        raw=$(smart_ping "$ip" 3 "$port")
+        if [ -n "$raw" ]; then
+            method="${raw%%|*}"; ms="${raw#*|}"
+            pings+=("$ms")
+            echo -e "  #${n}: ${GREEN}${ms}ms${NC} ${CYAN}[${method}]${NC}"
+        else
+            ((plost++))
+            echo -e "  #${n}: ${RED}timeout${NC}"
+        fi
+        [ "$n" -lt 3 ] && sleep 1
+    done
+
+    if [ ${#pings[@]} -gt 0 ]; then
+        local pavg
+        pavg=$(printf '%s\n' "${pings[@]}" | awk '{s+=$1} END {printf "%.2f", s/NR}')
+        echo -e "  ${WHITE}Среднее: ${pavg}ms  Потеряно: ${plost}/3${NC}"
+    else
+        echo -e "  ${RED}Сервер не отвечает на ping${NC}"
+    fi
+
+    echo ""
+    local existing; existing=$(get_alias "$ip")
+    [ -n "$existing" ] && echo -e "Текущее имя: ${GREEN}${existing}${NC}"
+    echo -e "Имя сервера (Enter — пропустить):"
+    read -p "> " _RET_NAME
+    [ -n "$_RET_NAME" ] && set_alias "$ip" "$_RET_NAME"
+    echo -e "Примечание (Enter — пропустить):"
+    read -p "> " _RET_NOTE
+    [ -n "$_RET_NOTE" ] && set_alias_note "$ip" "$_RET_NOTE"
+
+    if [ ${#pings[@]} -eq 0 ]; then
+        echo -e "\n${YELLOW}Сервер не ответил на ICMP/TCP.${NC}"
+        echo -e "${CYAN}Включить ping на удалённом сервере:${NC}"
+        echo -e "  ${GREEN}sysctl -w net.ipv4.icmp_echo_ignore_all=0${NC}"
+        echo -e "  ${GREEN}iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT${NC}"
+        echo ""
+        read -p "Продолжить добавление правила? (y/n): " ans
+        [[ "$ans" != "y" ]] && return 1
+    fi
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  IPTABLES RULES
+# ═══════════════════════════════════════════════════════════════
+
+get_rules_list() {
+    iptables -t nat -S PREROUTING 2>/dev/null | \
+        grep "DNAT" | grep "govpn" | \
+        sed -n 's/.*-p \([a-z]*\).*--dport \([0-9]*\).*--to-destination \([^[:space:]]*\).*/\1|\2|\3/p'
+}
+
+get_target_ips() {
+    get_rules_list | awk -F'|' '{split($3,a,":"); print a[1]}' | sort -u
+}
+
+get_port_for_ip() {
+    local ip="$1"
+    get_rules_list | awk -F'|' -v ip="$ip" \
+        '{split($3,a,":"); if(a[1]==ip){print a[2]; exit}}'
+}
+
+remove_rules_for_port() {
+    local proto="$1" in_port="$2"
+    iptables -t nat -S PREROUTING 2>/dev/null | grep "DNAT" | \
+        grep -- "--dport ${in_port} " | grep -- "-p ${proto} " | \
+        while read -r rule; do
+            eval "iptables -t nat -D ${rule#-A }" 2>/dev/null
+        done
+    for chain in INPUT FORWARD; do
+        iptables -S "$chain" 2>/dev/null | grep "govpn" | \
+            grep -- "--dport ${in_port} " | grep -- "-p ${proto} " | \
+            while read -r rule; do
+                eval "iptables -D ${rule#-A }" 2>/dev/null
+            done
+        iptables -S "$chain" 2>/dev/null | grep "govpn" | \
+            grep -- "--sport ${in_port} " | grep -- "-p ${proto} " | \
+            while read -r rule; do
+                eval "iptables -D ${rule#-A }" 2>/dev/null
+            done
+    done
+}
+
+apply_iptables_rules() {
+    local proto="$1" in_port="$2" out_port="$3" target_ip="$4" name="$5"
+    echo -e "${YELLOW}[*] Применение правил iptables...${NC}"
+    log_action "ADD rule: ${proto} :${in_port} -> ${target_ip}:${out_port} (${name})"
+
+    remove_rules_for_port "$proto" "$in_port"
+
+    iptables -I INPUT -p "$proto" --dport "$in_port" \
+        -m comment --comment "govpn:${in_port}:${proto}" -j ACCEPT
+
+    iptables -t nat -A PREROUTING -p "$proto" --dport "$in_port" \
+        -j DNAT --to-destination "${target_ip}:${out_port}"
+
+    if ! iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
+    fi
+
+    iptables -I FORWARD -p "$proto" -d "$target_ip" --dport "$out_port" \
+        -m state --state NEW,ESTABLISHED,RELATED \
+        -m comment --comment "govpn:${in_port}:${proto}" -j ACCEPT
+
+    iptables -I FORWARD -p "$proto" -s "$target_ip" --sport "$out_port" \
+        -m state --state ESTABLISHED,RELATED \
+        -m comment --comment "govpn:${in_port}:${proto}" -j ACCEPT
+
+    save_iptables
+    echo -e "${GREEN}[OK] ${name} настроен!${NC}"
+    echo -e "  ${proto}: ${MY_IP:-*}:${in_port} → ${target_ip}:${out_port}"
+}
+
+configure_rule() {
+    local proto="$1" name="$2"
+    echo -e "\n${CYAN}━━━ Настройка ${name} (${proto}) ━━━${NC}"
+    read_validated_ip "IP назначения (exit-нода):"
+    local target_ip="$_RET_IP"
+    read_validated_port "Порт (одинаковый для входа и выхода):"
+    local port="$_RET_PORT"
+    probe_server_cli "$target_ip" "$port" || return
+    echo -e "\n${YELLOW}Правило:${NC}"
+    echo -e "  ${proto}: ${MY_IP:-*}:${port} → $(fmt_ip_short "$target_ip"):${port}"
+    read -p "Применить? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
+    apply_iptables_rules "$proto" "$port" "$port" "$target_ip" "$name"
+    read -p "Нажмите Enter..."
+}
+
+configure_custom_rule() {
+    echo -e "\n${CYAN}━━━ Кастомное правило ━━━${NC}"
+    local proto
+    while true; do
+        read -p "Протокол (tcp/udp): " proto
+        [[ "$proto" == "tcp" || "$proto" == "udp" ]] && break
+        echo -e "${RED}Введите tcp или udp${NC}"
+    done
+    read_validated_ip "IP назначения:"
+    local target_ip="$_RET_IP"
+    read_validated_port "ВХОДЯЩИЙ порт (на этом сервере):"
+    local in_port="$_RET_PORT"
+    read_validated_port "ИСХОДЯЩИЙ порт (на конечном сервере):"
+    local out_port="$_RET_PORT"
+    probe_server_cli "$target_ip" "$out_port" || return
+    echo -e "\n${YELLOW}Правило:${NC}"
+    echo -e "  ${proto}: ${MY_IP:-*}:${in_port} → $(fmt_ip_short "$target_ip"):${out_port}"
+    read -p "Применить? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
+    apply_iptables_rules "$proto" "$in_port" "$out_port" "$target_ip" "Custom"
+    read -p "Нажмите Enter..."
+}
+
+list_active_rules() {
+    echo -e "\n${CYAN}━━━ Активные переадресации ━━━${NC}"
+    echo -e "${WHITE}Сервер: ${GREEN}${MY_IP:-N/A}${NC}\n"
+    local rules; rules=$(get_rules_list)
+    if [ -z "$rules" ]; then
+        echo -e "${YELLOW}Нет активных правил.${NC}"
+    else
+        while IFS='|' read -r proto port dest; do
+            local dest_ip="${dest%:*}"
+            echo -e "  ${WHITE}${MY_IP:-*}:${port}${NC} (${proto}) → ${GREEN}${dest}${NC} $(fmt_ip "$dest_ip")"
+        done <<< "$rules"
+    fi
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+delete_single_rule() {
+    echo -e "\n${CYAN}━━━ Удаление правила ━━━${NC}"
+    local -a rules_arr=()
+    local i=1
+    while IFS='|' read -r proto port dest; do
+        rules_arr[$i]="${proto}|${port}|${dest}"
+        echo -e "${YELLOW}[${i}]${NC} ${MY_IP:-*}:${port} (${proto}) → $(fmt_ip_short "${dest%:*}")"
+        ((i++))
+    done <<< "$(get_rules_list)"
+    if [ ${#rules_arr[@]} -eq 0 ]; then
+        echo -e "${YELLOW}Нет правил.${NC}"; read -p "Enter..."; return
+    fi
+    read -p "Номер (0 — отмена): " rn
+    [[ "$rn" == "0" || -z "${rules_arr[$rn]:-}" ]] && return
+    IFS='|' read -r dp dr dd <<< "${rules_arr[$rn]}"
+    iptables -t nat -D PREROUTING -p "$dp" --dport "$dr" \
+        -j DNAT --to-destination "$dd" 2>/dev/null
+    for chain in INPUT FORWARD; do
+        iptables -S "$chain" 2>/dev/null | grep "govpn:${dr}:${dp}" | \
+            while read -r rule; do eval "iptables -D ${rule#-A }" 2>/dev/null; done
+    done
+    save_iptables
+    log_action "DELETE rule: ${dp} :${dr} -> ${dd}"
+    echo -e "${GREEN}[OK] Правило удалено.${NC}"
+    read -p "Нажмите Enter..."
+}
+
+flush_rules() {
+    echo -e "\n${RED}[!] Будут удалены ВСЕ правила govpn.${NC}"
+    read -p "Уверены? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
+    while IFS='|' read -r proto port dest; do
+        iptables -t nat -D PREROUTING -p "$proto" --dport "$port" \
+            -j DNAT --to-destination "$dest" 2>/dev/null
+    done <<< "$(get_rules_list)"
+    for chain in INPUT FORWARD; do
+        while iptables -S "$chain" 2>/dev/null | grep -q "govpn"; do
+            local rule; rule=$(iptables -S "$chain" | grep "govpn" | head -1)
+            eval "iptables -D ${rule#-A }" 2>/dev/null
+        done
+    done
+    save_iptables
+    log_action "FLUSH all govpn rules"
+    echo -e "${GREEN}[OK] Все правила сброшены.${NC}"
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  LIVE PING
+# ═══════════════════════════════════════════════════════════════
+
+make_ping_bar() {
+    local ms_str="$1" width=25
+    local ms_int
+    ms_int=$(awk "BEGIN {printf \"%d\", $ms_str + 0.5}")
+    local filled=$(( ms_int * width / 100 ))
+    (( filled > width )) && filled=$width
+    (( filled < 1 )) && filled=1
+    local empty=$(( width - filled ))
+    local color="$GREEN"
+    (( ms_int > 50 )) && color="$YELLOW"
+    (( ms_int > 100 )) && color="$RED"
+    local bar="${color}"
+    for (( b=0; b<filled; b++ )); do bar+="▓"; done
+    bar+="${NC}"
+    for (( b=0; b<empty; b++ )); do bar+="░"; done
+    echo "$bar"
+}
+
+ping_live() {
+    local ip="$1"
+    local label; label=$(fmt_ip_short "$ip")
+    local -a results=()
+    local count=0 lost=0 running=1
+    local _port; _port=$(get_port_for_ip "$ip")
+    trap 'running=0' INT
+    while [ "$running" -eq 1 ]; do
+        local raw method="" ms=""
+        raw=$(smart_ping "$ip" 3 "${_port:-}")
+        if [ -n "$raw" ]; then method="${raw%%|*}"; ms="${raw#*|}"; fi
+        ((count++))
+        clear
+        echo -e "${CYAN}━━━ Live Ping: ${WHITE}${label}${CYAN}  [Ctrl+C — стоп] ━━━${NC}"
+        if [ -n "$ms" ]; then
+            results+=("$ms")
+            local bar; bar=$(make_ping_bar "$ms")
+            printf "  ${GREEN}#%-4d %7sms${NC} ${CYAN}[%s]${NC} %b\n" "$count" "$ms" "$method" "$bar"
+        else
+            ((lost++))
+            printf "  ${RED}#%-4d   TIMEOUT${NC}  " "$count"
+            for (( b=0; b<25; b++ )); do echo -ne "${RED}█${NC}"; done
+            echo ""
+        fi
+        if [ ${#results[@]} -gt 0 ]; then
+            local stats
+            stats=$(printf '%s\n' "${results[@]}" | \
+                awk 'BEGIN{mn=999999;mx=0;s=0} {s+=$1;if($1<mn)mn=$1;if($1>mx)mx=$1} END{printf "%.2f|%.2f|%.2f",mn,mx,s/NR}')
+            IFS='|' read -r s_min s_max s_avg <<< "$stats"
+            echo -e "  ${WHITE}Мин: ${s_min}ms │ Макс: ${s_max}ms │ Сред: ${s_avg}ms${NC}"
+        fi
+        echo -e "  ${WHITE}Потеряно: ${lost}/${count}${NC}"
+        sleep 1
+    done
+    trap - INT
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+ping_menu() {
+    echo -e "\n${CYAN}━━━ Ping ━━━${NC}"
+    local -a ips=()
+    while read -r ip; do [ -n "$ip" ] && ips+=("$ip"); done <<< "$(get_target_ips)"
+    if [ ${#ips[@]} -eq 0 ]; then
+        echo -e "${YELLOW}Нет серверов в правилах.${NC}"
+        echo -e "Введите IP вручную:"
+        read -p "> " manual_ip
+        if validate_ip "$manual_ip"; then
+            ping_live "$manual_ip"; return
+        fi
+        read -p "Enter..."; return
+    fi
+    for i in "${!ips[@]}"; do
+        echo -e "  ${YELLOW}[$((i+1))]${NC} $(fmt_ip "${ips[$i]}")"
+    done
+    echo -e "  ${YELLOW}[m]${NC} Ввести IP вручную"
+    echo -e "  ${YELLOW}[0]${NC} Назад"
+    read -p "Выбор: " choice
+    case "$choice" in
+        0|"") return ;;
+        m|M)
+            read -p "IP: " manual_ip
+            validate_ip "$manual_ip" && ping_live "$manual_ip" || \
+                echo -e "${RED}Некорректный IP.${NC}"
+            ;;
+        *)
+            local idx=$((choice - 1))
+            [ -n "${ips[$idx]:-}" ] && ping_live "${ips[$idx]}"
+            ;;
+    esac
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  SYSTEM STATS
+# ═══════════════════════════════════════════════════════════════
+
+show_system_stats() {
+    clear
+    echo -e "\n${CYAN}━━━ Системная информация ━━━${NC}\n"
+    local cpu_count load_avg mem_info disk_info uptime_str cpu_usage
+    cpu_count=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "?")
+    load_avg=$(cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}')
+    mem_info=$(free -m 2>/dev/null | awk '/^Mem:/ {printf "%d/%dMB (%.1f%%)", $3, $2, $3/$2*100}')
+    disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s)", $3, $2, $5}')
+    uptime_str=$(uptime -p 2>/dev/null || uptime | sed 's/.*up //; s/,.*load.*//')
+    cpu_usage=$(awk '/^cpu / {u=$2+$4; t=$2+$3+$4+$5+$6+$7+$8; if(t>0) printf "%.1f%%", u/t*100}' /proc/stat 2>/dev/null)
+
+    echo -e "  ${WHITE}Uptime:  ${GREEN}${uptime_str}${NC}"
+    echo -e "  ${WHITE}CPU:     ${GREEN}${cpu_count} ядер | ${cpu_usage}${NC}"
+    echo -e "  ${WHITE}Load:    ${GREEN}${load_avg}${NC}"
+    echo -e "  ${WHITE}RAM:     ${GREEN}${mem_info}${NC}"
+    echo -e "  ${WHITE}Диск /:  ${GREEN}${disk_info}${NC}"
+    echo -e "  ${WHITE}IP:      ${GREEN}${MY_IP}${NC}"
+    echo -e "  ${WHITE}Iface:   ${GREEN}${IFACE}${NC}"
+    echo ""
+
+    # Топ процессы по CPU
+    echo -e "${CYAN}━━━ Топ процессы (CPU) ━━━${NC}"
+    ps aux --sort=-%cpu 2>/dev/null | head -6 | tail -5 | \
+        awk '{printf "  %-20s CPU: %s%%  MEM: %s%%\n", $11, $3, $4}'
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  AMNEZIA WG — роутер
+# ═══════════════════════════════════════════════════════════════
+
+show_amnezia_router() {
+    clear
+    echo -e "\n${CYAN}━━━ AmneziaWG на роутер (OpenWrt / Keenetic) ━━━${NC}\n"
+    echo -e "${WHITE}Требования:${NC}"
+    echo -e "  • Роутер с OpenWrt и entware, или Keenetic с OPKG"
+    echo -e "  • SSH доступ к роутеру"
+    echo -e "  • Роутер имеет доступ в интернет"
+    echo ""
+    echo -e "${CYAN}Команда для выполнения на роутере через SSH:${NC}\n"
+
+    local CMD='opkg update && opkg install wget-ssl ca-bundle curl && mkdir -p /opt/etc/opkg/ && opkg update && wget -qO- https://raw.githubusercontent.com/hoaxisr/awg-manager/main/scripts/install.sh | sh'
+
+    echo -e "${GREEN}${CMD}${NC}"
+    echo ""
+    echo -e "${YELLOW}Шаги:${NC}"
+    echo -e "  1. Подключитесь к роутеру: ${WHITE}ssh root@192.168.1.1${NC}"
+    echo -e "  2. Выполните команду выше"
+    echo -e "  3. После установки: ${WHITE}awg-manager${NC}"
+    echo ""
+    echo -e "${CYAN}Что это даёт:${NC}"
+    echo -e "  • AmneziaWG (обфусцированный WireGuard) на роутере"
+    echo -e "  • Весь трафик сети через VPN без настройки каждого устройства"
+    echo -e "  • Обход DPI — AmneziaWG добавляет мусорные пакеты к handshake"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  ПОЛНОЕ УДАЛЕНИЕ
+# ═══════════════════════════════════════════════════════════════
+
+full_uninstall() {
+    clear
+    echo -e "\n${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║            ⚠  ПОЛНОЕ УДАЛЕНИЕ GoVPN Manager  ⚠             ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${WHITE}Будут удалены:${NC}"
+    echo -e "  ${RED}•${NC} Все правила iptables (govpn)"
+    echo -e "  ${RED}•${NC} Конфигурация ${WHITE}${CONF_DIR}/${NC}"
+    echo -e "  ${RED}•${NC} Команда ${WHITE}${INSTALL_PATH}${NC}"
+    echo -e "  ${RED}•${NC} Логи ${WHITE}${LOG_FILE}${NC}"
+    echo ""
+    echo -e "${GREEN}НЕ будет затронуто:${NC}"
+    echo -e "  ${GREEN}•${NC} WARP (управляйте через п.8-14 или удалите отдельно п.14)"
+    echo -e "  ${GREEN}•${NC} 3X-UI / xray (outbound 'warp' останется — удалите вручную)"
+    echo -e "  ${GREEN}•${NC} Системные пакеты, sysctl, BBR"
+    echo ""
+    read -p "$(echo -e "${RED}Удалить GoVPN Manager? (y/n): ${NC}")" c1
+    [[ "$c1" != "y" ]] && echo -e "${CYAN}Отменено.${NC}" && read -p "Enter..." && return
+
+    local words=("УДАЛИТЬ" "СТЕРЕТЬ" "СНЕСТИ" "ПРОЩАЙ" "CONFIRM")
+    local word="${words[$((RANDOM % ${#words[@]}))]}"
+    echo -e "\n${RED}Введите слово ${WHITE}${word}${RED} для подтверждения:${NC}"
+    read -p "> " c2
+    if [[ "$c2" != "$word" ]]; then
+        echo -e "${CYAN}Неверное слово. Отменено.${NC}"
+        read -p "Enter..."; return
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Удаление...${NC}\n"
+
+    # Правила iptables
+    while IFS='|' read -r proto port dest; do
+        iptables -t nat -D PREROUTING -p "$proto" --dport "$port" \
+            -j DNAT --to-destination "$dest" 2>/dev/null
+    done <<< "$(get_rules_list)"
+    for chain in INPUT FORWARD; do
+        while iptables -S "$chain" 2>/dev/null | grep -q "govpn"; do
+            local rule; rule=$(iptables -S "$chain" | grep "govpn" | head -1)
+            eval "iptables -D ${rule#-A }" 2>/dev/null
+        done
+    done
+    save_iptables
+    echo -e "  ${GREEN}✓${NC}  Правила iptables удалены"
+
+    rm -rf "$CONF_DIR"
+    echo -e "  ${GREEN}✓${NC}  Конфигурация удалена"
+
     rm -f "$LOG_FILE"
-    rm -f "$INSTALL_BIN"
-    echo -e "\n${GREEN}[OK] WARP Manager удалён.${NC}"
+    echo -e "  ${GREEN}✓${NC}  Логи удалены"
+
+    rm -f "$INSTALL_PATH"
+    echo -e "  ${GREEN}✓${NC}  Команда ${SCRIPT_NAME} удалена"
+
+    echo ""
+    echo -e "${GREEN}GoVPN Manager удалён.${NC}"
+    echo -e "${WHITE}WARP и xray outbound удалите отдельно если нужно.${NC}"
+    echo ""
     exit 0
 }
 
-install_fallback_warp() {
-    clear
-    detect_os
-    ensure_supported_os
-    echo -e "\n${CYAN}━━━ Fallback установка Cloudflare WARP ━━━${NC}\n"
-    echo -e "${WHITE}Пробуем предыдущий stable release:${NC} ${GREEN}${FALLBACK_WARP_VERSION}${NC}"
-    echo ""
+# ═══════════════════════════════════════════════════════════════
+#  SELF-UPDATE
+# ═══════════════════════════════════════════════════════════════
 
-    check_deps
-
-    if ! install_warp_package_version "$FALLBACK_WARP_VERSION"; then
-        read -r -p "Нажмите Enter..."
-        return
+self_update() {
+    # Место для URL своего репозитория
+    local REPO_URL="${GOVPN_REPO_URL:-}"
+    if [ -z "$REPO_URL" ]; then
+        echo -e "\n${YELLOW}URL репозитория не задан.${NC}"
+        echo -e "Установите переменную ${WHITE}GOVPN_REPO_URL${NC} или укажите URL:"
+        read -p "> " REPO_URL
+        [ -z "$REPO_URL" ] && return
     fi
 
-    echo -e "${YELLOW}[1/3]${NC} Подготовка сервиса warp-svc..."
-    ensure_warp_service
-    echo -e "${YELLOW}[2/3]${NC} Регистрация WARP..."
-    ensure_warp_registration || die "WARP registration failed on fallback version"
-    echo -e "${YELLOW}[3/3]${NC} Настройка SOCKS5 и подключение..."
-    configure_warp_proxy
-    run_warp connect >/dev/null 2>&1 || true
-    sleep 3
+    echo -e "${YELLOW}[*] Загрузка обновления из ${REPO_URL}...${NC}"
+    local tmp="/tmp/${SCRIPT_NAME}_update.sh"
+    curl -fsSL "$REPO_URL" -o "$tmp" 2>/dev/null
 
-    echo -e "\n${GREEN}[OK] Fallback-версия WARP установлена.${NC}"
-    echo -e "${WHITE}Версия пакета:${NC} ${GREEN}${FALLBACK_WARP_VERSION}${NC}"
-    if proxy_listening; then
-        echo -e "${WHITE}SOCKS5:${NC} ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
-        echo -e "${WHITE}WARP IP:${NC} ${GREEN}$(get_warp_ip)${NC}"
+    if [ ! -f "$tmp" ] || ! head -1 "$tmp" 2>/dev/null | grep -q "#!/bin/bash"; then
+        echo -e "${RED}[ERROR] Не удалось загрузить или файл некорректен.${NC}"
+        rm -f "$tmp"
+        read -p "Нажмите Enter..."; return
     fi
-    log_action "FALLBACK: installed cloudflare-warp=${FALLBACK_WARP_VERSION}"
-    read -r -p "Нажмите Enter..."
+
+    # Бэкап текущей версии
+    local bak="${BACKUP_DIR}/${SCRIPT_NAME}.sh.bak.$(date +%s)"
+    cp "$INSTALL_PATH" "$bak" 2>/dev/null
+    echo -e "${GREEN}[✓] Бэкап текущей версии: ${bak}${NC}"
+
+    cp -f "$tmp" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    rm -f "$tmp"
+
+    echo -e "${GREEN}[OK] Обновлён! Перезапустите: ${SCRIPT_NAME}${NC}"
+    log_action "SELF-UPDATE from ${REPO_URL}"
+    read -p "Нажмите Enter..."
+    exit 0
 }
 
-show_info() {
-    clear
-    echo -e "\n${CYAN}━━━ О скрипте ━━━${NC}\n"
-    echo -e "${WHITE}Схема работы:${NC}"
-    echo -e "  ${GREEN}Клиент 3x-ui/Xray${NC} -> ${CYAN}SOCKS5 127.0.0.1:${SOCKS_PORT}${NC} -> ${GREEN}Cloudflare WARP${NC}"
-    echo ""
-    echo -e "${WHITE}Что делает скрипт:${NC}"
-    echo -e "  1) Ставит cloudflare-warp"
-    echo -e "  2) Переключает WARP в режим SOCKS5 proxy"
-    echo -e "  3) Показывает готовый outbound для 3x-ui"
-    echo ""
-    read -r -p "Нажмите Enter..."
-}
+# ═══════════════════════════════════════════════════════════════
+#  MAIN MENU
+# ═══════════════════════════════════════════════════════════════
 
 show_menu() {
     while true; do
         clear
-        get_my_ip
-        local status_text
-        status_text="$(get_warp_status_text)"
+        local warp_st warp_color
+        warp_st=$(get_warp_status_text)
+        warp_color="$RED"
+        [[ "$warp_st" == "Подключён" ]] && warp_color="$GREEN"
+        [[ "$warp_st" == "Отключён" ]] && warp_color="$YELLOW"
 
-        echo -e "${MAGENTA}******************************************************${NC}"
-        echo -e " ${WHITE}${APP_NAME} v${APP_VERSION}${NC}"
-        echo -e " ${WHITE}Server IP:${NC} ${GREEN}${MY_IP}${NC}"
-        echo -e " ${WHITE}WARP:${NC} ${GREEN}${status_text}${NC}"
-        echo -e " ${WHITE}SOCKS5:${NC} ${CYAN}127.0.0.1:${SOCKS_PORT}${NC}"
-        echo -e "${MAGENTA}******************************************************${NC}"
-        echo -e " 1) ${GREEN}Установить WARP${NC}"
-        echo -e " 2) ${CYAN}Запустить WARP${NC}"
-        echo -e " 3) ${YELLOW}Остановить WARP${NC}"
-        echo -e " 4) ${WHITE}Статус${NC}"
-        echo -e " 5) ${CYAN}JSON для 3x-ui${NC}"
-        echo -e " 6) ${YELLOW}Перевыпуск ключа${NC}"
-        echo -e " 7) ${WHITE}Изменить порт SOCKS5${NC}"
-        echo -e " 8) ${CYAN}Обновить скрипт${NC}"
-        echo -e " 9) ${YELLOW}Fallback WARP ${FALLBACK_WARP_VERSION}${NC}"
-        echo -e "10) ${WHITE}Информация${NC}"
-        echo -e "11) ${RED}Удалить WARP Manager${NC}"
-        echo -e " 0) Выход"
-        echo -e "------------------------------------------------------"
-        read -r -p "Выбор: " choice
-        case "$choice" in
-            1) install_warp ;;
-            2) start_warp ;;
-            3) stop_warp ;;
-            4) show_status ;;
-            5) show_xui_json ;;
-            6) rekey_warp ;;
-            7) change_port ;;
-            8) update_self ;;
-            9) install_fallback_warp ;;
-            10) show_info ;;
-            11) full_uninstall ;;
-            0) exit 0 ;;
+        echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
+        echo -e "${WHITE}  GoVPN Manager v${VERSION}${NC}"
+        echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
+        echo -e "  ${WHITE}IP:    ${GREEN}${MY_IP}${NC}   ${WHITE}Iface: ${CYAN}${IFACE}${NC}"
+        echo -e "  ${WHITE}WARP:  ${warp_color}${warp_st}${NC}   ${WHITE}SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
+        echo -e " ${CYAN}── IPTABLES ПРОБРОС ─────────────────${NC}"
+        echo -e "  1)  AmneziaWG / WireGuard  ${WHITE}(UDP)${NC}"
+        echo -e "  2)  VLESS / XRay           ${WHITE}(TCP)${NC}"
+        echo -e "  3)  MTProto / TProxy       ${WHITE}(TCP)${NC}"
+        echo -e "  4)  Кастомное правило"
+        echo -e "  5)  Список правил"
+        echo -e "  6)  Удалить правило"
+        echo -e "  7)  ${RED}Сбросить все правила${NC}"
+        echo -e " ${CYAN}── WARP ─────────────────────────────${NC}"
+        echo -e "  8)  Установить WARP"
+        echo -e "  9)  Статус WARP"
+        echo -e " 10)  Запустить WARP"
+        echo -e " 11)  Остановить WARP"
+        echo -e " 12)  Перевыпустить ключ"
+        echo -e " 13)  Изменить порт SOCKS5"
+        echo -e " 14)  ${RED}Удалить WARP${NC}"
+        echo -e " ${CYAN}── 3X-UI / XRAY ─────────────────────${NC}"
+        echo -e " 15)  JSON для ручного добавления"
+        echo -e " 16)  ${GREEN}Применить в config.json (авто)${NC}"
+        echo -e " 17)  Бэкапы и Rollback"
+        echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
+        echo -e " 18)  Ping (live)"
+        echo -e " 19)  Системная статистика"
+        echo -e " 20)  Имена серверов"
+        echo -e " ${CYAN}── РОУТЕР ───────────────────────────${NC}"
+        echo -e " 21)  AmneziaWG на OpenWrt / Keenetic"
+        echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
+        echo -e " 22)  Проверка конфликтов"
+        echo -e " 23)  Обновить скрипт"
+        echo -e " 24)  ${RED}Полное удаление${NC}"
+        echo -e "  0)  Выход"
+        echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
+        read -p "Выбор: " ch
+        case $ch in
+            1)  configure_rule "udp" "AmneziaWG/WireGuard" ;;
+            2)  configure_rule "tcp" "VLESS/XRay" ;;
+            3)  configure_rule "tcp" "MTProto/TProxy" ;;
+            4)  configure_custom_rule ;;
+            5)  list_active_rules ;;
+            6)  delete_single_rule ;;
+            7)  flush_rules ;;
+            8)  install_warp ;;
+            9)  show_warp_status ;;
+            10) start_warp ;;
+            11) stop_warp ;;
+            12) rekey_warp ;;
+            13) change_warp_port ;;
+            14) uninstall_warp ;;
+            15) show_xray_json ;;
+            16) apply_xray_warp ;;
+            17) show_backups ;;
+            18) ping_menu ;;
+            19) show_system_stats ;;
+            20) manage_aliases_menu ;;
+            21) show_amnezia_router ;;
+            22) check_conflicts ;;
+            23) self_update ;;
+            24) full_uninstall ;;
+            0)  exit 0 ;;
         esac
     done
 }
 
+# ═══════════════════════════════════════════════════════════════
+#  STARTUP
+# ═══════════════════════════════════════════════════════════════
+
 run_startup() {
-    need_root
+    local total=6 s=0
+
+    clear; echo ""
+    echo -e "${MAGENTA}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║              GoVPN Manager v${VERSION} — Загрузка                      ║${NC}"
+    echo -e "${MAGENTA}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    ((s++))
+    printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Проверка прав root..." "$s" "$total"
+    check_root
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Права root                          \n" "$s" "$total"
+
+    ((s++))
+    printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Загрузка конфигурации..." "$s" "$total"
     init_config
-    install_self
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Конфигурация загружена               \n" "$s" "$total"
+
+    ((s++))
+    printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Установка зависимостей..." "$s" "$total"
+    check_deps
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Зависимости на месте                 \n" "$s" "$total"
+
+    ((s++))
+    printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Сеть (интерфейс + BBR)..." "$s" "$total"
+    detect_interface
+    prepare_system
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Iface: %-20s         \n" "$s" "$total" "$IFACE"
+
+    ((s++))
+    printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Внешний IP..." "$s" "$total"
     get_my_ip
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   IP: %-25s            \n" "$s" "$total" "$MY_IP"
+
+    ((s++))
+    printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Установка команды ${SCRIPT_NAME}..." "$s" "$total"
+    if [ "$(readlink -f "$0" 2>/dev/null)" != "$INSTALL_PATH" ]; then
+        cp -f "$0" "$INSTALL_PATH"; chmod +x "$INSTALL_PATH"
+    fi
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Команда: ${SCRIPT_NAME}                     \n" "$s" "$total"
+
+    echo ""
+    local bar=""
+    for ((i=0; i<40; i++)); do bar+="█"; done
+    echo -e "  ${CYAN}[${GREEN}${bar}${CYAN}]${NC} ${GREEN}100%${NC}"
+    echo ""
+    echo -e "  ${GREEN}✅  GoVPN Manager v${VERSION} готов!${NC}"
+    echo ""
+    sleep 1
     show_menu
 }
 
+# ═══════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ═══════════════════════════════════════════════════════════════
+
 case "${1:-}" in
-    install) need_root; init_config; install_self; install_warp ;;
-    start) need_root; init_config; start_warp ;;
-    stop) need_root; init_config; stop_warp ;;
-    status) need_root; init_config; show_status ;;
-    xui) need_root; init_config; show_xui_json ;;
-    rekey) need_root; init_config; rekey_warp ;;
-    port) need_root; init_config; change_port ;;
-    update) need_root; init_config; update_self ;;
-    fallback) need_root; init_config; install_fallback_warp ;;
-    uninstall) need_root; init_config; full_uninstall ;;
-    *) run_startup ;;
+    rollback)
+        init_config
+        check_root
+        if [ -z "${2:-}" ]; then
+            echo "Usage: ${SCRIPT_NAME} rollback <path_to_backup>"
+            exit 1
+        fi
+        rollback_xray_config "$2"
+        ;;
+    *)
+        run_startup
+        ;;
 esac
