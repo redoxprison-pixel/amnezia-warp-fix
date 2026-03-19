@@ -562,37 +562,45 @@ _warp_autorepair() {
 
     # Шаг 1: проверка API
     echo -e "${YELLOW}[1/4]${NC} Проверка доступности Cloudflare API..."
-    local api_ok=0 proxy=""
     if _warp_check_api; then
-        api_ok=1
-        echo -e "${GREEN}  ✓ API доступен${NC}"
+        echo -e "${GREEN}  ✓ API доступен — продолжаем${NC}"
     else
-        echo -e "${RED}  ✗ API недоступен с этого IP${NC}"
+        echo -e "${RED}  ✗ Cloudflare API недоступен с этого IP${NC}"
         echo ""
-        echo -e "${WHITE}Для регистрации нужен прокси с доступом к Cloudflare.${NC}"
-        echo -e "${WHITE}Если прокси нет — установите WARP на AMS (exit-ноду), не на RU-bridge.${NC}"
+        echo -e "${CYAN}━━━ Диагностика ━━━${NC}"
         echo ""
-        echo -e "  ${GREEN}[1]${NC} Ввести SOCKS5 прокси для регистрации"
-        echo -e "  ${YELLOW}[2]${NC} Продолжить без прокси (попытка напрямую)"
-        echo -e "  ${RED}[0]${NC} Отмена"
+        echo -e "${WHITE}Cloudflare блокирует регистрацию warp-cli с российских IP.${NC}"
+        echo -e "${YELLOW}Важно:${NC} ${WHITE}warp-cli игнорирует SOCKS5 прокси при регистрации —"
+        echo -e "передача прокси через ALL_PROXY не работает с официальным клиентом.${NC}"
+        echo ""
+        echo -e "${CYAN}━━━ Что делать ━━━${NC}"
+        echo ""
+        echo -e "  ${GREEN}[рекомендуется]${NC} WARP нужен на AMS (exit-ноде), не на RU-bridge."
+        echo -e "  Запустите ${WHITE}govpn${NC} на AMS и установите там."
+        echo -e "  На RU трафик и так идёт через AMS — WARP на RU бессмысленен."
+        echo ""
+        echo -e "  ${YELLOW}[альтернатива]${NC} warp-go — реализация WARP на Go,"
+        echo -e "  которая умеет регистрироваться через прокси."
+        echo -e "  Установить: ${CYAN}https://github.com/bepass-org/warp-plus${NC}"
+        echo ""
+        echo -e "  ${WHITE}[1]${NC} Попробовать переустановить и зарегистрировать напрямую"
+        echo -e "      (сработает если блокировка временная или на другом хостинге)"
+        echo -e "  ${WHITE}[0]${NC} Отмена"
         echo ""
         read -p "Выбор: " api_ch
         case "$api_ch" in
             1)
-                _warp_ask_proxy
-                proxy="$REPLY_PROXY"
-                [ -z "$proxy" ] && echo -e "${RED}Прокси не указан. Отмена.${NC}" && return 1
+                echo -e "${YELLOW}  Продолжаем с попыткой прямой регистрации...${NC}"
                 ;;
-            2)
-                echo -e "${YELLOW}  Продолжаем без прокси...${NC}"
-                ;;
-            *)
-                echo -e "${CYAN}Отменено.${NC}"; return 1
+            0|*)
+                echo -e "${CYAN}Отменено.${NC}"
+                log_action "WARP AUTOREPAIR: cancelled (API unavailable)"
+                return 1
                 ;;
         esac
     fi
 
-    # Шаг 2: сброс сломанного состояния
+    # Шаг 2: сброс состояния
     echo -e "${YELLOW}[2/4]${NC} Сброс текущего состояния WARP..."
     warp-cli --accept-tos disconnect > /dev/null 2>&1
     warp-cli --accept-tos registration delete > /dev/null 2>&1
@@ -602,20 +610,13 @@ _warp_autorepair() {
 
     # Шаг 3: регистрация
     echo -e "${YELLOW}[3/4]${NC} Регистрация аккаунта..."
-    local reg_ok=0
-    if _warp_register "$proxy"; then
-        reg_ok=1
+    if _warp_register; then
         echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
     else
         echo -e "${RED}  ✗ Регистрация не удалась${NC}"
-        if [ -n "$proxy" ]; then
-            echo -e "${WHITE}  Прокси не помог. Проверьте доступность прокси к Cloudflare.${NC}"
-        else
-            echo -e "${WHITE}  Попробуйте снова с прокси или установите WARP на AMS.${NC}"
-        fi
         echo ""
-        echo -e "${YELLOW}Выполнить полную переустановку WARP?${NC}"
-        echo -e "${WHITE}(пакет будет удалён и установлен заново)${NC}"
+        echo -e "${YELLOW}Попробовать полную переустановку пакета?${NC}"
+        echo -e "${WHITE}(иногда помогает при повреждённом состоянии демона)${NC}"
         read -p "(y/n): " reinstall_ch
         if [[ "$reinstall_ch" == "y" ]]; then
             echo -e "${YELLOW}[*] Полная переустановка...${NC}"
@@ -627,15 +628,22 @@ _warp_autorepair() {
             apt-get install -y cloudflare-warp > /dev/null 2>&1
             systemctl start warp-svc > /dev/null 2>&1
             sleep 2
-            if _warp_register "$proxy"; then
-                reg_ok=1
-                echo -e "${GREEN}  ✓ Переустановка успешна${NC}"
-            else
+            if ! _warp_register; then
                 echo -e "${RED}  ✗ Регистрация после переустановки не удалась.${NC}"
-                echo -e "${WHITE}  Рекомендация: установите WARP на AMS сервер (exit-ноду).${NC}"
-                log_action "WARP AUTOREPAIR: failed after reinstall"
+                echo ""
+                echo -e "${CYAN}━━━ Итог ━━━${NC}"
+                echo -e "${WHITE}API Cloudflare недоступен с этого IP."
+                echo -e "warp-cli не поддерживает обход через SOCKS5 при регистрации."
+                echo ""
+                echo -e "Рекомендации:${NC}"
+                echo -e "  1) Установите WARP на ${GREEN}AMS сервер${NC} (exit-нода) — там нет блокировки"
+                echo -e "  2) Используйте ${CYAN}warp-plus${NC} вместо официального клиента:"
+                echo -e "     ${WHITE}https://github.com/bepass-org/warp-plus${NC}"
+                echo ""
+                log_action "WARP AUTOREPAIR: failed after reinstall (API blocked)"
                 return 1
             fi
+            echo -e "${GREEN}  ✓ Переустановка успешна${NC}"
         else
             log_action "WARP AUTOREPAIR: registration failed, user declined reinstall"
             return 1
@@ -658,7 +666,7 @@ _warp_autorepair() {
         echo -e "${GREEN}━━━ Авторемонт завершён успешно ━━━${NC}"
         return 0
     else
-        echo -e "${RED}  ✗ Подключение не установлено после ремонта.${NC}"
+        echo -e "${RED}  ✗ Подключение не установлено.${NC}"
         echo -e "${WHITE}  Диагностика: ${CYAN}warp-cli --accept-tos status${NC}"
         log_action "WARP AUTOREPAIR: installed but connection failed"
         return 1
@@ -1448,36 +1456,213 @@ ping_live() {
 }
 
 ping_menu() {
-    echo -e "\n${CYAN}━━━ Ping ━━━${NC}"
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Ping & Мониторинг ━━━${NC}\n"
+
+        # Показываем текущий статус всех серверов
+        local -a ips=()
+        while read -r ip; do [ -n "$ip" ] && ips+=("$ip"); done <<< "$(get_target_ips)"
+
+        if [ ${#ips[@]} -gt 0 ]; then
+            echo -e "${WHITE}Серверы в правилах:${NC}"
+            for ip in "${ips[@]}"; do
+                local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
+                if [ -n "$raw" ]; then
+                    local ms; ms="${raw#*|}"
+                    local method; method="${raw%%|*}"
+                    local color="$GREEN"
+                    local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
+                    (( ms_int > 50 )) && color="$YELLOW"
+                    (( ms_int > 100 )) && color="$RED"
+                    echo -e "  ${color}●${NC} $(fmt_ip_short "$ip")  ${color}${ms}ms${NC} ${WHITE}[${method}]${NC}"
+                else
+                    echo -e "  ${RED}●${NC} $(fmt_ip_short "$ip")  ${RED}TIMEOUT${NC}"
+                fi
+            done
+            echo ""
+        fi
+
+        # Статус мониторинга
+        local mon_status="${RED}Выключен${NC}"
+        if [ -f "$MONITOR_PID_FILE" ] && kill -0 "$(cat "$MONITOR_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+            local mon_interval; mon_interval=$(cat "${CONF_DIR}/monitor_interval" 2>/dev/null || echo "60")
+            mon_status="${GREEN}Работает (каждые ${mon_interval}с)${NC}"
+        fi
+        echo -e "${WHITE}Автомониторинг: ${mon_status}${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} Live ping (выбрать сервер)"
+        echo -e "  ${YELLOW}[2]${NC} Проверить все серверы сейчас"
+        echo -e "  ${GREEN}[3]${NC} Включить автомониторинг"
+        echo -e "  ${RED}[4]${NC} Выключить автомониторинг"
+        echo -e "  ${YELLOW}[5]${NC} Показать лог мониторинга"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выбор: " choice
+        case "$choice" in
+            1)
+                if [ ${#ips[@]} -eq 0 ]; then
+                    echo -e "${YELLOW}Нет серверов. Введите IP:${NC}"
+                    read -p "> " manual_ip
+                    validate_ip "$manual_ip" && ping_live "$manual_ip"
+                else
+                    echo -e "\nСерверы:"
+                    for i in "${!ips[@]}"; do
+                        echo -e "  ${YELLOW}[$((i+1))]${NC} $(fmt_ip "${ips[$i]}")"
+                    done
+                    echo -e "  ${YELLOW}[m]${NC} Ввести IP вручную"
+                    read -p "Выбор: " pc
+                    case "$pc" in
+                        m|M)
+                            read -p "IP: " manual_ip
+                            validate_ip "$manual_ip" && ping_live "$manual_ip"
+                            ;;
+                        *)
+                            local idx=$((pc - 1))
+                            [ -n "${ips[$idx]:-}" ] && ping_live "${ips[$idx]}"
+                            ;;
+                    esac
+                fi
+                ;;
+            2)
+                echo -e "\n${CYAN}Проверка всех серверов...${NC}\n"
+                if [ ${#ips[@]} -eq 0 ]; then
+                    echo -e "${YELLOW}Нет серверов в правилах.${NC}"
+                else
+                    for ip in "${ips[@]}"; do
+                        local raw; raw=$(smart_ping "$ip" 3 "$(get_port_for_ip "$ip")")
+                        if [ -n "$raw" ]; then
+                            local ms="${raw#*|}"; local method="${raw%%|*}"
+                            echo -e "  ${GREEN}✓${NC} $(fmt_ip_short "$ip")  ${GREEN}${ms}ms${NC} [${method}]"
+                        else
+                            echo -e "  ${RED}✗${NC} $(fmt_ip_short "$ip")  ${RED}НЕДОСТУПЕН${NC}"
+                            log_action "MONITOR CHECK: ${ip} TIMEOUT"
+                        fi
+                    done
+                fi
+                echo ""
+                read -p "Нажмите Enter..."
+                ;;
+            3)
+                _start_monitor
+                ;;
+            4)
+                _stop_monitor
+                read -p "Нажмите Enter..."
+                ;;
+            5)
+                clear
+                echo -e "${CYAN}━━━ Лог мониторинга (последние 30 строк) ━━━${NC}\n"
+                grep "MONITOR" "$LOG_FILE" 2>/dev/null | tail -30 || \
+                    echo -e "${YELLOW}Лог пуст.${NC}"
+                echo ""
+                read -p "Нажмите Enter..."
+                ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+_start_monitor() {
+    clear
+    echo -e "\n${CYAN}━━━ Настройка автомониторинга ━━━${NC}\n"
+
     local -a ips=()
     while read -r ip; do [ -n "$ip" ] && ips+=("$ip"); done <<< "$(get_target_ips)"
     if [ ${#ips[@]} -eq 0 ]; then
-        echo -e "${YELLOW}Нет серверов в правилах.${NC}"
-        echo -e "Введите IP вручную:"
-        read -p "> " manual_ip
-        if validate_ip "$manual_ip"; then
-            ping_live "$manual_ip"; return
-        fi
-        read -p "Enter..."; return
+        echo -e "${YELLOW}Нет серверов в правилах iptables.${NC}"
+        echo -e "${WHITE}Сначала добавьте правило (п.1-4).${NC}"
+        read -p "Нажмите Enter..."; return
     fi
-    for i in "${!ips[@]}"; do
-        echo -e "  ${YELLOW}[$((i+1))]${NC} $(fmt_ip "${ips[$i]}")"
-    done
-    echo -e "  ${YELLOW}[m]${NC} Ввести IP вручную"
-    echo -e "  ${YELLOW}[0]${NC} Назад"
-    read -p "Выбор: " choice
-    case "$choice" in
-        0|"") return ;;
-        m|M)
-            read -p "IP: " manual_ip
-            validate_ip "$manual_ip" && ping_live "$manual_ip" || \
-                echo -e "${RED}Некорректный IP.${NC}"
-            ;;
-        *)
-            local idx=$((choice - 1))
-            [ -n "${ips[$idx]:-}" ] && ping_live "${ips[$idx]}"
+
+    echo -e "${WHITE}Серверы для мониторинга:${NC}"
+    for ip in "${ips[@]}"; do echo -e "  ${CYAN}•${NC} $(fmt_ip_short "$ip")"; done
+    echo ""
+
+    echo -e "${WHITE}Интервал проверки:${NC}"
+    echo -e "  ${YELLOW}[1]${NC} 30 секунд"
+    echo -e "  ${YELLOW}[2]${NC} 1 минута ${WHITE}(рекомендуется)${NC}"
+    echo -e "  ${YELLOW}[3]${NC} 5 минут"
+    echo -e "  ${YELLOW}[4]${NC} Свой интервал"
+    read -p "Выбор [2]: " int_ch
+    local interval=60
+    case "${int_ch:-2}" in
+        1) interval=30 ;;
+        2) interval=60 ;;
+        3) interval=300 ;;
+        4)
+            read -p "Интервал в секундах: " interval
+            [[ ! "$interval" =~ ^[0-9]+$ ]] || (( interval < 10 )) && interval=60
             ;;
     esac
+
+    # Остановить старый если был
+    _stop_monitor_silent
+
+    # Записать интервал
+    echo "$interval" > "${CONF_DIR}/monitor_interval"
+
+    # Запустить daemon в фоне
+    _monitor_daemon "$interval" &
+    local pid=$!
+    echo "$pid" > "$MONITOR_PID_FILE"
+    disown "$pid"
+
+    echo -e "${GREEN}[OK] Автомониторинг запущен (PID: ${pid}, интервал: ${interval}с)${NC}"
+    echo -e "${WHITE}Серверы проверяются каждые ${interval} секунд.${NC}"
+    echo -e "${WHITE}Результаты: ${CYAN}${LOG_FILE}${NC} (фильтр: MONITOR)${NC}"
+    log_action "MONITOR START: interval=${interval}s, servers=${ips[*]}"
+    read -p "Нажмите Enter..."
+}
+
+_stop_monitor() {
+    if [ -f "$MONITOR_PID_FILE" ]; then
+        local pid; pid=$(cat "$MONITOR_PID_FILE" 2>/dev/null)
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            echo -e "${GREEN}[OK] Автомониторинг остановлен (PID: ${pid}).${NC}"
+            log_action "MONITOR STOP"
+        else
+            echo -e "${YELLOW}Процесс не найден (уже остановлен?).${NC}"
+        fi
+        rm -f "$MONITOR_PID_FILE"
+    else
+        echo -e "${YELLOW}Мониторинг не запущен.${NC}"
+    fi
+}
+
+_stop_monitor_silent() {
+    [ -f "$MONITOR_PID_FILE" ] && \
+        kill "$(cat "$MONITOR_PID_FILE" 2>/dev/null)" 2>/dev/null && \
+        rm -f "$MONITOR_PID_FILE"
+    true
+}
+
+_monitor_daemon() {
+    local interval="${1:-60}"
+    # Daemon loop — работает в фоне
+    while true; do
+        sleep "$interval"
+        # Получаем актуальный список серверов из iptables
+        local ips_now
+        ips_now=$(iptables -t nat -S PREROUTING 2>/dev/null | \
+            grep "DNAT" | grep "govpn" | \
+            sed -n 's/.*--to-destination \([^:]*\).*/\1/p' | sort -u)
+        [ -z "$ips_now" ] && continue
+        while IFS= read -r ip; do
+            [ -z "$ip" ] && continue
+            local port
+            port=$(iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn" | \
+                grep "$ip" | sed -n 's/.*--to-destination [^:]*:\([0-9]*\).*/\1/p' | head -1)
+            local raw; raw=$(smart_ping "$ip" 3 "$port")
+            if [ -n "$raw" ]; then
+                local ms="${raw#*|}"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] MONITOR OK: ${ip} ${ms}ms" >> "$LOG_FILE"
+            else
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] MONITOR TIMEOUT: ${ip} — сервер не отвечает" >> "$LOG_FILE"
+            fi
+        done <<< "$ips_now"
+    done
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1578,6 +1763,10 @@ full_uninstall() {
 
     echo ""
     echo -e "${YELLOW}Удаление...${NC}\n"
+
+    # Остановить мониторинг
+    _stop_monitor_silent
+    echo -e "  ${GREEN}✓${NC}  Мониторинг остановлен"
 
     # Правила iptables
     while IFS='|' read -r proto port dest; do
@@ -1802,6 +1991,11 @@ case "${1:-}" in
             exit 1
         fi
         rollback_xray_config "$2"
+        ;;
+    --monitor-daemon)
+        init_config
+        interval=$(cat "${CONF_DIR}/monitor_interval" 2>/dev/null || echo "60")
+        _monitor_daemon "$interval"
         ;;
     *)
         run_startup
