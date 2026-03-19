@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.3"
+VERSION="1.4"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -561,21 +561,25 @@ is_warp_installed() {
 is_warp_running() {
     local st
     st=$(warp-cli --accept-tos status 2>/dev/null)
-    echo "$st" | grep -qi "status.*connected" && ! echo "$st" | grep -qi "disconnected"
+    # warp-cli выводит "Status update: Connected" или "Status update: Disconnected"
+    if echo "$st" | grep -qi "disconnected"; then return 1; fi
+    if echo "$st" | grep -qi "connected"; then return 0; fi
+    return 1
 }
 
 get_warp_status_text() {
     if ! is_warp_installed; then echo "Не установлен"; return; fi
     local st
-    st=$(warp-cli --accept-tos status 2>/dev/null | head -3)
+    st=$(warp-cli --accept-tos status 2>/dev/null)
     if echo "$st" | grep -qi "disconnected"; then echo "Отключён"
     elif echo "$st" | grep -qi "connected"; then echo "Подключён"
     elif echo "$st" | grep -qi "registration missing"; then echo "Нет регистрации"
-    else echo "Неизвестно"; fi
+    elif echo "$st" | grep -qi "unable to connect"; then echo "Ошибка подключения"
+    else echo "Неизвестно ($(echo "$st" | head -1))"; fi
 }
 
 get_warp_ip() {
-    local ip="" proxy="socks5h://127.0.0.1:${WARP_SOCKS_PORT}"
+    local ip="" proxy="socks5://127.0.0.1:${WARP_SOCKS_PORT}"
     local services=(
         "https://api4.ipify.org"
         "https://ipv4.icanhazip.com"
@@ -1045,18 +1049,27 @@ start_warp() {
         read -p "Нажмите Enter..."; return
     fi
     if is_warp_running; then
-        echo -e "\n${YELLOW}WARP уже подключён.${NC}"
+        local wip; wip=$(get_warp_ip)
+        echo -e "\n${GREEN}WARP уже подключён.${NC}"
+        echo -e "  ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
         read -p "Нажмите Enter..."; return
     fi
     echo -e "\n${YELLOW}[*] Подключение WARP...${NC}"
     warp-cli --accept-tos connect > /dev/null 2>&1
     sleep 3
     if is_warp_running; then
+        local wip; wip=$(get_warp_ip)
         echo -e "${GREEN}[OK] WARP подключён.${NC}"
-        log_action "WARP START"
+        echo -e "  ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+        log_action "WARP START: warp_ip=${wip}"
     else
+        local real_st
+        real_st=$(warp-cli --accept-tos status 2>/dev/null | head -3)
         echo -e "${RED}[ERROR] Не удалось подключить.${NC}"
-        echo -e "${WHITE}Диагностика: ${CYAN}warp-cli --accept-tos status${NC}"
+        echo -e "${WHITE}Статус:${NC}"
+        echo "$real_st" | while IFS= read -r l; do echo -e "  ${YELLOW}${l}${NC}"; done
+        echo ""
+        echo -e "${WHITE}Попробуйте авторемонт: ${CYAN}govpn → п.8r${NC}"
     fi
     read -p "Нажмите Enter..."
 }
