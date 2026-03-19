@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.4"
+VERSION="1.5"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -757,9 +757,19 @@ _warp_autorepair() {
     warp-cli --accept-tos mode proxy > /dev/null 2>&1
     warp-cli --accept-tos proxy port "${WARP_SOCKS_PORT}" > /dev/null 2>&1
     warp-cli --accept-tos connect > /dev/null 2>&1
-    sleep 3
 
-    if is_warp_running; then
+    # Ждём стабилизации — до 15 секунд с проверкой каждые 3 секунды
+    local connected=0
+    for attempt in 1 2 3 4 5; do
+        sleep 3
+        if is_warp_running; then
+            connected=1
+            break
+        fi
+        echo -e "  ${YELLOW}[*] Ожидание... (${attempt}/5)${NC}"
+    done
+
+    if [ "$connected" -eq 1 ]; then
         local wip; wip=$(get_warp_ip)
         echo -e "${GREEN}  ✓ WARP подключён!${NC}"
         echo -e "    ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
@@ -768,9 +778,14 @@ _warp_autorepair() {
         echo -e "${GREEN}━━━ Авторемонт завершён успешно ━━━${NC}"
         return 0
     else
-        echo -e "${RED}  ✗ Подключение не установлено.${NC}"
-        echo -e "${WHITE}  Диагностика: ${CYAN}warp-cli --accept-tos status${NC}"
-        log_action "WARP AUTOREPAIR: installed but connection failed"
+        local real_st; real_st=$(warp-cli --accept-tos status 2>/dev/null | head -3)
+        echo -e "${RED}  ✗ Подключение не установлено после 15 секунд ожидания.${NC}"
+        echo -e "${WHITE}  Текущий статус:${NC}"
+        echo "$real_st" | while IFS= read -r l; do echo -e "  ${YELLOW}  ${l}${NC}"; done
+        echo ""
+        echo -e "${WHITE}  Попробуйте: ${CYAN}warp-cli --accept-tos connect${NC}"
+        echo -e "${WHITE}  Или чистую переустановку: п.8p${NC}"
+        log_action "WARP AUTOREPAIR: connect timeout after 15s"
         return 1
     fi
 }
@@ -2057,7 +2072,12 @@ show_menu() {
         echo -e "${WHITE}  GoVPN Manager v${VERSION}${NC}"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         echo -e "  ${WHITE}IP:    ${GREEN}${MY_IP}${NC}   ${WHITE}Iface: ${CYAN}${IFACE}${NC}"
-        echo -e "  ${WHITE}WARP:  ${warp_color}${warp_st}${NC}   ${WHITE}SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        if is_warp_running; then
+            local _wip; _wip=$(get_warp_ip)
+            echo -e "  ${WHITE}WARP:  ${warp_color}${warp_st}${NC}   ${WHITE}CF IP: ${GREEN}${_wip}${NC}   ${WHITE}SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        else
+            echo -e "  ${WHITE}WARP:  ${warp_color}${warp_st}${NC}   ${WHITE}SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        fi
         echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
         echo -e " ${CYAN}── IPTABLES ПРОБРОС ─────────────────${NC}"
         echo -e "  1)  AmneziaWG / WireGuard  ${WHITE}(UDP)${NC}"
