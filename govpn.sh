@@ -507,16 +507,227 @@ get_warp_ip() {
         ifconfig.me 2>/dev/null || echo "N/A"
 }
 
+_warp_detect_state() {
+    # Возвращает: ok | no_registration | not_connected | not_installed | broken
+    if ! is_warp_installed; then echo "not_installed"; return; fi
+    local st
+    st=$(warp-cli --accept-tos status 2>/dev/null)
+    if echo "$st" | grep -qi "registration missing"; then echo "no_registration"; return; fi
+    if echo "$st" | grep -qi "connected" && ! echo "$st" | grep -qi "disconnected"; then echo "ok"; return; fi
+    if echo "$st" | grep -qi "disconnected"; then echo "not_connected"; return; fi
+    echo "broken"
+}
+
+_warp_purge() {
+    echo -e "${YELLOW}  [*] Полная очистка WARP...${NC}"
+    warp-cli --accept-tos disconnect > /dev/null 2>&1
+    warp-cli --accept-tos registration delete > /dev/null 2>&1
+    systemctl stop warp-svc > /dev/null 2>&1
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get remove -y --purge cloudflare-warp > /dev/null 2>&1
+    apt-get autoremove -y > /dev/null 2>&1
+    rm -f /etc/apt/sources.list.d/cloudflare-client.list
+    rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    # Удалить WireGuard интерфейс если остался
+    ip link delete warp0 2>/dev/null || true
+    echo -e "${GREEN}  ✓ WARP полностью удалён${NC}"
+    log_action "WARP PURGE: full cleanup done"
+}
+
+_warp_register() {
+    # Принимает опциональный прокси $1
+    local proxy="${1:-}"
+    if [ -n "$proxy" ]; then
+        [[ "$proxy" != socks5://* ]] && proxy="socks5://${proxy}"
+        echo -e "${YELLOW}  [*] Регистрация через прокси ${proxy}...${NC}"
+        ALL_PROXY="$proxy" warp-cli --accept-tos registration new > /dev/null 2>&1
+    else
+        warp-cli --accept-tos registration new > /dev/null 2>&1
+    fi
+    return $?
+}
+
+_warp_check_api() {
+    # Возвращает 0 если API доступен, 1 если нет
+    curl -s --max-time 8 --connect-timeout 5 \
+        https://api.cloudflareclient.com/v0a2158/reg \
+        -o /dev/null 2>/dev/null
+    return $?
+}
+
+_warp_autorepair() {
+    echo ""
+    echo -e "${CYAN}━━━ Авторемонт WARP ━━━${NC}"
+    echo ""
+
+    # Шаг 1: проверка API
+    echo -e "${YELLOW}[1/4]${NC} Проверка доступности Cloudflare API..."
+    local api_ok=0 proxy=""
+    if _warp_check_api; then
+        api_ok=1
+        echo -e "${GREEN}  ✓ API доступен${NC}"
+    else
+        echo -e "${RED}  ✗ API недоступен с этого IP${NC}"
+        echo ""
+        echo -e "${WHITE}Для регистрации нужен прокси с доступом к Cloudflare.${NC}"
+        echo -e "${WHITE}Если прокси нет — установите WARP на AMS (exit-ноду), не на RU-bridge.${NC}"
+        echo ""
+        echo -e "  ${GREEN}[1]${NC} Ввести SOCKS5 прокси для регистрации"
+        echo -e "  ${YELLOW}[2]${NC} Продолжить без прокси (попытка напрямую)"
+        echo -e "  ${RED}[0]${NC} Отмена"
+        echo ""
+        read -p "Выбор: " api_ch
+        case "$api_ch" in
+            1)
+                _warp_ask_proxy
+                proxy="$REPLY_PROXY"
+                [ -z "$proxy" ] && echo -e "${RED}Прокси не указан. Отмена.${NC}" && return 1
+                ;;
+            2)
+                echo -e "${YELLOW}  Продолжаем без прокси...${NC}"
+                ;;
+            *)
+                echo -e "${CYAN}Отменено.${NC}"; return 1
+                ;;
+        esac
+    fi
+
+    # Шаг 2: сброс сломанного состояния
+    echo -e "${YELLOW}[2/4]${NC} Сброс текущего состояния WARP..."
+    warp-cli --accept-tos disconnect > /dev/null 2>&1
+    warp-cli --accept-tos registration delete > /dev/null 2>&1
+    systemctl restart warp-svc > /dev/null 2>&1
+    sleep 2
+    echo -e "${GREEN}  ✓ Состояние сброшено${NC}"
+
+    # Шаг 3: регистрация
+    echo -e "${YELLOW}[3/4]${NC} Регистрация аккаунта..."
+    local reg_ok=0
+    if _warp_register "$proxy"; then
+        reg_ok=1
+        echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
+    else
+        echo -e "${RED}  ✗ Регистрация не удалась${NC}"
+        if [ -n "$proxy" ]; then
+            echo -e "${WHITE}  Прокси не помог. Проверьте доступность прокси к Cloudflare.${NC}"
+        else
+            echo -e "${WHITE}  Попробуйте снова с прокси или установите WARP на AMS.${NC}"
+        fi
+        echo ""
+        echo -e "${YELLOW}Выполнить полную переустановку WARP?${NC}"
+        echo -e "${WHITE}(пакет будет удалён и установлен заново)${NC}"
+        read -p "(y/n): " reinstall_ch
+        if [[ "$reinstall_ch" == "y" ]]; then
+            echo -e "${YELLOW}[*] Полная переустановка...${NC}"
+            _warp_purge
+            sleep 1
+            detect_os
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y > /dev/null 2>&1
+            apt-get install -y cloudflare-warp > /dev/null 2>&1
+            systemctl start warp-svc > /dev/null 2>&1
+            sleep 2
+            if _warp_register "$proxy"; then
+                reg_ok=1
+                echo -e "${GREEN}  ✓ Переустановка успешна${NC}"
+            else
+                echo -e "${RED}  ✗ Регистрация после переустановки не удалась.${NC}"
+                echo -e "${WHITE}  Рекомендация: установите WARP на AMS сервер (exit-ноду).${NC}"
+                log_action "WARP AUTOREPAIR: failed after reinstall"
+                return 1
+            fi
+        else
+            log_action "WARP AUTOREPAIR: registration failed, user declined reinstall"
+            return 1
+        fi
+    fi
+
+    # Шаг 4: подключение
+    echo -e "${YELLOW}[4/4]${NC} Настройка и подключение..."
+    warp-cli --accept-tos mode proxy > /dev/null 2>&1
+    warp-cli --accept-tos proxy port "${WARP_SOCKS_PORT}" > /dev/null 2>&1
+    warp-cli --accept-tos connect > /dev/null 2>&1
+    sleep 3
+
+    if is_warp_running; then
+        local wip; wip=$(get_warp_ip)
+        echo -e "${GREEN}  ✓ WARP подключён!${NC}"
+        echo -e "    ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+        log_action "WARP AUTOREPAIR: success, warp_ip=${wip}"
+        echo ""
+        echo -e "${GREEN}━━━ Авторемонт завершён успешно ━━━${NC}"
+        return 0
+    else
+        echo -e "${RED}  ✗ Подключение не установлено после ремонта.${NC}"
+        echo -e "${WHITE}  Диагностика: ${CYAN}warp-cli --accept-tos status${NC}"
+        log_action "WARP AUTOREPAIR: installed but connection failed"
+        return 1
+    fi
+}
+
+_warp_ask_proxy() {
+    # Интерактивно спрашивает прокси, возвращает в REPLY_PROXY
+    REPLY_PROXY=""
+    echo ""
+    echo -e "${CYAN}━━━ API недоступен — регистрация через прокси ━━━${NC}"
+    echo -e "${WHITE}Введите SOCKS5 прокси для регистрации:${NC}"
+    echo -e "${WHITE}Форматы:${NC}"
+    echo -e "  ${CYAN}host:port${NC}               (анонимный)"
+    echo -e "  ${CYAN}user:pass@host:port${NC}      (с авторизацией)"
+    echo -e "  ${CYAN}socks5://user:pass@host:port${NC}"
+    echo ""
+    read -p "> " REPLY_PROXY
+}
+
 install_warp() {
     clear
     echo -e "\n${CYAN}━━━ Установка Cloudflare WARP ━━━${NC}\n"
 
-    if is_warp_installed; then
-        echo -e "${YELLOW}WARP уже установлен. Версия:${NC}"
-        warp-cli --version 2>/dev/null || true
-        echo ""
-        read -p "Нажмите Enter..."; return
-    fi
+    # Определяем текущее состояние
+    local state
+    state=$(_warp_detect_state)
+
+    case "$state" in
+        ok)
+            echo -e "${GREEN}WARP уже установлен и подключён.${NC}"
+            warp-cli --version 2>/dev/null || true
+            local wip; wip=$(get_warp_ip)
+            echo -e "${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+            echo ""
+            read -p "Нажмите Enter..."; return
+            ;;
+        not_connected)
+            echo -e "${YELLOW}WARP установлен но отключён. Попытка подключить...${NC}"
+            warp-cli --accept-tos mode proxy > /dev/null 2>&1
+            warp-cli --accept-tos proxy port "${WARP_SOCKS_PORT}" > /dev/null 2>&1
+            warp-cli --accept-tos connect > /dev/null 2>&1
+            sleep 3
+            if is_warp_running; then
+                echo -e "${GREEN}[OK] WARP подключён.${NC}"
+                log_action "WARP RECONNECT: ok"
+            else
+                echo -e "${RED}Не удалось подключить. Запускаем авторемонт...${NC}"
+                sleep 1
+                _warp_autorepair
+            fi
+            read -p "Нажмите Enter..."; return
+            ;;
+        no_registration)
+            echo -e "${YELLOW}WARP установлен но нет регистрации. Запускаем авторемонт...${NC}"
+            sleep 1
+            _warp_autorepair
+            read -p "Нажмите Enter..."; return
+            ;;
+        broken)
+            echo -e "${RED}WARP в неработоспособном состоянии. Запускаем авторемонт...${NC}"
+            sleep 1
+            _warp_autorepair
+            read -p "Нажмите Enter..."; return
+            ;;
+        not_installed)
+            : # продолжаем установку ниже
+            ;;
+    esac
 
     # Проверка конфликтов перед установкой
     check_conflicts || return
@@ -556,78 +767,34 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
     echo -e "${GREEN}  ✓ cloudflare-warp установлен${NC}"
 
     echo -e "${YELLOW}[3.5/6]${NC} Проверка доступности Cloudflare API..."
-    local api_ok=0
-    if curl -s --max-time 8 --connect-timeout 5 \
-        https://api.cloudflareclient.com/v0a2158/reg \
-        -o /dev/null 2>/dev/null; then
-        api_ok=1
+    local install_proxy=""
+    if _warp_check_api; then
         echo -e "${GREEN}  ✓ Cloudflare API доступен${NC}"
     else
         echo -e "${RED}  ✗ Cloudflare API недоступен с этого IP${NC}"
         echo ""
-        echo -e "${CYAN}━━━ Диагностика ━━━${NC}"
-        echo -e "${WHITE}Cloudflare блокирует регистрацию WARP с некоторых IP."
-        echo -e "Чаще всего это российские и некоторые европейские хостинги.${NC}"
+        echo -e "${WHITE}Cloudflare блокирует регистрацию WARP с некоторых IP.${NC}"
+        echo -e "${WHITE}Чаще всего это российские и некоторые европейские хостинги.${NC}"
         echo ""
-        echo -e "${CYAN}━━━ Варианты решения ━━━${NC}"
-        echo ""
-        echo -e "  ${GREEN}[1]${NC} ${WHITE}Установить WARP на exit-ноду (AMS), не на bridge (RU)${NC}"
-        echo -e "      WARP нужен там, где трафик выходит в интернет."
-        echo -e "      На RU-bridge он не нужен — трафик всё равно идёт через AMS."
-        echo ""
-        echo -e "  ${GREEN}[2]${NC} ${WHITE}Регистрация через существующий SOCKS5-прокси${NC}"
-        echo -e "      Если на этом сервере есть рабочий SOCKS5:"
-        echo -e "      ${CYAN}export ALL_PROXY=socks5://user:pass@127.0.0.1:PORT${NC}"
-        echo -e "      ${CYAN}warp-cli --accept-tos registration new${NC}"
-        echo -e "      ${CYAN}unset ALL_PROXY${NC}"
-        echo ""
-        echo -e "  ${GREEN}[3]${NC} ${WHITE}Попробовать регистрацию через прокси прямо сейчас${NC}"
-        echo -e "      Скрипт запросит адрес SOCKS5."
-        echo ""
-        echo -e "  ${GREEN}[4]${NC} ${WHITE}Продолжить без проверки${NC}"
-        echo -e "      Регистрация может не пройти."
-        echo ""
-        echo -e "  ${YELLOW}[0]${NC} Отмена установки"
+        echo -e "  ${GREEN}[1]${NC} Ввести SOCKS5 прокси для регистрации"
+        echo -e "  ${YELLOW}[2]${NC} Продолжить без прокси (попытка напрямую)"
+        echo -e "  ${CYAN}[3]${NC} Установить WARP на AMS (exit-ноду) вместо RU-bridge"
+        echo -e "  ${RED}[0]${NC} Отмена"
         echo ""
         read -p "Выбор: " api_choice
         case "$api_choice" in
             1)
-                echo -e "\n${CYAN}Установите WARP на AMS сервер запустив govpn там.${NC}"
-                echo -e "${WHITE}WARP на RU-bridge не нужен.${NC}"
-                read -p "Нажмите Enter..."; return
+                _warp_ask_proxy
+                install_proxy="$REPLY_PROXY"
+                [ -z "$install_proxy" ] && echo -e "${RED}Прокси не указан. Отмена.${NC}" && read -p "Enter..." && return
                 ;;
             2)
-                echo -e "\n${WHITE}Инструкция для ручной регистрации через прокси:${NC}"
-                echo -e "  ${CYAN}export ALL_PROXY=socks5://user:pass@127.0.0.1:PORT${NC}"
-                echo -e "  ${CYAN}warp-cli --accept-tos registration new${NC}"
-                echo -e "  ${CYAN}unset ALL_PROXY${NC}"
-                echo -e "  ${CYAN}warp-cli --accept-tos mode proxy${NC}"
-                echo -e "  ${CYAN}warp-cli --accept-tos proxy port ${WARP_SOCKS_PORT}${NC}"
-                echo -e "  ${CYAN}warp-cli --accept-tos connect${NC}"
-                read -p "Нажмите Enter..."; return
+                echo -e "${YELLOW}  Продолжаем без прокси...${NC}"
                 ;;
             3)
-                echo -e "\n${WHITE}Введите SOCKS5 прокси (формат: socks5://user:pass@host:port):${NC}"
-                echo -e "${WHITE}или просто host:port для анонимного:${NC}"
-                read -p "> " proxy_input
-                if [ -n "$proxy_input" ]; then
-                    [[ "$proxy_input" != socks5://* ]] && proxy_input="socks5://${proxy_input}"
-                    echo -e "${YELLOW}[*] Регистрация через ${proxy_input}...${NC}"
-                    ALL_PROXY="$proxy_input" warp-cli --accept-tos registration new > /dev/null 2>&1
-                    if [ $? -eq 0 ]; then
-                        api_ok=1
-                        echo -e "${GREEN}  ✓ Регистрация через прокси успешна${NC}"
-                    else
-                        echo -e "${RED}  ✗ Не удалось. Проверьте прокси и попробуйте вручную (вариант 2).${NC}"
-                        read -p "Нажмите Enter..."; return
-                    fi
-                else
-                    echo -e "${RED}Прокси не указан.${NC}"
-                    read -p "Нажмите Enter..."; return
-                fi
-                ;;
-            4)
-                echo -e "${YELLOW}  Продолжаем без проверки API...${NC}"
+                echo -e "\n${CYAN}Запустите govpn на AMS сервере и установите WARP там.${NC}"
+                echo -e "${WHITE}WARP на RU-bridge не нужен — трафик выходит через AMS.${NC}"
+                read -p "Нажмите Enter..."; return
                 ;;
             0|*)
                 echo -e "${CYAN}Установка отменена.${NC}"
@@ -637,15 +804,12 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
     fi
 
     echo -e "${YELLOW}[4/6]${NC} Регистрация аккаунта..."
-    if [ "$api_ok" -ne 1 ]; then
-        # api_ok=0 только если выбрали вариант 4 (продолжить без проверки)
-        warp-cli --accept-tos registration new > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}[ERROR] Регистрация не удалась.${NC}"
-            echo -e "${WHITE}API недоступен. Используйте вариант 2 или 3 из меню выше.${NC}"
-            echo -e "${CYAN}Повторите установку (п.8) и выберите регистрацию через прокси.${NC}"
-            read -p "Нажмите Enter..."; return
-        fi
+    if ! _warp_register "$install_proxy"; then
+        echo -e "${RED}  ✗ Регистрация не удалась.${NC}"
+        echo -e "${YELLOW}  Запускаем авторемонт...${NC}"
+        sleep 1
+        _warp_autorepair
+        read -p "Нажмите Enter..."; return
     fi
     echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
 
@@ -1513,6 +1677,7 @@ show_menu() {
         echo -e "  7)  ${RED}Сбросить все правила${NC}"
         echo -e " ${CYAN}── WARP ─────────────────────────────${NC}"
         echo -e "  8)  Установить WARP"
+        echo -e "  8r) ${YELLOW}Авторемонт WARP${NC}"
         echo -e "  9)  Статус WARP"
         echo -e " 10)  Запустить WARP"
         echo -e " 11)  Остановить WARP"
@@ -1545,6 +1710,7 @@ show_menu() {
             6)  delete_single_rule ;;
             7)  flush_rules ;;
             8)  install_warp ;;
+            8r) _warp_autorepair; read -p "Нажмите Enter..." ;;
             9)  show_warp_status ;;
             10) start_warp ;;
             11) stop_warp ;;
