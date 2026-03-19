@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.1"
+VERSION="1.2"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -99,9 +99,24 @@ detect_interface() {
 }
 
 get_my_ip() {
-    MY_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || \
-            curl -s4 --max-time 5 icanhazip.com 2>/dev/null || \
-            echo "N/A")
+    local ip=""
+    local services=(
+        "https://api4.ipify.org"
+        "https://ipv4.icanhazip.com"
+        "https://api.ipify.org"
+        "https://checkip.amazonaws.com"
+        "https://ipinfo.io/ip"
+    )
+    for svc in "${services[@]}"; do
+        ip=$(curl -s4 --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')
+        # Проверяем что получили именно IP, а не HTML/ошибку
+        if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            MY_IP="$ip"
+            return
+        fi
+    done
+    # Fallback: получить IP с сетевого интерфейса
+    MY_IP=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[^ ]+' | head -1 || echo "N/A")
 }
 
 check_deps() {
@@ -540,8 +555,34 @@ get_warp_status_text() {
 }
 
 get_warp_ip() {
-    curl -s4 --max-time 5 --proxy "socks5h://127.0.0.1:${WARP_SOCKS_PORT}" \
-        ifconfig.me 2>/dev/null || echo "N/A"
+    local ip="" proxy="socks5h://127.0.0.1:${WARP_SOCKS_PORT}"
+    local services=(
+        "https://api4.ipify.org"
+        "https://ipv4.icanhazip.com"
+        "https://api.ipify.org"
+        "https://checkip.amazonaws.com"
+        "https://ipinfo.io/ip"
+    )
+    for svc in "${services[@]}"; do
+        ip=$(curl -s4 --max-time 8 --proxy "$proxy" "$svc" 2>/dev/null | tr -d '[:space:]')
+        if [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "$ip"
+            return
+        fi
+    done
+    echo "N/A"
+}
+
+# Возвращает IP с предупреждением если совпадает с реальным
+get_warp_ip_display() {
+    local wip; wip=$(get_warp_ip)
+    if [ "$wip" = "N/A" ]; then
+        echo -e "${RED}N/A${NC}"
+    elif [ -n "$MY_IP" ] && [ "$wip" = "$MY_IP" ]; then
+        echo -e "${YELLOW}${wip} ⚠ совпадает с реальным IP${NC}"
+    else
+        echo -e "${GREEN}${wip}${NC}"
+    fi
 }
 
 _warp_detect_state() {
@@ -1030,8 +1071,7 @@ show_warp_status() {
     echo -e "  ${WHITE}Реальный IP: ${GREEN}${MY_IP}${NC}"
 
     if is_warp_running; then
-        local wip; wip=$(get_warp_ip)
-        echo -e "  ${WHITE}WARP IP:     ${GREEN}${wip}${NC}"
+        echo -e "  ${WHITE}WARP IP:     $(get_warp_ip_display)${NC}"
     fi
 
     echo ""
@@ -2048,7 +2088,7 @@ show_menu() {
             22) check_conflicts ;;
             23) self_update ;;
             24) full_uninstall ;;
-            0)  exit 0 ;;
+            0)  clear; exit 0 ;;
         esac
     done
 }
