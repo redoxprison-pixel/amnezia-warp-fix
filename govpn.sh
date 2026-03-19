@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.2"
+VERSION="1.3"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -175,11 +175,19 @@ check_conflicts() {
     local has_blocker=0
 
     # 1. Другие WARP реализации
-    local warp_variants=("warp-go" "amnezia-warp" "wireproxy" "wgcf")
-    for v in "${warp_variants[@]}"; do
+    local warp_blockers=("warp-go" "amnezia-warp" "wireproxy")
+    local warp_info=("wgcf")   # только генератор конфигов, не демон
+    for v in "${warp_blockers[@]}"; do
         if command -v "$v" &>/dev/null || systemctl is-active "$v" &>/dev/null 2>&1; then
             echo -e "  ${RED}[BLOCKER]${NC} Найден конфликтующий сервис: ${WHITE}${v}${NC}"
             has_blocker=1
+        else
+            echo -e "  ${GREEN}[✓]${NC} ${v} — не установлен"
+        fi
+    done
+    for v in "${warp_info[@]}"; do
+        if command -v "$v" &>/dev/null; then
+            echo -e "  ${CYAN}[INFO]${NC} ${v} — установлен (CLI утилита, не конфликтует с warp-cli)"
         else
             echo -e "  ${GREEN}[✓]${NC} ${v} — не установлен"
         fi
@@ -200,20 +208,32 @@ check_conflicts() {
         local occupant
         occupant=$(ss -tlnp 2>/dev/null | grep ":${WARP_SOCKS_PORT} " | \
             sed 's/.*users:(("//' | cut -d'"' -f1)
-        echo -e "  ${RED}[BLOCKER]${NC} Порт ${WARP_SOCKS_PORT} занят процессом: ${WHITE}${occupant}${NC}"
-        has_blocker=1
+        if [ "$occupant" = "warp-svc" ]; then
+            echo -e "  ${GREEN}[✓]${NC} Порт ${WARP_SOCKS_PORT} — занят warp-svc (это нормально, WARP уже работает)"
+        else
+            echo -e "  ${RED}[BLOCKER]${NC} Порт ${WARP_SOCKS_PORT} занят другим процессом: ${WHITE}${occupant}${NC}"
+            echo -e "         Измените порт WARP (п.13) или остановите ${occupant}."
+            has_blocker=1
+        fi
     else
         echo -e "  ${GREEN}[✓]${NC} Порт ${WARP_SOCKS_PORT} — свободен"
     fi
 
     # 4. Старая версия этого скрипта
-    if [ -f "$INSTALL_PATH" ] && [ "$(readlink -f "$0")" != "$INSTALL_PATH" ]; then
+    if [ -f "$INSTALL_PATH" ] && [ "$(readlink -f "$0" 2>/dev/null)" != "$INSTALL_PATH" ]; then
         local old_ver
-        old_ver=$(grep 'VERSION=' "$INSTALL_PATH" 2>/dev/null | head -1 | cut -d'"' -f2)
-        echo -e "  ${YELLOW}[WARN]${NC} Найдена старая версия ${SCRIPT_NAME}: ${WHITE}v${old_ver:-?}${NC}"
-        echo -e "         Путь: ${WHITE}${INSTALL_PATH}${NC}"
+        old_ver=$(grep '^VERSION=' "$INSTALL_PATH" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [ -n "$old_ver" ] && [ "$old_ver" != "$VERSION" ]; then
+            echo -e "  ${YELLOW}[WARN]${NC} Найдена другая версия ${SCRIPT_NAME}: ${WHITE}v${old_ver}${NC} (текущая: v${VERSION})"
+            echo -e "         Путь: ${WHITE}${INSTALL_PATH}${NC}"
+            echo -e "         Запустите скрипт — он обновится автоматически."
+        elif [ -n "$old_ver" ] && [ "$old_ver" = "$VERSION" ]; then
+            echo -e "  ${GREEN}[✓]${NC} Версия ${SCRIPT_NAME} совпадает: v${VERSION}"
+        else
+            echo -e "  ${CYAN}[INFO]${NC} ${INSTALL_PATH} существует (версия не определена)"
+        fi
     else
-        echo -e "  ${GREEN}[✓]${NC} Старых версий скрипта — нет"
+        echo -e "  ${GREEN}[✓]${NC} Команда ${SCRIPT_NAME} — актуальная версия v${VERSION}"
     fi
 
     # 5. Orphan warp outbound в xray config
