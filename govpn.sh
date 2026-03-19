@@ -225,6 +225,43 @@ except: print(0)
         fi
     fi
 
+    # 6. Amnezia Docker контейнеры
+    if command -v docker &>/dev/null; then
+        local amn_containers
+        amn_containers=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | grep -i "amnezia")
+        if [ -n "$amn_containers" ]; then
+            echo ""
+            echo -e "  ${CYAN}[INFO]${NC} Обнаружены контейнеры Amnezia:"
+            while IFS=$'\t' read -r name ports; do
+                echo -e "         ${WHITE}${name}${NC}  ${CYAN}${ports}${NC}"
+            done <<< "$amn_containers"
+            echo ""
+            # Проверяем конкретные конфликты портов с WARP
+            # amnezia-xray на 443 — не конфликтует с WARP SOCKS5
+            # amnezia-awg на UDP — не конфликтует
+            # amnezia-socks5proxy — проверим порт
+            local amn_socks_port
+            amn_socks_port=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | \
+                grep "amnezia-socks5proxy" | grep -oE '0\.0\.0\.0:[0-9]+->' | \
+                grep -oE '[0-9]+' | tail -1)
+            if [ -n "$amn_socks_port" ] && [ "$amn_socks_port" = "$WARP_SOCKS_PORT" ]; then
+                echo -e "  ${RED}[BLOCKER]${NC} amnezia-socks5proxy занимает порт ${WARP_SOCKS_PORT}"
+                echo -e "         Измените WARP_SOCKS_PORT (п.13) на другой порт."
+                has_blocker=1
+            else
+                echo -e "  ${GREEN}[✓]${NC} Конфликтов портов с Amnezia — нет"
+                echo -e "         ${WHITE}Примечание:${NC} amnezia-xray на :443 и WARP SOCKS5 на"
+                echo -e "         ${WHITE}127.0.0.1:${WARP_SOCKS_PORT} работают независимо друг от друга.${NC}"
+            fi
+            # Проверяем amn0 интерфейс
+            if ip link show amn0 &>/dev/null 2>&1; then
+                echo -e "  ${GREEN}[✓]${NC} Интерфейс amn0 (Amnezia) и warp0 (WARP) не конфликтуют"
+            fi
+        else
+            echo -e "  ${GREEN}[✓]${NC} Контейнеры Amnezia — не найдены"
+        fi
+    fi
+
     echo ""
     if [ "$has_blocker" -eq 1 ]; then
         echo -e "${RED}[!] Обнаружены BLOCKER-конфликты. Разрешите их перед установкой WARP.${NC}"
@@ -685,6 +722,99 @@ _warp_ask_proxy() {
     echo -e "  ${CYAN}socks5://user:pass@host:port${NC}"
     echo ""
     read -p "> " REPLY_PROXY
+}
+
+reinstall_warp() {
+    clear
+    echo -e "\n${RED}━━━ Чистая переустановка WARP ━━━${NC}\n"
+    echo -e "${WHITE}Будет выполнено:${NC}"
+    echo -e "  ${RED}1.${NC} Полное удаление текущего WARP (пакет + регистрация + интерфейс)"
+    echo -e "  ${GREEN}2.${NC} Свежая установка cloudflare-warp"
+    echo -e "  ${GREEN}3.${NC} Регистрация нового аккаунта"
+    echo -e "  ${GREEN}4.${NC} Подключение в режиме SOCKS5"
+    echo ""
+    echo -e "${YELLOW}Текущий статус:${NC}"
+    if is_warp_installed; then
+        warp-cli --accept-tos status 2>/dev/null | head -2 | \
+            while IFS= read -r l; do echo -e "  ${WHITE}${l}${NC}"; done
+        warp-cli --version 2>/dev/null | while IFS= read -r l; do echo -e "  ${WHITE}${l}${NC}"; done
+    else
+        echo -e "  ${RED}WARP не установлен${NC}"
+    fi
+    echo ""
+    echo -e "${CYAN}SOCKS5 порт после переустановки: ${WHITE}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+    echo ""
+    read -p "$(echo -e "${RED}Выполнить чистую переустановку? (y/n): ${NC}")" confirm
+    [[ "$confirm" != "y" ]] && echo -e "${CYAN}Отменено.${NC}" && read -p "Enter..." && return
+
+    echo ""
+    echo -e "${YELLOW}[1/4]${NC} Полное удаление WARP..."
+    _warp_purge
+    sleep 2
+
+    echo -e "${YELLOW}[2/4]${NC} Проверка доступности Cloudflare API..."
+    if _warp_check_api; then
+        echo -e "${GREEN}  ✓ API доступен${NC}"
+    else
+        echo -e "${RED}  ✗ API недоступен с этого IP${NC}"
+        echo -e "${WHITE}  Пакет будет установлен, но регистрация может не пройти.${NC}"
+        echo -e "${WHITE}  Это нормально для RU-серверов — WARP нужен только на AMS.${NC}"
+    fi
+
+    echo -e "${YELLOW}[3/4]${NC} Установка cloudflare-warp..."
+    detect_os
+    if [[ "$OS_ID" != "ubuntu" && "$OS_ID" != "debian" ]]; then
+        echo -e "${RED}[ERROR] Поддерживается только Ubuntu/Debian. Ваша ОС: ${OS_ID}${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    local codename="${OS_CODENAME}"
+    [ -z "$codename" ] && codename=$(lsb_release -cs 2>/dev/null || echo "focal")
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | \
+        gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
+https://pkg.cloudflareclient.com/ ${codename} main" \
+        > /etc/apt/sources.list.d/cloudflare-client.list
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y > /dev/null 2>&1
+    apt-get install -y cloudflare-warp > /dev/null 2>&1
+    if ! command -v warp-cli &>/dev/null; then
+        echo -e "${RED}[ERROR] Установка пакета не удалась.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    systemctl enable warp-svc > /dev/null 2>&1
+    systemctl start warp-svc > /dev/null 2>&1
+    sleep 3
+    echo -e "${GREEN}  ✓ $(warp-cli --version 2>/dev/null) установлен${NC}"
+
+    echo -e "${YELLOW}[4/4]${NC} Регистрация и подключение..."
+    if _warp_register; then
+        warp-cli --accept-tos mode proxy > /dev/null 2>&1
+        warp-cli --accept-tos proxy port "${WARP_SOCKS_PORT}" > /dev/null 2>&1
+        warp-cli --accept-tos connect > /dev/null 2>&1
+        sleep 3
+        if is_warp_running; then
+            local wip; wip=$(get_warp_ip)
+            echo -e "${GREEN}  ✓ WARP подключён!${NC}"
+            echo -e "    ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+            log_action "WARP REINSTALL: success, warp_ip=${wip}"
+        else
+            echo -e "${YELLOW}  ⚠ Установлен, но соединение не установлено.${NC}"
+            echo -e "  ${WHITE}Попробуйте: govpn → п.10 (Запустить WARP)${NC}"
+            log_action "WARP REINSTALL: installed, connection unconfirmed"
+        fi
+    else
+        echo -e "${RED}  ✗ Регистрация не удалась (API заблокирован).${NC}"
+        echo -e "${WHITE}  Пакет установлен. Попробуйте авторемонт (п.8r) позже.${NC}"
+        log_action "WARP REINSTALL: package ok, registration failed"
+    fi
+
+    echo ""
+    echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  Переустановка завершена.${NC}"
+    echo -e "${WHITE}  SOCKS5: 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo ""
+    read -p "Нажмите Enter..."
 }
 
 install_warp() {
@@ -1867,6 +1997,7 @@ show_menu() {
         echo -e " ${CYAN}── WARP ─────────────────────────────${NC}"
         echo -e "  8)  Установить WARP"
         echo -e "  8r) ${YELLOW}Авторемонт WARP${NC}"
+        echo -e "  8p) ${RED}Чистая переустановка WARP${NC}"
         echo -e "  9)  Статус WARP"
         echo -e " 10)  Запустить WARP"
         echo -e " 11)  Остановить WARP"
@@ -1900,6 +2031,7 @@ show_menu() {
             7)  flush_rules ;;
             8)  install_warp ;;
             8r) _warp_autorepair; read -p "Нажмите Enter..." ;;
+            8p) reinstall_warp ;;
             9)  show_warp_status ;;
             10) start_warp ;;
             11) stop_warp ;;
