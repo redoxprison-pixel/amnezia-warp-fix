@@ -1,5 +1,19 @@
-# Amnezia + WARP Route Fix
-Скрипт для настройки маршрутизации контейнеров Amnezia через Cloudflare WARP.
-
 ## Установка
-sudo curl -L "https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/main/setup.sh" -o /usr/local/bin/WarpGo && sudo chmod +x /usr/local/bin/WarpGo && WarpGo
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh)
+```
+
+После первого запуска скрипт устанавливается как команда:
+```bash
+govpn
+```
+
+### Rollback xray config вручную
+```bash
+govpn rollback /etc/govpn/backups/config.json.bak.<timestamp>
+```
+
+### Требования
+- Ubuntu 22.04 / 24.04 или Debian 11 / 12
+- root доступ
+- x-ui / 3x-ui / x-ui-pro (опционально, для интеграции с xray)
