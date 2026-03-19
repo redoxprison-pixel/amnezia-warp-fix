@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.0"
+VERSION="1.1"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -555,11 +555,97 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
     fi
     echo -e "${GREEN}  ✓ cloudflare-warp установлен${NC}"
 
+    echo -e "${YELLOW}[3.5/6]${NC} Проверка доступности Cloudflare API..."
+    local api_ok=0
+    if curl -s --max-time 8 --connect-timeout 5 \
+        https://api.cloudflareclient.com/v0a2158/reg \
+        -o /dev/null 2>/dev/null; then
+        api_ok=1
+        echo -e "${GREEN}  ✓ Cloudflare API доступен${NC}"
+    else
+        echo -e "${RED}  ✗ Cloudflare API недоступен с этого IP${NC}"
+        echo ""
+        echo -e "${CYAN}━━━ Диагностика ━━━${NC}"
+        echo -e "${WHITE}Cloudflare блокирует регистрацию WARP с некоторых IP."
+        echo -e "Чаще всего это российские и некоторые европейские хостинги.${NC}"
+        echo ""
+        echo -e "${CYAN}━━━ Варианты решения ━━━${NC}"
+        echo ""
+        echo -e "  ${GREEN}[1]${NC} ${WHITE}Установить WARP на exit-ноду (AMS), не на bridge (RU)${NC}"
+        echo -e "      WARP нужен там, где трафик выходит в интернет."
+        echo -e "      На RU-bridge он не нужен — трафик всё равно идёт через AMS."
+        echo ""
+        echo -e "  ${GREEN}[2]${NC} ${WHITE}Регистрация через существующий SOCKS5-прокси${NC}"
+        echo -e "      Если на этом сервере есть рабочий SOCKS5:"
+        echo -e "      ${CYAN}export ALL_PROXY=socks5://user:pass@127.0.0.1:PORT${NC}"
+        echo -e "      ${CYAN}warp-cli --accept-tos registration new${NC}"
+        echo -e "      ${CYAN}unset ALL_PROXY${NC}"
+        echo ""
+        echo -e "  ${GREEN}[3]${NC} ${WHITE}Попробовать регистрацию через прокси прямо сейчас${NC}"
+        echo -e "      Скрипт запросит адрес SOCKS5."
+        echo ""
+        echo -e "  ${GREEN}[4]${NC} ${WHITE}Продолжить без проверки${NC}"
+        echo -e "      Регистрация может не пройти."
+        echo ""
+        echo -e "  ${YELLOW}[0]${NC} Отмена установки"
+        echo ""
+        read -p "Выбор: " api_choice
+        case "$api_choice" in
+            1)
+                echo -e "\n${CYAN}Установите WARP на AMS сервер запустив govpn там.${NC}"
+                echo -e "${WHITE}WARP на RU-bridge не нужен.${NC}"
+                read -p "Нажмите Enter..."; return
+                ;;
+            2)
+                echo -e "\n${WHITE}Инструкция для ручной регистрации через прокси:${NC}"
+                echo -e "  ${CYAN}export ALL_PROXY=socks5://user:pass@127.0.0.1:PORT${NC}"
+                echo -e "  ${CYAN}warp-cli --accept-tos registration new${NC}"
+                echo -e "  ${CYAN}unset ALL_PROXY${NC}"
+                echo -e "  ${CYAN}warp-cli --accept-tos mode proxy${NC}"
+                echo -e "  ${CYAN}warp-cli --accept-tos proxy port ${WARP_SOCKS_PORT}${NC}"
+                echo -e "  ${CYAN}warp-cli --accept-tos connect${NC}"
+                read -p "Нажмите Enter..."; return
+                ;;
+            3)
+                echo -e "\n${WHITE}Введите SOCKS5 прокси (формат: socks5://user:pass@host:port):${NC}"
+                echo -e "${WHITE}или просто host:port для анонимного:${NC}"
+                read -p "> " proxy_input
+                if [ -n "$proxy_input" ]; then
+                    [[ "$proxy_input" != socks5://* ]] && proxy_input="socks5://${proxy_input}"
+                    echo -e "${YELLOW}[*] Регистрация через ${proxy_input}...${NC}"
+                    ALL_PROXY="$proxy_input" warp-cli --accept-tos registration new > /dev/null 2>&1
+                    if [ $? -eq 0 ]; then
+                        api_ok=1
+                        echo -e "${GREEN}  ✓ Регистрация через прокси успешна${NC}"
+                    else
+                        echo -e "${RED}  ✗ Не удалось. Проверьте прокси и попробуйте вручную (вариант 2).${NC}"
+                        read -p "Нажмите Enter..."; return
+                    fi
+                else
+                    echo -e "${RED}Прокси не указан.${NC}"
+                    read -p "Нажмите Enter..."; return
+                fi
+                ;;
+            4)
+                echo -e "${YELLOW}  Продолжаем без проверки API...${NC}"
+                ;;
+            0|*)
+                echo -e "${CYAN}Установка отменена.${NC}"
+                read -p "Нажмите Enter..."; return
+                ;;
+        esac
+    fi
+
     echo -e "${YELLOW}[4/6]${NC} Регистрация аккаунта..."
-    warp-cli --accept-tos registration new > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}[ERROR] Регистрация не удалась.${NC}"
-        read -p "Нажмите Enter..."; return
+    if [ "$api_ok" -ne 1 ]; then
+        # api_ok=0 только если выбрали вариант 4 (продолжить без проверки)
+        warp-cli --accept-tos registration new > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}[ERROR] Регистрация не удалась.${NC}"
+            echo -e "${WHITE}API недоступен. Используйте вариант 2 или 3 из меню выше.${NC}"
+            echo -e "${CYAN}Повторите установку (п.8) и выберите регистрацию через прокси.${NC}"
+            read -p "Нажмите Enter..."; return
+        fi
     fi
     echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
 
