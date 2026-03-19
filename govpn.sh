@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.6"
+VERSION="1.7"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -1070,21 +1070,33 @@ start_warp() {
         read -p "Нажмите Enter..."; return
     fi
     echo -e "\n${YELLOW}[*] Подключение WARP...${NC}"
+    echo -e "${WHITE}    (может занять до 15 секунд)${NC}"
     warp-cli --accept-tos connect > /dev/null 2>&1
-    sleep 3
-    if is_warp_running; then
+
+    # Ждём стабилизации — до 5 попыток по 3 секунды
+    local connected=0
+    for attempt in 1 2 3 4 5; do
+        sleep 3
+        if is_warp_running; then
+            connected=1
+            break
+        fi
+        echo -e "  ${YELLOW}[*] Ожидание... (${attempt}/5)${NC}"
+    done
+
+    if [ "$connected" -eq 1 ]; then
         local wip; wip=$(get_warp_ip)
         echo -e "${GREEN}[OK] WARP подключён.${NC}"
         echo -e "  ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
         log_action "WARP START: warp_ip=${wip}"
     else
-        local real_st
-        real_st=$(warp-cli --accept-tos status 2>/dev/null | head -3)
-        echo -e "${RED}[ERROR] Не удалось подключить.${NC}"
+        local real_st; real_st=$(warp-cli --accept-tos status 2>/dev/null | head -3)
+        echo -e "${RED}[ERROR] Не удалось подключить за 15 секунд.${NC}"
         echo -e "${WHITE}Статус:${NC}"
         echo "$real_st" | while IFS= read -r l; do echo -e "  ${YELLOW}${l}${NC}"; done
         echo ""
-        echo -e "${WHITE}Попробуйте авторемонт: ${CYAN}govpn → п.8r${NC}"
+        echo -e "${WHITE}Если статус 'Connecting' — подождите ещё немного и попробуйте снова.${NC}"
+        echo -e "${WHITE}Если не помогает — запустите авторемонт: п.8r${NC}"
     fi
     read -p "Нажмите Enter..."
 }
@@ -1512,14 +1524,59 @@ apply_iptables_rules() {
 
 configure_rule() {
     local proto="$1" name="$2"
-    echo -e "\n${CYAN}━━━ Настройка ${name} (${proto}) ━━━${NC}"
-    read_validated_ip "IP назначения (exit-нода):"
-    local target_ip="$_RET_IP"
-    read_validated_port "Порт (одинаковый для входа и выхода):"
-    local port="$_RET_PORT"
+    clear
+    echo -e "\n${CYAN}━━━ Настройка ${name} (${proto}) ━━━${NC}\n"
+
+    echo -e "${WHITE}Что нужно:${NC}"
+    echo -e "  Этот сервер будет принимать ${proto}-трафик на указанный порт"
+    echo -e "  и перенаправлять его на exit-ноду (зарубежный сервер)."
+    echo ""
+    echo -e "${WHITE}Пример для AmneziaWG:${NC}"
+    echo -e "  Exit-нода IP: ${CYAN}85.192.26.32${NC}  (AMS сервер)"
+    echo -e "  Порт: ${CYAN}51820${NC}  (стандартный WireGuard)"
+    echo ""
+
+    # IP с защитой от пустого ввода
+    local target_ip=""
+    while true; do
+        echo -e "${WHITE}Введите IP адрес exit-ноды (зарубежного сервера):${NC}"
+        echo -e "${CYAN}Формат: xxx.xxx.xxx.xxx${NC}"
+        read -p "> " target_ip
+        if [ -z "$target_ip" ]; then
+            echo -e "${YELLOW}IP не введён. Нажмите Enter для возврата в меню или введите IP.${NC}"
+            read -p "> " target_ip
+            [ -z "$target_ip" ] && return
+        fi
+        validate_ip "$target_ip" && break
+        echo -e "${RED}Некорректный IP. Попробуйте снова.${NC}\n"
+    done
+
+    # Порт с защитой от пустого ввода
+    local port=""
+    while true; do
+        echo ""
+        echo -e "${WHITE}Введите порт (одинаковый на этом сервере и на exit-ноде):${NC}"
+        case "$name" in
+            *WireGuard*|*AmneziaWG*) echo -e "${CYAN}Стандартный порт для WireGuard: 51820${NC}" ;;
+            *VLESS*|*XRay*)         echo -e "${CYAN}Стандартный порт для VLESS: 443 или 8443${NC}" ;;
+            *MTProto*)              echo -e "${CYAN}Стандартный порт для MTProto: 8443${NC}" ;;
+        esac
+        read -p "> " port
+        if [ -z "$port" ]; then
+            echo -e "${YELLOW}Порт не введён. Нажмите Enter для возврата в меню или введите порт.${NC}"
+            read -p "> " port
+            [ -z "$port" ] && return
+        fi
+        validate_port "$port" && break
+        echo -e "${RED}Некорректный порт (1-65535). Попробуйте снова.${NC}\n"
+    done
+
     probe_server_cli "$target_ip" "$port" || return
-    echo -e "\n${YELLOW}Правило:${NC}"
-    echo -e "  ${proto}: ${MY_IP:-*}:${port} → $(fmt_ip_short "$target_ip"):${port}"
+    echo -e "\n${YELLOW}Будет создано правило:${NC}"
+    echo -e "  ${WHITE}Протокол:${NC} ${proto}"
+    echo -e "  ${WHITE}Входящий:${NC} ${MY_IP:-*}:${port}  ${CYAN}(этот сервер)${NC}"
+    echo -e "  ${WHITE}Исходящий:${NC} $(fmt_ip_short "$target_ip"):${port}  ${CYAN}(exit-нода)${NC}"
+    echo ""
     read -p "Применить? (y/n): " confirm
     [[ "$confirm" != "y" ]] && return
     apply_iptables_rules "$proto" "$port" "$port" "$target_ip" "$name"
@@ -1527,22 +1584,78 @@ configure_rule() {
 }
 
 configure_custom_rule() {
-    echo -e "\n${CYAN}━━━ Кастомное правило ━━━${NC}"
-    local proto
+    clear
+    echo -e "\n${CYAN}━━━ Кастомное правило ━━━${NC}\n"
+    echo -e "${WHITE}Используйте когда входящий и исходящий порты разные,${NC}"
+    echo -e "${WHITE}или когда нужен нестандартный протокол (SSH, RDP и т.д.)${NC}\n"
+
+    # Протокол
+    local proto=""
     while true; do
-        read -p "Протокол (tcp/udp): " proto
+        echo -e "${WHITE}Протокол:${NC}"
+        echo -e "  ${CYAN}tcp${NC} — для VLESS, MTProto, SSH, HTTP, HTTPS"
+        echo -e "  ${CYAN}udp${NC} — для WireGuard, AmneziaWG, DNS"
+        read -p "> " proto
+        if [ -z "$proto" ]; then
+            echo -e "${YELLOW}Не введено. Enter ещё раз — выход в меню:${NC}"
+            read -p "> " proto
+            [ -z "$proto" ] && return
+        fi
         [[ "$proto" == "tcp" || "$proto" == "udp" ]] && break
-        echo -e "${RED}Введите tcp или udp${NC}"
+        echo -e "${RED}Введите tcp или udp.${NC}\n"
     done
-    read_validated_ip "IP назначения:"
-    local target_ip="$_RET_IP"
-    read_validated_port "ВХОДЯЩИЙ порт (на этом сервере):"
-    local in_port="$_RET_PORT"
-    read_validated_port "ИСХОДЯЩИЙ порт (на конечном сервере):"
-    local out_port="$_RET_PORT"
+
+    # IP
+    local target_ip=""
+    while true; do
+        echo ""
+        echo -e "${WHITE}IP адрес exit-ноды (зарубежного сервера):${NC}"
+        read -p "> " target_ip
+        if [ -z "$target_ip" ]; then
+            echo -e "${YELLOW}Не введено. Enter ещё раз — выход в меню:${NC}"
+            read -p "> " target_ip
+            [ -z "$target_ip" ] && return
+        fi
+        validate_ip "$target_ip" && break
+        echo -e "${RED}Некорректный IP. Попробуйте снова.${NC}"
+    done
+
+    # Входящий порт
+    local in_port=""
+    while true; do
+        echo ""
+        echo -e "${WHITE}ВХОДЯЩИЙ порт — на ЭТОМ сервере (клиент подключается сюда):${NC}"
+        read -p "> " in_port
+        if [ -z "$in_port" ]; then
+            echo -e "${YELLOW}Не введено. Enter ещё раз — выход в меню:${NC}"
+            read -p "> " in_port
+            [ -z "$in_port" ] && return
+        fi
+        validate_port "$in_port" && break
+        echo -e "${RED}Некорректный порт (1-65535).${NC}"
+    done
+
+    # Исходящий порт
+    local out_port=""
+    while true; do
+        echo ""
+        echo -e "${WHITE}ИСХОДЯЩИЙ порт — на exit-ноде ${target_ip} (куда пересылать):${NC}"
+        read -p "> " out_port
+        if [ -z "$out_port" ]; then
+            echo -e "${YELLOW}Не введено. Enter ещё раз — выход в меню:${NC}"
+            read -p "> " out_port
+            [ -z "$out_port" ] && return
+        fi
+        validate_port "$out_port" && break
+        echo -e "${RED}Некорректный порт (1-65535).${NC}"
+    done
+
     probe_server_cli "$target_ip" "$out_port" || return
-    echo -e "\n${YELLOW}Правило:${NC}"
-    echo -e "  ${proto}: ${MY_IP:-*}:${in_port} → $(fmt_ip_short "$target_ip"):${out_port}"
+    echo -e "\n${YELLOW}Будет создано правило:${NC}"
+    echo -e "  ${WHITE}Протокол:${NC} ${proto}"
+    echo -e "  ${WHITE}Входящий:${NC}  ${MY_IP:-*}:${in_port}  ${CYAN}(этот сервер)${NC}"
+    echo -e "  ${WHITE}Исходящий:${NC} $(fmt_ip_short "$target_ip"):${out_port}  ${CYAN}(exit-нода)${NC}"
+    echo ""
     read -p "Применить? (y/n): " confirm
     [[ "$confirm" != "y" ]] && return
     apply_iptables_rules "$proto" "$in_port" "$out_port" "$target_ip" "Custom"
