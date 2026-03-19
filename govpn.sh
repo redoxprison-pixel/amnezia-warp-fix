@@ -8,6 +8,7 @@ set -o pipefail
 # ══════════════════════════════════════════════════════════════
 
 VERSION="1.0"
+GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 CONF_DIR="/etc/${SCRIPT_NAME}"
