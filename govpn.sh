@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.5"
+VERSION="1.6"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2055,6 +2055,119 @@ self_update() {
     exit 0
 }
 
+warp_test() {
+    clear
+    echo -e "\n${CYAN}━━━ Тест WARP ━━━${NC}\n"
+    echo -e "${WHITE}Проверяем каждый компонент по порядку...${NC}\n"
+
+    local all_ok=1
+
+    # 1. Демон запущен?
+    echo -ne "  ${WHITE}[1/6]${NC} warp-svc демон...         "
+    if systemctl is-active warp-svc &>/dev/null; then
+        echo -e "${GREEN}✓ запущен${NC}"
+    else
+        echo -e "${RED}✗ не запущен${NC}"
+        echo -e "        ${WHITE}Исправление: ${CYAN}systemctl start warp-svc${NC}"
+        all_ok=0
+    fi
+
+    # 2. Регистрация есть?
+    echo -ne "  ${WHITE}[2/6]${NC} Регистрация аккаунта...   "
+    local st; st=$(warp-cli --accept-tos status 2>/dev/null)
+    if echo "$st" | grep -qi "registration missing"; then
+        echo -e "${RED}✗ нет регистрации${NC}"
+        echo -e "        ${WHITE}Исправление: п.8r (авторемонт)${NC}"
+        all_ok=0
+    else
+        echo -e "${GREEN}✓ есть${NC}"
+    fi
+
+    # 3. Подключён?
+    echo -ne "  ${WHITE}[3/6]${NC} Статус подключения...     "
+    if is_warp_running; then
+        echo -e "${GREEN}✓ Connected${NC}"
+    else
+        local reason; reason=$(echo "$st" | grep -i "reason\|status" | head -1)
+        echo -e "${RED}✗ не подключён${NC}"
+        [ -n "$reason" ] && echo -e "        ${YELLOW}${reason}${NC}"
+        echo -e "        ${WHITE}Исправление: п.10 или п.8r${NC}"
+        all_ok=0
+    fi
+
+    # 4. Режим proxy?
+    echo -ne "  ${WHITE}[4/6]${NC} Режим WarpProxy...        "
+    local mode; mode=$(warp-cli --accept-tos settings 2>/dev/null | grep -i "mode:" | head -1)
+    if echo "$mode" | grep -qi "warpproxy\|proxy"; then
+        local port; port=$(echo "$mode" | grep -oE 'port [0-9]+' | grep -oE '[0-9]+')
+        echo -e "${GREEN}✓ proxy на порту ${port:-${WARP_SOCKS_PORT}}${NC}"
+    else
+        echo -e "${RED}✗ неверный режим${NC}"
+        echo -e "        ${YELLOW}${mode}${NC}"
+        echo -e "        ${WHITE}Исправление: ${CYAN}warp-cli --accept-tos mode proxy${NC}"
+        all_ok=0
+    fi
+
+    # 5. Порт слушает?
+    echo -ne "  ${WHITE}[5/6]${NC} SOCKS5 порт ${WARP_SOCKS_PORT}...        "
+    if ss -tlnp 2>/dev/null | grep -q ":${WARP_SOCKS_PORT} "; then
+        echo -e "${GREEN}✓ слушает${NC}"
+    else
+        echo -e "${RED}✗ порт не открыт${NC}"
+        echo -e "        ${WHITE}Исправление: ${CYAN}warp-cli --accept-tos proxy port ${WARP_SOCKS_PORT}${NC}"
+        all_ok=0
+    fi
+
+    # 6. Реальный тест — запрос через SOCKS5
+    echo -ne "  ${WHITE}[6/6]${NC} HTTP запрос через WARP... "
+    local direct_ip warp_ip
+    direct_ip=$(curl -s4 --max-time 5 https://api4.ipify.org 2>/dev/null | tr -d '[:space:]')
+    warp_ip=$(curl -s4 --max-time 8 \
+        --proxy "socks5://127.0.0.1:${WARP_SOCKS_PORT}" \
+        https://api4.ipify.org 2>/dev/null | tr -d '[:space:]')
+
+    if [[ "$warp_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        if [ "$warp_ip" = "$direct_ip" ]; then
+            echo -e "${YELLOW}⚠ IP не изменился${NC}"
+            echo -e "        ${WHITE}Прямой IP:  ${direct_ip}${NC}"
+            echo -e "        ${WHITE}WARP IP:    ${warp_ip}${NC}"
+            echo -e "        ${YELLOW}WARP проксирует трафик, но выходной IP совпадает.${NC}"
+            echo -e "        ${WHITE}Это может быть нормально если сервер уже в сети Cloudflare.${NC}"
+        else
+            echo -e "${GREEN}✓ IP изменился${NC}"
+            echo -e "        ${WHITE}Прямой IP:  ${WHITE}${direct_ip}${NC}"
+            echo -e "        ${WHITE}WARP IP:    ${GREEN}${warp_ip}${NC} ${CYAN}(Cloudflare)${NC}"
+        fi
+    else
+        echo -e "${RED}✗ нет ответа через SOCKS5${NC}"
+        echo -e "        ${WHITE}curl не смог получить IP через socks5://127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        all_ok=0
+    fi
+
+    # Итог
+    echo ""
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    if [ "$all_ok" -eq 1 ]; then
+        echo -e "  ${GREEN}✅ WARP работает корректно!${NC}"
+        echo ""
+        echo -e "  ${WHITE}Прямой IP сервера:  ${direct_ip}${NC}"
+        echo -e "  ${WHITE}IP через WARP:      ${GREEN}${warp_ip}${NC}"
+        echo ""
+        echo -e "  ${CYAN}Как использовать:${NC}"
+        echo -e "  Настройте приложение на использование SOCKS5 прокси:"
+        echo -e "  ${WHITE}socks5://127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        echo -e "  Или добавьте как outbound в xray (п.16) — тогда весь"
+        echo -e "  трафик клиентов будет выходить через Cloudflare."
+    else
+        echo -e "  ${RED}❌ Найдены проблемы — следуйте инструкциям выше.${NC}"
+        echo -e "  ${WHITE}Быстрое исправление: п.8r (авторемонт)${NC}"
+    fi
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    log_action "WARP TEST: direct=${direct_ip} warp=${warp_ip} ok=${all_ok}"
+    read -p "Нажмите Enter..."
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  MAIN MENU
 # ═══════════════════════════════════════════════════════════════
@@ -2105,6 +2218,7 @@ show_menu() {
         echo -e " 18)  Ping (live)"
         echo -e " 19)  Системная статистика"
         echo -e " 20)  Имена серверов"
+        echo -e " 25)  ${GREEN}Тест WARP (проверить что работает)${NC}"
         echo -e " ${CYAN}── РОУТЕР ───────────────────────────${NC}"
         echo -e " 21)  AmneziaWG на OpenWrt / Keenetic"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
@@ -2141,6 +2255,7 @@ show_menu() {
             22) check_conflicts ;;
             23) self_update ;;
             24) full_uninstall ;;
+            25) warp_test ;;
             0)  clear; exit 0 ;;
         esac
     done
