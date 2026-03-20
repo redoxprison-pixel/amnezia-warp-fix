@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.3"
+VERSION="3.4"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -1949,34 +1949,10 @@ chain_test_menu() {
         fi
     done <<< "$(get_target_ips)"
 
-    # Если серверов нет — предложить ввести вручную
+    # Если серверов нет — тестируем только текущий сервер и WARP
     if [ ${#chain_ips[@]} -eq 0 ]; then
-        echo -e "${YELLOW}Серверов не найдено.${NC}"
-        echo -e "${WHITE}Введите IP вручную:${NC}\n"
-        local ip1 ip2
-        echo -e "${WHITE}Сервер 1 (Enter — пропустить):${NC}"
-        read -p "> " ip1
-        if [ -n "$ip1" ] && [[ "$ip1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            # GeoIP для введённого IP
-            local geo1; geo1=$(geoip_lookup "$ip1" 2>/dev/null)
-            local country1; country1=$(echo "$geo1" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
-            local city1; city1=$(echo "$geo1" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
-            local label1="${ip1}"
-            [ -n "$city1" ] && label1="${ip1} (${city1}, ${country1})"
-            chain_ips+=("$ip1"); chain_names+=("$label1")
-        fi
-        echo -e "${WHITE}Сервер 2 (Enter — пропустить):${NC}"
-        read -p "> " ip2
-        if [ -n "$ip2" ] && [[ "$ip2" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            local geo2; geo2=$(geoip_lookup "$ip2" 2>/dev/null)
-            local country2; country2=$(echo "$geo2" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
-            local city2; city2=$(echo "$geo2" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
-            local label2="${ip2}"
-            [ -n "$city2" ] && label2="${ip2} (${city2}, ${country2})"
-            chain_ips+=("$ip2"); chain_names+=("$label2")
-        fi
-        [ ${#chain_ips[@]} -eq 0 ] && echo -e "${RED}Нет серверов для теста.${NC}" && read -p "Enter..." && return
-        echo ""
+        echo -e "${WHITE}Серверов в цепочке не найдено.${NC}"
+        echo -e "${WHITE}Тестируем текущий сервер и WARP.${NC}\n"
     fi
 
     # Показываем цепочку
