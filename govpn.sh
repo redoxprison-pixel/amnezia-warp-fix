@@ -2082,7 +2082,7 @@ ping_menu() {
         # Текущий сервер — добавить первым только если его нет в алиасах
         if [ "$cur_in_aliases" -eq 0 ]; then
             menu_ips=("$MY_IP" "${menu_ips[@]}")
-            menu_labels=("Этот сервер (${MY_IP})" "${menu_labels[@]}")
+            menu_labels=("Этот сервер" "${menu_labels[@]}")
         fi
 
         # Из правил iptables — только новые IP
@@ -2100,24 +2100,44 @@ ping_menu() {
             local is_current=""
             [ "$ip" = "$MY_IP" ] && is_current=" ${CYAN}←${NC}"
 
-            local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
-            if [ -n "$raw" ]; then
-                local ms="${raw#*|}"
-                local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
+            # Для текущего сервера не добавляем IP в label если он уже там есть
+            local display_label="$label"
+            local display_ip="$ip"
+            # Убрать IP из label если он там уже дублируется
+            if echo "$label" | grep -q "$ip"; then
+                display_ip=""
+            fi
+
+            # Пинг — для текущего сервера используем loopback
+            local ms_str
+            if [ "$ip" = "$MY_IP" ]; then
+                local lo_ms
+                lo_ms=$(ping -c 1 -W 1 127.0.0.1 2>/dev/null | \
+                    sed -n 's/.*time=\([0-9.]*\).*/\1/p')
+                ms_str="${lo_ms:-0.1}ms"
                 local color="$GREEN"
-                (( ms_int > 80 )) && color="$YELLOW"
-                (( ms_int > 150 )) && color="$RED"
-                printf "  ${YELLOW}[%d]${NC} ${color}●${NC} %-28s ${WHITE}%s${NC}${is_current}  ${color}%s${NC}\n" \
-                    "$((i+1))" "${label}" "${ip}" "${ms}ms"
+                printf "  ${YELLOW}[%d]${NC} ${color}●${NC} %-20s ${WHITE}%s${NC}${is_current}  ${color}%s${NC}\n" \
+                    "$((i+1))" "$display_label" "$display_ip" "$ms_str"
             else
-                printf "  ${YELLOW}[%d]${NC} ${RED}●${NC} %-28s ${WHITE}%s${NC}${is_current}  ${RED}%s${NC}\n" \
-                    "$((i+1))" "${label}" "${ip}" "недоступен"
+                local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
+                if [ -n "$raw" ]; then
+                    local ms="${raw#*|}"
+                    local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
+                    local color="$GREEN"
+                    (( ms_int > 80 )) && color="$YELLOW"
+                    (( ms_int > 150 )) && color="$RED"
+                    printf "  ${YELLOW}[%d]${NC} ${color}●${NC} %-20s ${WHITE}%s${NC}${is_current}  ${color}%s${NC}\n" \
+                        "$((i+1))" "$display_label" "$display_ip" "${ms}ms"
+                else
+                    printf "  ${YELLOW}[%d]${NC} ${RED}●${NC} %-20s ${WHITE}%s${NC}${is_current}  ${RED}%s${NC}\n" \
+                        "$((i+1))" "$display_label" "$display_ip" "недоступен"
+                fi
             fi
         done
 
         if is_warp_running; then
             local wip; wip=$(get_warp_ip)
-            printf "      ${GREEN}●${NC} %-28s ${WHITE}%s${NC}\n" "Cloudflare WARP" "${wip}"
+            printf "      ${GREEN}●${NC} %-20s ${WHITE}%s${NC}\n" "Cloudflare WARP" "${wip}"
         fi
 
         echo ""
@@ -2126,6 +2146,11 @@ ping_menu() {
         echo -e "  $((total+3)))  Добавить сервер"
         echo -e "  $((total+4)))  Автомониторинг"
         echo -e "  0)  Назад"
+        if [ "$total" -le 1 ] && [ ! -s "$ALIASES_FILE" ]; then
+            echo ""
+            echo -e "  ${YELLOW}Совет:${NC} добавьте остальные серверы через п.$((total+3))"
+            echo -e "  ${WHITE}(RU bridge, AMS exit) — появятся здесь и в тесте цепочки${NC}"
+        fi
         echo ""
         read -p "Выбор: " choice
 
