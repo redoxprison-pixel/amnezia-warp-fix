@@ -2,12 +2,12 @@
 set -o pipefail
 
 # ══════════════════════════════════════════════════════════════
-#  GoVPN Manager v1.0
-#  WARP · iptables cascade · 3x-ui/x-ui-pro · AmneziaWG
-#  Безопасная установка: бэкап → патч → валидация → rollback
+#  GoVPN Manager v2.4
+#  WARP · wgcf · iptables cascade · 3x-ui/x-ui-pro · AmneziaWG
+#  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.3"
+VERSION="2.4"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -125,6 +125,8 @@ check_deps() {
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     dpkg -s iptables-persistent &>/dev/null 2>&1 || missing+=("iptables-persistent")
+    # wireguard-tools нужен для wgcf
+    command -v wg-quick &>/dev/null || missing+=("wireguard-tools")
 
     if [ ${#missing[@]} -gt 0 ]; then
         echo -e "${YELLOW}[*] Установка зависимостей: ${missing[*]}${NC}"
@@ -384,6 +386,7 @@ except Exception as e:
 EOF
 }
 
+# Вспомогательная функция — используется при rollback xray outbound
 remove_xray_warp_outbound() {
     local cfg="$1"
     python3 - <<EOF
@@ -1385,26 +1388,6 @@ validate_ip() {
 
 validate_port() {
     [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
-}
-
-read_validated_ip() {
-    local prompt="${1:-Введите IP:}"
-    while true; do
-        echo -e "$prompt"
-        read -p "> " _RET_IP
-        validate_ip "$_RET_IP" && return 0
-        echo -e "${RED}Некорректный IP-адрес!${NC}"
-    done
-}
-
-read_validated_port() {
-    local prompt="${1:-Введите порт:}"
-    while true; do
-        echo -e "$prompt"
-        read -p "> " _RET_PORT
-        validate_port "$_RET_PORT" && return 0
-        echo -e "${RED}Порт должен быть числом от 1 до 65535!${NC}"
-    done
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -2713,36 +2696,40 @@ PYEOF
         fi
         log_action "WGCF UP: iface=${WGCF_IFACE}, cf_ip=${wip}"
 
-        # Если есть Docker — предложить настроить routing
+        echo ""
+        echo -e "${CYAN}━━━ Информация о routing ━━━${NC}"
+        echo -e "${WHITE}Туннель работает в режиме ${CYAN}Table=off${NC}."
+        echo -e "${WHITE}Трафик хоста идёт через wgcf0 только при явном указании интерфейса.${NC}"
+        echo ""
+
         if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
-            echo ""
-            echo -e "${CYAN}━━━ Обнаружен Docker ━━━${NC}"
-            echo -e "${WHITE}Хотите направить трафик Docker контейнеров через Cloudflare?${NC}"
-            echo -e "${WHITE}(трафик Amnezia/AWG клиентов выйдет через CF IP ${wip})${NC}"
-            echo ""
-            read -p "Настроить routing Docker → wgcf0? (y/n): " do_route
-            if [[ "$do_route" == "y" ]]; then
-                echo -e "${YELLOW}[*] Настройка policy routing...${NC}"
-                local docker_subnet
-                docker_subnet=$(docker network inspect bridge 2>/dev/null | \
-                    python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['IPAM']['Config'][0]['Subnet'])" 2>/dev/null)
-                if [ -n "$docker_subnet" ]; then
-                    ip route add default dev "$WGCF_IFACE" table 51820 2>/dev/null || true
-                    ip rule add from "$docker_subnet" lookup 51820 2>/dev/null || true
-                    echo -e "${GREEN}  ✓ Routing: ${docker_subnet} → ${WGCF_IFACE} (Cloudflare)${NC}"
-                    echo -e "${YELLOW}  ⚠ Routing сбросится при перезагрузке.${NC}"
-                    echo -e "${WHITE}  Для автозапуска добавьте в /etc/rc.local:${NC}"
-                    echo -e "  ${CYAN}ip route add default dev ${WGCF_IFACE} table 51820${NC}"
-                    echo -e "  ${CYAN}ip rule add from ${docker_subnet} lookup 51820${NC}"
-                    log_action "WGCF ROUTING: docker ${docker_subnet} → ${WGCF_IFACE}"
-                else
-                    echo -e "${RED}[ERROR] Не удалось определить подсеть Docker bridge.${NC}"
-                fi
+            # Проверяем есть ли Amnezia контейнеры
+            local amnezia_containers
+            amnezia_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i amnezia)
+            if [ -n "$amnezia_containers" ]; then
+                echo -e "${YELLOW}⚠ Обнаружены контейнеры Amnezia:${NC}"
+                echo "$amnezia_containers" | while read -r c; do
+                    echo -e "   ${WHITE}• ${c}${NC}"
+                done
+                echo ""
+                echo -e "${WHITE}Направить трафик Amnezia клиентов через wgcf0 напрямую${NC}"
+                echo -e "${WHITE}через policy routing не работает — Amnezia использует собственный${NC}"
+                echo -e "${WHITE}сетевой стек (amn0 bridge) который обходит стандартный FORWARD chain.${NC}"
+                echo ""
+                echo -e "${CYAN}Альтернативы:${NC}"
+                echo -e "  ${GREEN}1)${NC} Используйте WARP SOCKS5 (п.8-15) — работает через xray outbound"
+                echo -e "  ${GREEN}2)${NC} Установите x-ui/3x-ui рядом с Amnezia и добавьте WARP outbound (п.17)"
+                echo -e "  ${GREEN}3)${NC} wgcf туннель доступен с хоста: ${CYAN}curl --interface wgcf0 https://api4.ipify.org${NC}"
+            else
+                echo -e "${WHITE}Для routing Docker контейнеров через wgcf0:${NC}"
+                echo -e "  ${CYAN}iptables -t mangle -A FORWARD -s <subnet> -j MARK --set-mark 51820${NC}"
+                echo -e "  ${CYAN}ip rule add fwmark 51820 lookup 51820${NC}"
+                echo -e "  ${CYAN}ip route add default dev ${WGCF_IFACE} table 51820${NC}"
+                echo -e "  ${CYAN}iptables -t nat -A POSTROUTING -o ${WGCF_IFACE} -j MASQUERADE${NC}"
+                echo -e "  ${CYAN}sysctl -w net.bridge.bridge-nf-call-iptables=1${NC}"
             fi
         else
-            echo ""
-            echo -e "${CYAN}Туннель работает в режиме Table=off.${NC}"
-            echo -e "${WHITE}Трафик хоста не перенаправляется автоматически.${NC}"
+            echo -e "${WHITE}Использование: ${CYAN}curl --interface ${WGCF_IFACE} https://api4.ipify.org${NC}"
         fi
     else
         echo -e "${RED}[ERROR] Туннель не поднялся.${NC}"
