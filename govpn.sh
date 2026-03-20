@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.7"
+VERSION="2.8"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2136,101 +2136,199 @@ chain_test_menu() {
 ping_menu() {
     while true; do
         clear
-        echo -e "\n${CYAN}━━━ Ping & Мониторинг ━━━${NC}\n"
+        echo -e "\n${CYAN}━━━ Серверы & Тест скорости ━━━${NC}\n"
 
-        # Показываем текущий статус всех серверов
-        local -a ips=()
-        while read -r ip; do [ -n "$ip" ] && ips+=("$ip"); done <<< "$(get_target_ips)"
+        # Собираем все известные серверы
+        # Источники: текущий сервер + алиасы + правила iptables
+        local -A known_servers  # ip -> label
+        known_servers["$MY_IP"]="Этот сервер (${MY_IP})"
 
-        if [ ${#ips[@]} -gt 0 ]; then
-            echo -e "${WHITE}Серверы в правилах:${NC}"
-            for ip in "${ips[@]}"; do
-                local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
-                if [ -n "$raw" ]; then
-                    local ms; ms="${raw#*|}"
-                    local method; method="${raw%%|*}"
-                    local color="$GREEN"
-                    local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
-                    (( ms_int > 50 )) && color="$YELLOW"
-                    (( ms_int > 100 )) && color="$RED"
-                    echo -e "  ${color}●${NC} $(fmt_ip_short "$ip")  ${color}${ms}ms${NC} ${WHITE}[${method}]${NC}"
-                else
-                    echo -e "  ${RED}●${NC} $(fmt_ip_short "$ip")  ${RED}TIMEOUT${NC}"
-                fi
-            done
-            echo ""
+        # Из алиасов
+        if [ -f "$ALIASES_FILE" ]; then
+            while IFS='=' read -r ip_key val; do
+                validate_ip "$ip_key" 2>/dev/null || continue
+                local name; name=$(echo "$val" | cut -d'|' -f1)
+                local country; country=$(echo "$val" | cut -d'|' -f3)
+                local label="${name:-$ip_key}"
+                [ -n "$country" ] && label="$label ($country)"
+                known_servers["$ip_key"]="$label"
+            done < "$ALIASES_FILE"
         fi
 
-        # Статус мониторинга
-        local mon_status="${RED}Выключен${NC}"
-        if [ -f "$MONITOR_PID_FILE" ] && kill -0 "$(cat "$MONITOR_PID_FILE" 2>/dev/null)" 2>/dev/null; then
-            local mon_interval; mon_interval=$(cat "${CONF_DIR}/monitor_interval" 2>/dev/null || echo "60")
-            mon_status="${GREEN}Работает (каждые ${mon_interval}с)${NC}"
+        # Из правил iptables
+        while read -r ip; do
+            [ -z "$ip" ] && continue
+            [ -z "${known_servers[$ip]+x}" ] && known_servers["$ip"]="$ip"
+        done <<< "$(get_target_ips)"
+
+        # Показываем статус каждого сервера
+        echo -e "${WHITE}Статус серверов:${NC}"
+        local -a server_ips=()
+        for ip in "${!known_servers[@]}"; do
+            server_ips+=("$ip")
+        done
+
+        # Сортируем — текущий сервер первым
+        local -a sorted_ips=("$MY_IP")
+        for ip in "${server_ips[@]}"; do
+            [ "$ip" != "$MY_IP" ] && sorted_ips+=("$ip")
+        done
+
+        local idx=1
+        local -a menu_ips=()
+        for ip in "${sorted_ips[@]}"; do
+            local label="${known_servers[$ip]}"
+            local is_current=""
+            [ "$ip" = "$MY_IP" ] && is_current=" ${CYAN}← здесь${NC}"
+
+            # Быстрый пинг
+            local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
+            if [ -n "$raw" ]; then
+                local ms="${raw#*|}"
+                local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
+                local color="$GREEN"
+                (( ms_int > 80 )) && color="$YELLOW"
+                (( ms_int > 150 )) && color="$RED"
+                echo -e "  ${YELLOW}[${idx}]${NC} ${color}●${NC} ${WHITE}${label}${NC}${is_current}  ${color}${ms}ms${NC}"
+            else
+                echo -e "  ${YELLOW}[${idx}]${NC} ${RED}●${NC} ${WHITE}${label}${NC}${is_current}  ${RED}недоступен${NC}"
+            fi
+            menu_ips+=("$ip")
+            ((idx++))
+        done
+
+        # WARP статус
+        if is_warp_running; then
+            local wip; wip=$(get_warp_ip)
+            echo -e "  ${GREEN}●${NC} ${WHITE}Cloudflare WARP${NC}  ${GREEN}${wip}${NC}"
         fi
-        echo -e "${WHITE}Автомониторинг: ${mon_status}${NC}"
+
         echo ""
-        echo -e "  ${YELLOW}[1]${NC} Live ping (выбрать сервер)"
-        echo -e "  ${YELLOW}[2]${NC} Проверить все серверы сейчас"
-        echo -e "  ${YELLOW}[3]${NC} ${GREEN}Тест цепочки по серверам${NC}"
-        echo -e "  ${YELLOW}[4]${NC} Включить автомониторинг"
-        echo -e "  ${RED}[5]${NC} Выключить автомониторинг"
-        echo -e "  ${YELLOW}[6]${NC} Показать лог мониторинга"
+        echo -e "  ${YELLOW}[t]${NC} Тест скорости (выбрать сервер)"
+        echo -e "  ${YELLOW}[c]${NC} Тест цепочки RU → AMS → интернет"
+        echo -e "  ${YELLOW}[m]${NC} Автомониторинг (алерт если сервер упал)"
         echo -e "  ${YELLOW}[0]${NC} Назад"
         echo ""
         read -p "Выбор: " choice
+
         case "$choice" in
-            1)
-                if [ ${#ips[@]} -eq 0 ]; then
-                    echo -e "${YELLOW}Нет серверов. Введите IP:${NC}"
-                    read -p "> " manual_ip
-                    validate_ip "$manual_ip" && ping_live "$manual_ip"
+            [1-9])
+                local sel_ip="${menu_ips[$((choice-1))]:-}"
+                [ -n "$sel_ip" ] && speed_test "$sel_ip" "${known_servers[$sel_ip]}"
+                ;;
+            t|T)
+                # Выбор сервера для теста скорости
+                if [ ${#menu_ips[@]} -eq 1 ]; then
+                    speed_test "${menu_ips[0]}" "${known_servers[${menu_ips[0]}]}"
                 else
-                    echo -e "\nСерверы:"
-                    for i in "${!ips[@]}"; do
-                        echo -e "  ${YELLOW}[$((i+1))]${NC} $(fmt_ip "${ips[$i]}")"
-                    done
-                    echo -e "  ${YELLOW}[m]${NC} Ввести IP вручную"
-                    read -p "Выбор: " pc
-                    case "$pc" in
-                        m|M)
-                            read -p "IP: " manual_ip
-                            validate_ip "$manual_ip" && ping_live "$manual_ip"
-                            ;;
-                        *)
-                            local idx=$((pc - 1))
-                            [ -n "${ips[$idx]:-}" ] && ping_live "${ips[$idx]}"
-                            ;;
-                    esac
+                    echo -e "\n${WHITE}Выберите сервер для теста (номер):${NC}"
+                    read -p "> " tch
+                    [[ "$tch" =~ ^[0-9]+$ ]] && {
+                        local tip="${menu_ips[$((tch-1))]:-}"
+                        [ -n "$tip" ] && speed_test "$tip" "${known_servers[$tip]}"
+                    }
                 fi
                 ;;
-            2)
-                echo -e "\n${CYAN}Проверка всех серверов...${NC}\n"
-                if [ ${#ips[@]} -eq 0 ]; then
-                    echo -e "${YELLOW}Нет серверов в правилах.${NC}"
-                else
-                    for ip in "${ips[@]}"; do
-                        local raw; raw=$(smart_ping "$ip" 3 "$(get_port_for_ip "$ip")")
-                        if [ -n "$raw" ]; then
-                            local ms="${raw#*|}"; local method="${raw%%|*}"
-                            echo -e "  ${GREEN}✓${NC} $(fmt_ip_short "$ip")  ${GREEN}${ms}ms${NC} [${method}]"
-                        else
-                            echo -e "  ${RED}✗${NC} $(fmt_ip_short "$ip")  ${RED}НЕДОСТУПЕН${NC}"
-                            log_action "MONITOR CHECK: ${ip} TIMEOUT"
-                        fi
-                    done
-                fi
-                echo ""
-                read -p "Нажмите Enter..."
-                ;;
-            3)  chain_test_menu ;;
-            4)
-                _start_monitor
-                ;;
-            5)
-                _stop_monitor
-                read -p "Нажмите Enter..."
-                ;;
-            6)
+            c|C)  chain_test_menu ;;
+            m|M)  monitor_menu ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+speed_test() {
+    local ip="$1" label="${2:-$1}"
+    clear
+    echo -e "\n${CYAN}━━━ Тест скорости: ${WHITE}${label}${CYAN} ━━━${NC}\n"
+
+    # 1. Задержка
+    echo -e "${WHITE}Задержка (10 пингов):${NC}"
+    local -a results=()
+    local lost=0
+    for i in $(seq 1 10); do
+        local raw; raw=$(smart_ping "$ip" 3 "$(get_port_for_ip "$ip")")
+        if [ -n "$raw" ]; then
+            local ms="${raw#*|}"
+            results+=("$ms")
+            local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
+            local color="$GREEN"
+            (( ms_int > 80 )) && color="$YELLOW"
+            (( ms_int > 150 )) && color="$RED"
+            local bar; bar=$(make_ping_bar "$ms")
+            printf "  ${WHITE}%2d)${NC}  ${color}%6sms${NC}  %b\n" "$i" "$ms" "$bar"
+        else
+            ((lost++))
+            printf "  ${WHITE}%2d)${NC}  ${RED}TIMEOUT${NC}\n" "$i"
+        fi
+    done
+    if [ ${#results[@]} -gt 0 ]; then
+        local stats
+        stats=$(printf '%s\n' "${results[@]}" | \
+            awk 'BEGIN{mn=999999;mx=0;s=0;n=0} {s+=$1;n++;if($1<mn)mn=$1;if($1>mx)mx=$1} \
+                END{printf "%.1f|%.1f|%.1f",mn,mx,s/n}')
+        IFS='|' read -r s_min s_max s_avg <<< "$stats"
+        echo -e "\n  ${WHITE}Мин: ${GREEN}${s_min}ms${NC}  Макс: ${RED}${s_max}ms${NC}  Сред: ${CYAN}${s_avg}ms${NC}  Потери: ${lost}/10${NC}"
+    fi
+
+    # 2. Скорость скачивания через Cloudflare
+    echo -e "\n${WHITE}Скорость скачивания (через Cloudflare):${NC}"
+    local dl_speed
+    dl_speed=$(curl -s4 --max-time 10 -o /dev/null -w '%{speed_download}' \
+        "https://speed.cloudflare.com/__down?bytes=10000000" 2>/dev/null)
+    if [ -n "$dl_speed" ] && awk "BEGIN{exit !($dl_speed > 0)}"; then
+        local dl_mbps; dl_mbps=$(awk "BEGIN{printf \"%.1f\", $dl_speed/131072}")
+        local dl_color="$GREEN"
+        awk "BEGIN{exit !($dl_mbps < 10)}" && dl_color="$YELLOW"
+        echo -e "  ${dl_color}↓ ${dl_mbps} Мбит/с${NC}"
+    else
+        echo -e "  ${YELLOW}Не удалось измерить${NC}"
+    fi
+
+    # 3. Через WARP если подключён
+    if is_warp_running; then
+        echo -e "\n${WHITE}Скорость через WARP:${NC}"
+        local wdl_speed
+        wdl_speed=$(curl -s4 --max-time 10 \
+            --proxy "socks5://127.0.0.1:${WARP_SOCKS_PORT}" \
+            -o /dev/null -w '%{speed_download}' \
+            "https://speed.cloudflare.com/__down?bytes=10000000" 2>/dev/null)
+        if [ -n "$wdl_speed" ] && awk "BEGIN{exit !($wdl_speed > 0)}"; then
+            local wdl_mbps; wdl_mbps=$(awk "BEGIN{printf \"%.1f\", $wdl_speed/131072}")
+            echo -e "  ${GREEN}↓ ${wdl_mbps} Мбит/с${NC} ${CYAN}(Cloudflare WARP)${NC}"
+        else
+            echo -e "  ${YELLOW}Нет ответа через WARP${NC}"
+        fi
+    fi
+
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+monitor_menu() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Автомониторинг ━━━${NC}\n"
+        echo -e "${WHITE}Мониторинг проверяет серверы из п.20 (Имена серверов)${NC}"
+        echo -e "${WHITE}и пишет в лог если сервер недоступен.${NC}\n"
+
+        local mon_status="${RED}Выключен${NC}"
+        local mon_pid_file="${CONF_DIR}/monitor.pid"
+        if [ -f "$mon_pid_file" ] && kill -0 "$(cat "$mon_pid_file" 2>/dev/null)" 2>/dev/null; then
+            local mon_interval; mon_interval=$(cat "${CONF_DIR}/monitor_interval" 2>/dev/null || echo "60")
+            mon_status="${GREEN}Работает (каждые ${mon_interval}с)${NC}"
+        fi
+        echo -e "  Статус: ${mon_status}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} Включить мониторинг"
+        echo -e "  ${RED}[2]${NC} Выключить мониторинг"
+        echo -e "  ${YELLOW}[3]${NC} Показать лог"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выбор: " mc
+        case "$mc" in
+            1) _start_monitor ;;
+            2) _stop_monitor; read -p "Нажмите Enter..." ;;
+            3)
                 clear
                 echo -e "${CYAN}━━━ Лог мониторинга (последние 30 строк) ━━━${NC}\n"
                 grep "MONITOR" "$LOG_FILE" 2>/dev/null | tail -30 || \
