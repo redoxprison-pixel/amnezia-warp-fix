@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.0"
+VERSION="3.1"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -1952,7 +1952,7 @@ chain_test_menu() {
     # Если серверов нет — предложить ввести вручную
     if [ ${#chain_ips[@]} -eq 0 ]; then
         echo -e "${YELLOW}Серверов не найдено.${NC}"
-        echo -e "${WHITE}Введите IP вручную (или добавьте через п.20 для автоопределения):${NC}\n"
+        echo -e "${WHITE}Введите IP вручную (или добавьте через п.18 (нажмите номер сервера)):${NC}\n"
         local ip1 ip2
         echo -e "${WHITE}Сервер 1 (Enter — пропустить):${NC}"
         read -p "> " ip1
@@ -2051,7 +2051,7 @@ chain_test_menu() {
     done
 
     echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${WHITE}Совет: добавьте серверы через п.20 чтобы не вводить IP каждый раз.${NC}"
+    echo -e "${WHITE}Совет: добавьте серверы через п.18 (Серверы).${NC}"
     echo ""
     read -p "Нажмите Enter..."
 }
@@ -2143,13 +2143,13 @@ ping_menu() {
         echo ""
         echo -e "  $((total+1)))  Тест скорости"
         echo -e "  $((total+2)))  Тест цепочки"
-        echo -e "  $((total+3)))  Добавить сервер"
+        echo -e "  $((total+3)))  Проверить сайт / IP"
         echo -e "  $((total+4)))  Автомониторинг"
         echo -e "  0)  Назад"
         if [ "$total" -le 1 ] && [ ! -s "$ALIASES_FILE" ]; then
             echo ""
-            echo -e "  ${YELLOW}Совет:${NC} добавьте остальные серверы через п.$((total+3))"
-            echo -e "  ${WHITE}(RU bridge, AMS exit) — появятся здесь и в тесте цепочки${NC}"
+            echo -e "  ${YELLOW}Совет:${NC} нажмите ${YELLOW}[1]${NC} чтобы добавить имя этому серверу"
+            echo -e "  ${WHITE}и добавьте остальные серверы цепочки (RU, AMS).${NC}"
         fi
         echo ""
         read -p "Выбор: " choice
@@ -2162,7 +2162,7 @@ ping_menu() {
                 local sel_label="${menu_labels[$((choice-1))]}"
                 clear
                 echo -e "\n${CYAN}━━━ ${sel_label}${CYAN} ━━━${NC}"
-                echo -e "    ${WHITE}${sel_ip}${NC}\n"
+                echo -e "    ${WHITE}IP: ${sel_ip}${NC}\n"
                 echo -e "  ${YELLOW}[1]${NC} Тест скорости"
                 echo -e "  ${YELLOW}[2]${NC} Переименовать"
                 echo -e "  ${RED}[3]${NC} Удалить из списка"
@@ -2192,7 +2192,7 @@ ping_menu() {
             elif (( choice == total+2 )); then
                 chain_test_menu
             elif (( choice == total+3 )); then
-                _alias_add_menu
+                site_check_menu
             elif (( choice == total+4 )); then
                 monitor_menu
             elif (( choice == 0 )); then
@@ -2253,26 +2253,116 @@ _alias_add_menu() {
     read -p "Нажмите Enter..."
 }
 
+site_check_menu() {
+    clear
+    echo -e "\n${CYAN}━━━ Проверить сайт / IP ━━━${NC}\n"
+    echo -e "${WHITE}Введите сайт или IP для проверки:${NC}"
+    echo -e "${CYAN}Примеры: google.com  104.28.197.7  chat.openai.com${NC}\n"
+    read -p "> " target
+    [ -z "$target" ] && return
+
+    clear
+    echo -e "\n${CYAN}━━━ Проверка: ${WHITE}${target}${CYAN} ━━━${NC}\n"
+
+    # Определяем IP если передан домен
+    local target_ip="$target"
+    if ! [[ "$target" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo -ne "${WHITE}Резолвинг DNS...${NC} "
+        target_ip=$(python3 -c "import socket; print(socket.gethostbyname('${target}'))" 2>/dev/null)
+        if [ -n "$target_ip" ]; then
+            echo -e "${GREEN}${target_ip}${NC}"
+        else
+            echo -e "${RED}не удалось определить IP${NC}"
+            read -p "Нажмите Enter..."; return
+        fi
+    fi
+
+    # GeoIP
+    echo -ne "${WHITE}GeoIP...${NC} "
+    local geo; geo=$(geoip_lookup "$target_ip" 2>/dev/null)
+    local country; country=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+    local city; city=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
+    local isp; isp=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('isp',''))" 2>/dev/null)
+    echo -e "${GREEN}${city}, ${country} — ${isp}${NC}"
+
+    # Прямой пинг
+    echo -ne "${WHITE}Прямой пинг...${NC} "
+    local direct_ms
+    direct_ms=$(ping -c 3 -W 2 "$target_ip" 2>/dev/null | \
+        awk '/rtt/ {gsub(/.*=/, ""); split($1,a,"/"); printf "%.1f", a[2]}')
+    if [ -n "$direct_ms" ]; then
+        local c="$GREEN"; (( ${direct_ms%.*} > 100 )) && c="$YELLOW"
+        echo -e "${c}${direct_ms}ms${NC}"
+    else
+        local port=443
+        local tcp_ms; tcp_ms=$(tcp_ping "$target_ip" "$port" 3 2>/dev/null)
+        [ -n "$tcp_ms" ] && echo -e "${GREEN}${tcp_ms}ms${NC} (TCP)" || echo -e "${RED}недоступен${NC}"
+    fi
+
+    # Через WARP
+    if is_warp_running; then
+        echo -ne "${WHITE}Через WARP...${NC}  "
+        local warp_ms_start warp_ms_end
+        warp_ms_start=$(date +%s%3N)
+        local warp_result
+        warp_result=$(curl -s4 --max-time 8 --proxy "socks5://127.0.0.1:${WARP_SOCKS_PORT}" \
+            -o /dev/null -w '%{http_code}' "https://${target}" 2>/dev/null)
+        warp_ms_end=$(date +%s%3N)
+        local warp_ms=$((warp_ms_end - warp_ms_start))
+        if [ -n "$warp_result" ] && [ "$warp_result" != "000" ]; then
+            echo -e "${GREEN}${warp_ms}ms${NC} (HTTP ${warp_result})"
+        else
+            echo -e "${YELLOW}нет ответа${NC}"
+        fi
+    fi
+
+    # HTTP статус напрямую
+    echo -ne "${WHITE}HTTP статус...${NC} "
+    local http_code
+    http_code=$(curl -s4 --max-time 8 -o /dev/null -w '%{http_code}' \
+        "https://${target}" 2>/dev/null)
+    if [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
+        local hc="$GREEN"; (( http_code >= 400 )) && hc="$YELLOW"; (( http_code >= 500 )) && hc="$RED"
+        echo -e "${hc}${http_code}${NC}"
+    else
+        echo -e "${RED}недоступен${NC}"
+    fi
+
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
 speed_test() {
     local ip="$1" label="${2:-$1}"
     clear
     echo -e "\n${CYAN}━━━ Тест скорости: ${WHITE}${label}${CYAN} ━━━${NC}\n"
 
-    # 1. Задержка
+    # 1. Задержка — для текущего сервера используем loopback
     echo -e "${WHITE}Задержка (10 пингов):${NC}"
     local -a results=()
     local lost=0
+    local test_ip="$ip"
+    [ "$ip" = "$MY_IP" ] && test_ip="127.0.0.1"
+
     for i in $(seq 1 10); do
-        local raw; raw=$(smart_ping "$ip" 3 "$(get_port_for_ip "$ip")")
-        if [ -n "$raw" ]; then
-            local ms="${raw#*|}"
+        local ms=""
+        # Сначала ICMP
+        ms=$(ping -c 1 -W 2 "$test_ip" 2>/dev/null | \
+            sed -n 's/.*time=\([0-9.]*\).*/\1/p')
+        # Fallback: TCP если ICMP не работает
+        if [ -z "$ms" ] && [ "$test_ip" != "127.0.0.1" ]; then
+            local port; port=$(get_port_for_ip "$ip" 2>/dev/null || echo "443")
+            ms=$(tcp_ping "$ip" "$port" 2 2>/dev/null)
+        fi
+
+        if [ -n "$ms" ]; then
             results+=("$ms")
             local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
             local color="$GREEN"
             (( ms_int > 80 )) && color="$YELLOW"
             (( ms_int > 150 )) && color="$RED"
             local bar; bar=$(make_ping_bar "$ms")
-            printf "  ${WHITE}%2d)${NC}  ${color}%6sms${NC}  %b\n" "$i" "$ms" "$bar"
+            printf "  ${WHITE}%2d)${NC}  ${color}%7sms${NC}  %b\n" "$i" "$ms" "$bar"
         else
             ((lost++))
             printf "  ${WHITE}%2d)${NC}  ${RED}TIMEOUT${NC}\n" "$i"
@@ -2285,6 +2375,8 @@ speed_test() {
                 END{printf "%.1f|%.1f|%.1f",mn,mx,s/n}')
         IFS='|' read -r s_min s_max s_avg <<< "$stats"
         echo -e "\n  ${WHITE}Мин: ${GREEN}${s_min}ms${NC}  Макс: ${RED}${s_max}ms${NC}  Сред: ${CYAN}${s_avg}ms${NC}  Потери: ${lost}/10${NC}"
+    else
+        echo -e "\n  ${RED}Все пинги потеряны — ICMP и TCP заблокированы.${NC}"
     fi
 
     # 2. Скорость скачивания через Cloudflare
@@ -2325,7 +2417,7 @@ monitor_menu() {
     while true; do
         clear
         echo -e "\n${CYAN}━━━ Автомониторинг ━━━${NC}\n"
-        echo -e "${WHITE}Мониторинг проверяет серверы из п.20 (Имена серверов)${NC}"
+        echo -e "${WHITE}Мониторинг проверяет серверы из п.18 (Серверы)${NC}"
         echo -e "${WHITE}и пишет в лог если сервер недоступен.${NC}\n"
 
         local mon_status="${RED}Выключен${NC}"
@@ -2935,7 +3027,7 @@ wgcf_generate() {
     echo -e "\n${CYAN}━━━ Создание WireGuard профиля Cloudflare ━━━${NC}\n"
 
     if ! _wgcf_installed; then
-        echo -e "${RED}wgcf не установлен. Выполните п.26.${NC}"
+        echo -e "${RED}wgcf не установлен. Выполните п.22.${NC}"
         read -p "Нажмите Enter..."; return
     fi
 
@@ -3034,7 +3126,7 @@ wgcf_up() {
     echo -e "\n${CYAN}━━━ Запуск wgcf туннеля ━━━${NC}\n"
 
     if ! _wgcf_installed; then
-        echo -e "${RED}wgcf не установлен. Выполните п.26.${NC}"
+        echo -e "${RED}wgcf не установлен. Выполните п.22.${NC}"
         read -p "Нажмите Enter..."; return
     fi
 
