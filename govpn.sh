@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.9"
+VERSION="3.0"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2061,42 +2061,38 @@ ping_menu() {
         clear
         echo -e "\n${CYAN}━━━ Серверы & Тест скорости ━━━${NC}\n"
 
-        # Собираем все серверы: текущий + алиасы + правила iptables
         local -a menu_ips=()
         local -a menu_labels=()
 
-        # Текущий сервер — всегда первый
-        local cur_name; cur_name=$(grep "^${MY_IP}=" "$ALIASES_FILE" 2>/dev/null | cut -d'=' -f2 | cut -d'|' -f1)
-        local cur_label="${cur_name:-Этот сервер}"
-        menu_ips+=("$MY_IP")
-        menu_labels+=("${cur_label} (${MY_IP})")
-
-        # Из алиасов
+        # Из алиасов — главный источник, включая текущий сервер если там есть
+        local cur_in_aliases=0
         if [ -f "$ALIASES_FILE" ]; then
             while IFS='=' read -r ip_key val; do
-                validate_ip "$ip_key" 2>/dev/null || continue
-                [ "$ip_key" = "$MY_IP" ] && continue
+                [[ "$ip_key" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || continue
                 local name; name=$(echo "$val" | cut -d'|' -f1)
                 local country; country=$(echo "$val" | cut -d'|' -f3)
                 local label="${name:-$ip_key}"
                 [ -n "$country" ] && label="$label ($country)"
                 menu_ips+=("$ip_key")
                 menu_labels+=("$label")
+                [ "$ip_key" = "$MY_IP" ] && cur_in_aliases=1
             done < "$ALIASES_FILE"
         fi
 
-        # Из правил iptables (если не в алиасах)
+        # Текущий сервер — добавить первым только если его нет в алиасах
+        if [ "$cur_in_aliases" -eq 0 ]; then
+            menu_ips=("$MY_IP" "${menu_ips[@]}")
+            menu_labels=("Этот сервер (${MY_IP})" "${menu_labels[@]}")
+        fi
+
+        # Из правил iptables — только новые IP
         while read -r ip; do
             [ -z "$ip" ] && continue
             local dup=0
             for eip in "${menu_ips[@]}"; do [ "$eip" = "$ip" ] && dup=1; done
-            if [ "$dup" -eq 0 ]; then
-                menu_ips+=("$ip")
-                menu_labels+=("$ip ${YELLOW}(нет имени — нажмите номер чтобы добавить)${NC}")
-            fi
+            [ "$dup" -eq 0 ] && menu_ips+=("$ip") && menu_labels+=("$ip")
         done <<< "$(get_target_ips)"
 
-        # Статус каждого сервера
         local total="${#menu_ips[@]}"
         for i in "${!menu_ips[@]}"; do
             local ip="${menu_ips[$i]}"
@@ -2111,55 +2107,59 @@ ping_menu() {
                 local color="$GREEN"
                 (( ms_int > 80 )) && color="$YELLOW"
                 (( ms_int > 150 )) && color="$RED"
-                echo -e "  ${YELLOW}[$((i+1))]${NC} ${color}●${NC} ${label}${is_current}"
-                echo -e "       ${color}${ms}ms${NC}"
+                printf "  ${YELLOW}[%d]${NC} ${color}●${NC} %-28s ${WHITE}%s${NC}${is_current}  ${color}%s${NC}\n" \
+                    "$((i+1))" "${label}" "${ip}" "${ms}ms"
             else
-                echo -e "  ${YELLOW}[$((i+1))]${NC} ${RED}●${NC} ${label}${is_current}"
-                echo -e "       ${RED}недоступен${NC}"
+                printf "  ${YELLOW}[%d]${NC} ${RED}●${NC} %-28s ${WHITE}%s${NC}${is_current}  ${RED}%s${NC}\n" \
+                    "$((i+1))" "${label}" "${ip}" "недоступен"
             fi
         done
 
-        # WARP
         if is_warp_running; then
             local wip; wip=$(get_warp_ip)
-            echo -e "  ${GREEN}●${NC} ${WHITE}Cloudflare WARP${NC}"
-            echo -e "       ${GREEN}${wip}${NC}"
+            printf "      ${GREEN}●${NC} %-28s ${WHITE}%s${NC}\n" "Cloudflare WARP" "${wip}"
         fi
 
         echo ""
         echo -e "  $((total+1)))  Тест скорости"
         echo -e "  $((total+2)))  Тест цепочки"
-        echo -e "  $((total+3)))  Добавить / переименовать сервер"
+        echo -e "  $((total+3)))  Добавить сервер"
         echo -e "  $((total+4)))  Автомониторинг"
         echo -e "  0)  Назад"
         echo ""
         read -p "Выбор: " choice
 
-        # Пустой ввод — обновить (повторить цикл)
         [ -z "$choice" ] && continue
 
         if [[ "$choice" =~ ^[0-9]+$ ]]; then
             if (( choice >= 1 && choice <= total )); then
-                # Нажат номер сервера — предложить переименовать или протестировать
                 local sel_ip="${menu_ips[$((choice-1))]}"
                 local sel_label="${menu_labels[$((choice-1))]}"
                 clear
-                echo -e "\n${CYAN}━━━ Сервер: ${WHITE}${sel_ip}${CYAN} ━━━${NC}\n"
+                echo -e "\n${CYAN}━━━ ${sel_label}${CYAN} ━━━${NC}"
+                echo -e "    ${WHITE}${sel_ip}${NC}\n"
                 echo -e "  ${YELLOW}[1]${NC} Тест скорости"
-                echo -e "  ${YELLOW}[2]${NC} Переименовать / добавить имя"
+                echo -e "  ${YELLOW}[2]${NC} Переименовать"
+                echo -e "  ${RED}[3]${NC} Удалить из списка"
                 echo -e "  ${YELLOW}[0]${NC} Назад"
                 echo ""
                 read -p "Выбор: " sub
                 case "$sub" in
                     1) speed_test "$sel_ip" "$sel_label" ;;
                     2) _alias_edit "$sel_ip" ;;
+                    3)
+                        read -p "$(echo -e "${RED}Удалить ${sel_ip}? (y/n): ${NC}")" confirm
+                        if [[ "$confirm" == "y" ]]; then
+                            sed -i "/^${sel_ip}=/d" "$ALIASES_FILE" 2>/dev/null
+                            echo -e "${GREEN}[OK] Удалён.${NC}"; sleep 1
+                        fi
+                        ;;
                 esac
             elif (( choice == total+1 )); then
-                # Тест скорости — выбрать сервер
                 if (( total == 1 )); then
                     speed_test "${menu_ips[0]}" "${menu_labels[0]}"
                 else
-                    echo -e "\n${WHITE}Номер сервера для теста:${NC}"
+                    echo -e "\n${WHITE}Номер сервера:${NC}"
                     read -p "> " tch
                     [[ "$tch" =~ ^[0-9]+$ ]] && (( tch >= 1 && tch <= total )) && \
                         speed_test "${menu_ips[$((tch-1))]}" "${menu_labels[$((tch-1))]}"
@@ -3267,6 +3267,23 @@ show_menu() {
             echo -e "  ${WHITE}WARP:  ${warp_color}${warp_st}${NC}   ${WHITE}CF IP: ${GREEN}${_wip}${NC}   ${WHITE}SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
         else
             echo -e "  ${WHITE}WARP:  ${warp_color}${warp_st}${NC}   ${WHITE}SOCKS5: ${CYAN}127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        fi
+
+        # Цепочка из алиасов
+        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+            local chain_str=""
+            while IFS='=' read -r ip_key val; do
+                [[ "$ip_key" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || continue
+                local n; n=$(echo "$val" | cut -d'|' -f1)
+                local node="${n:-$ip_key}"
+                [ "$ip_key" = "$MY_IP" ] && node="${node}${CYAN}*${NC}"
+                [ -z "$chain_str" ] && chain_str="${WHITE}${node}${NC}" || \
+                    chain_str="${chain_str} ${WHITE}→${NC} ${WHITE}${node}${NC}"
+            done < "$ALIASES_FILE"
+            if is_warp_running; then
+                chain_str="${chain_str} ${WHITE}→${NC} ${GREEN}CF${NC}"
+            fi
+            echo -e "  ${WHITE}Цепь:  ${chain_str}"
         fi
         echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
         echo -e " ${CYAN}── IPTABLES ПРОБРОС ─────────────────${NC}"
