@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.7"
+VERSION="1.8"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2134,36 +2134,54 @@ full_uninstall() {
 # ═══════════════════════════════════════════════════════════════
 
 self_update() {
-    # Место для URL своего репозитория
-    local REPO_URL="${GOVPN_REPO_URL:-}"
-    if [ -z "$REPO_URL" ]; then
-        echo -e "\n${YELLOW}URL репозитория не задан.${NC}"
-        echo -e "Установите переменную ${WHITE}GOVPN_REPO_URL${NC} или укажите URL:"
-        read -p "> " REPO_URL
-        [ -z "$REPO_URL" ] && return
-    fi
+    clear
+    echo -e "\n${CYAN}━━━ Обновление govpn ━━━${NC}\n"
 
-    echo -e "${YELLOW}[*] Загрузка обновления из ${REPO_URL}...${NC}"
+    local REPO_URL="${GOVPN_REPO_URL}"
+    echo -e "${WHITE}Текущая версия: ${GREEN}v${VERSION}${NC}"
+    echo -e "${WHITE}Источник: ${CYAN}${REPO_URL}${NC}\n"
+
+    echo -e "${YELLOW}[1/3]${NC} Загрузка новой версии..."
     local tmp="/tmp/${SCRIPT_NAME}_update.sh"
-    curl -fsSL "$REPO_URL" -o "$tmp" 2>/dev/null
-
-    if [ ! -f "$tmp" ] || ! head -1 "$tmp" 2>/dev/null | grep -q "#!/bin/bash"; then
-        echo -e "${RED}[ERROR] Не удалось загрузить или файл некорректен.${NC}"
+    if ! curl -fsSL --max-time 30 "$REPO_URL" -o "$tmp" 2>/dev/null; then
+        echo -e "${RED}[ERROR] Не удалось загрузить.${NC}"
+        echo -e "${WHITE}Проверьте доступ к GitHub.${NC}"
         rm -f "$tmp"
         read -p "Нажмите Enter..."; return
     fi
 
-    # Бэкап текущей версии
-    local bak="${BACKUP_DIR}/${SCRIPT_NAME}.sh.bak.$(date +%s)"
-    cp "$INSTALL_PATH" "$bak" 2>/dev/null
-    echo -e "${GREEN}[✓] Бэкап текущей версии: ${bak}${NC}"
+    if ! head -1 "$tmp" 2>/dev/null | grep -q "#!/bin/bash"; then
+        echo -e "${RED}[ERROR] Файл некорректен (не bash скрипт).${NC}"
+        rm -f "$tmp"
+        read -p "Нажмите Enter..."; return
+    fi
 
+    local new_ver
+    new_ver=$(grep '^VERSION=' "$tmp" 2>/dev/null | head -1 | cut -d'"' -f2)
+    echo -e "${GREEN}  ✓ Загружена версия: v${new_ver:-?}${NC}"
+
+    if [ -n "$new_ver" ] && [ "$new_ver" = "$VERSION" ]; then
+        echo -e "\n${GREEN}Уже установлена актуальная версия v${VERSION}.${NC}"
+        rm -f "$tmp"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    echo -e "${YELLOW}[2/3]${NC} Бэкап текущей версии..."
+    local bak="${BACKUP_DIR}/${SCRIPT_NAME}.sh.bak.$(date +%s)"
+    mkdir -p "$BACKUP_DIR"
+    cp "$INSTALL_PATH" "$bak" 2>/dev/null && \
+        echo -e "${GREEN}  ✓ Бэкап: ${bak}${NC}" || \
+        echo -e "${YELLOW}  ⚠ Бэкап не создан (скрипт ещё не установлен как команда)${NC}"
+
+    echo -e "${YELLOW}[3/3]${NC} Установка..."
     cp -f "$tmp" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
     rm -f "$tmp"
 
-    echo -e "${GREEN}[OK] Обновлён! Перезапустите: ${SCRIPT_NAME}${NC}"
-    log_action "SELF-UPDATE from ${REPO_URL}"
+    echo -e "${GREEN}  ✓ govpn обновлён до v${new_ver}${NC}"
+    log_action "SELF-UPDATE: v${VERSION} → v${new_ver}"
+    echo ""
+    echo -e "${WHITE}Перезапустите скрипт: ${CYAN}govpn${NC}"
     read -p "Нажмите Enter..."
     exit 0
 }
@@ -2282,6 +2300,304 @@ warp_test() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  WGCF — WireGuard профиль для Cloudflare WARP
+# ═══════════════════════════════════════════════════════════════
+
+WGCF_DIR="/etc/govpn/wgcf"
+WGCF_IFACE="wgcf0"
+WGCF_CONF="/etc/wireguard/${WGCF_IFACE}.conf"
+
+_wgcf_installed() { command -v wgcf &>/dev/null; }
+
+_wgcf_running() {
+    ip link show "$WGCF_IFACE" &>/dev/null 2>&1
+}
+
+wgcf_install() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка wgcf ━━━${NC}\n"
+    echo -e "${WHITE}wgcf — генерирует WireGuard профиль из Cloudflare WARP аккаунта.${NC}"
+    echo -e "${WHITE}Позволяет использовать WARP как WireGuard туннель без официального клиента.${NC}\n"
+
+    if _wgcf_installed; then
+        echo -e "${GREEN}wgcf уже установлен:${NC} $(wgcf --version 2>/dev/null || echo 'версия неизвестна')"
+        echo ""
+        read -p "Переустановить? (y/n): " re
+        [[ "$re" != "y" ]] && read -p "Нажмите Enter..." && return
+    fi
+
+    # Проверяем зависимости
+    echo -e "${YELLOW}[1/3]${NC} Проверка зависимостей..."
+    if ! command -v wireguard &>/dev/null && ! modinfo wireguard &>/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get install -y wireguard wireguard-tools > /dev/null 2>&1
+    fi
+    echo -e "${GREEN}  ✓ wireguard-tools${NC}"
+
+    # Определяем архитектуру
+    echo -e "${YELLOW}[2/3]${NC} Определение архитектуры..."
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *)       echo -e "${RED}[ERROR] Неподдерживаемая архитектура: $(uname -m)${NC}"
+                 read -p "Нажмите Enter..."; return ;;
+    esac
+    echo -e "${GREEN}  ✓ arch: ${arch}${NC}"
+
+    # Скачиваем последнюю версию
+    echo -e "${YELLOW}[3/3]${NC} Загрузка wgcf..."
+    local latest_url
+    latest_url=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null | \
+        python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assets=d.get('assets',[])
+for a in assets:
+    n=a.get('name','')
+    if 'linux_${arch}' in n and not n.endswith('.sha256'):
+        print(a['browser_download_url'])
+        break
+" 2>/dev/null)
+
+    if [ -z "$latest_url" ]; then
+        echo -e "${RED}[ERROR] Не удалось получить URL загрузки.${NC}"
+        echo -e "${WHITE}Скачайте вручную: ${CYAN}https://github.com/ViRb3/wgcf/releases${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    echo -e "  ${WHITE}URL: ${latest_url}${NC}"
+    curl -fsSL "$latest_url" -o /usr/local/bin/wgcf 2>/dev/null
+    chmod +x /usr/local/bin/wgcf
+
+    if _wgcf_installed; then
+        echo -e "${GREEN}  ✓ wgcf установлен: $(wgcf --version 2>/dev/null)${NC}"
+        mkdir -p "$WGCF_DIR"
+        log_action "WGCF INSTALL: $(wgcf --version 2>/dev/null)"
+    else
+        echo -e "${RED}[ERROR] Установка не удалась.${NC}"
+    fi
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+wgcf_generate() {
+    clear
+    echo -e "\n${CYAN}━━━ Создание WireGuard профиля Cloudflare ━━━${NC}\n"
+
+    if ! _wgcf_installed; then
+        echo -e "${RED}wgcf не установлен. Выполните п.26.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    mkdir -p "$WGCF_DIR"
+    cd "$WGCF_DIR" || return
+
+    echo -e "${WHITE}Что будет сделано:${NC}"
+    echo -e "  1. Регистрация нового WARP аккаунта"
+    echo -e "  2. Генерация WireGuard конфига"
+    echo -e "  3. Сохранение в ${CYAN}/etc/wireguard/${WGCF_IFACE}.conf${NC}"
+    echo ""
+
+    if [ -f "$WGCF_DIR/wgcf-account.toml" ]; then
+        echo -e "${YELLOW}Уже есть аккаунт: ${WGCF_DIR}/wgcf-account.toml${NC}"
+        read -p "Создать новый? (y/n): " regen
+        if [[ "$regen" == "y" ]]; then
+            rm -f "$WGCF_DIR/wgcf-account.toml" "$WGCF_DIR/wgcf-profile.conf"
+        fi
+    fi
+
+    echo -e "${YELLOW}[1/3]${NC} Регистрация WARP аккаунта..."
+    if [ ! -f "$WGCF_DIR/wgcf-account.toml" ]; then
+        if ! wgcf register --accept-tos 2>/dev/null; then
+            echo -e "${RED}[ERROR] Регистрация не удалась.${NC}"
+            echo -e "${WHITE}В отличие от warp-cli, wgcf использует мобильный API и обычно работает с любых IP.${NC}"
+            read -p "Нажмите Enter..."; return
+        fi
+    fi
+    echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
+
+    echo -e "${YELLOW}[2/3]${NC} Генерация WireGuard профиля..."
+    if ! wgcf generate 2>/dev/null; then
+        echo -e "${RED}[ERROR] Генерация профиля не удалась.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+    echo -e "${GREEN}  ✓ Профиль создан: ${WGCF_DIR}/wgcf-profile.conf${NC}"
+
+    echo -e "${YELLOW}[3/3]${NC} Установка профиля..."
+    # Убираем DNS из профиля чтобы не ломать системный DNS
+    # Добавляем Table=off чтобы не перехватывать весь трафик
+    python3 - <<EOF
+import re
+
+with open('${WGCF_DIR}/wgcf-profile.conf', 'r') as f:
+    content = f.read()
+
+# Убрать DNS — будем использовать системный
+content = re.sub(r'^DNS\s*=.*$', '# DNS = disabled (using system DNS)', content, flags=re.MULTILINE)
+
+# Добавить Table=off чтобы не перехватывать весь трафик хоста
+# Маршрутизацию настроим вручную через ip rule
+content = re.sub(r'(\[Interface\])', r'\1\nTable = off', content)
+
+# Убрать AllowedIPs 0.0.0.0/0 — заменим на только CF диапазоны
+content = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0, ::/0', content)
+
+with open('${WGCF_CONF}', 'w') as f:
+    f.write(content)
+print("OK")
+EOF
+
+    echo -e "${GREEN}  ✓ Конфиг: ${WGCF_CONF}${NC}"
+    echo ""
+    echo -e "${WHITE}Профиль готов. Запустите туннель: п.28${NC}"
+    echo ""
+    echo -e "${CYAN}Содержимое конфига:${NC}"
+    grep -v "PrivateKey" "$WGCF_CONF" | head -15
+    echo ""
+    log_action "WGCF GENERATE: profile created at ${WGCF_CONF}"
+    read -p "Нажмите Enter..."
+}
+
+wgcf_up() {
+    clear
+    echo -e "\n${CYAN}━━━ Запуск wgcf туннеля ━━━${NC}\n"
+
+    if ! _wgcf_installed; then
+        echo -e "${RED}wgcf не установлен. Выполните п.26.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    if [ ! -f "$WGCF_CONF" ]; then
+        echo -e "${RED}Профиль не найден: ${WGCF_CONF}${NC}"
+        echo -e "${WHITE}Сначала создайте профиль: п.27${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    if _wgcf_running; then
+        echo -e "${YELLOW}Туннель ${WGCF_IFACE} уже запущен.${NC}"
+        local wip; wip=$(curl -s4 --max-time 5 --interface "$WGCF_IFACE" https://api4.ipify.org 2>/dev/null)
+        [ -n "$wip" ] && echo -e "  ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    echo -e "${YELLOW}[*] Поднимаем туннель ${WGCF_IFACE}...${NC}"
+    wg-quick up "$WGCF_CONF" 2>&1 | while IFS= read -r l; do
+        echo -e "  ${WHITE}${l}${NC}"
+    done
+
+    sleep 2
+
+    if _wgcf_running; then
+        echo ""
+        echo -e "${GREEN}[OK] Туннель ${WGCF_IFACE} поднят!${NC}"
+
+        # Тест IP через туннель
+        local wip
+        wip=$(curl -s4 --max-time 8 --interface "$WGCF_IFACE" https://api4.ipify.org 2>/dev/null)
+        if [ -n "$wip" ]; then
+            echo -e "  ${WHITE}CF IP через туннель: ${GREEN}${wip}${NC}"
+        fi
+
+        echo ""
+        echo -e "${CYAN}Туннель работает в режиме Table=off${NC}"
+        echo -e "${WHITE}Трафик хоста НЕ перенаправляется автоматически.${NC}"
+        echo -e "${WHITE}Для routing Docker подсетей через туннель:${NC}"
+        echo -e "  ${CYAN}ip rule add from \$(docker network inspect bridge | python3 -c \"import json,sys; print(json.load(sys.stdin)[0]['IPAM']['Config'][0]['Subnet'])\") lookup 51820${NC}"
+        echo -e "  ${CYAN}ip route add default dev ${WGCF_IFACE} table 51820${NC}"
+        log_action "WGCF UP: iface=${WGCF_IFACE}, cf_ip=${wip}"
+    else
+        echo -e "${RED}[ERROR] Туннель не поднялся.${NC}"
+        echo -e "${WHITE}Проверьте: ${CYAN}wg show${NC}"
+    fi
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+wgcf_down() {
+    clear
+    echo -e "\n${CYAN}━━━ Остановка wgcf туннеля ━━━${NC}\n"
+
+    if ! _wgcf_running; then
+        echo -e "${YELLOW}Туннель ${WGCF_IFACE} не запущен.${NC}"
+        read -p "Нажмите Enter..."; return
+    fi
+
+    echo -e "${YELLOW}[*] Останавливаем ${WGCF_IFACE}...${NC}"
+    wg-quick down "$WGCF_CONF" 2>&1 | while IFS= read -r l; do
+        echo -e "  ${WHITE}${l}${NC}"
+    done
+    sleep 1
+
+    if ! _wgcf_running; then
+        echo -e "${GREEN}[OK] Туннель остановлен.${NC}"
+        log_action "WGCF DOWN"
+    else
+        echo -e "${RED}[ERROR] Не удалось остановить.${NC}"
+        echo -e "${WHITE}Попробуйте: ${CYAN}ip link delete ${WGCF_IFACE}${NC}"
+    fi
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+wgcf_status() {
+    clear
+    echo -e "\n${CYAN}━━━ Статус wgcf ━━━${NC}\n"
+
+    # wgcf установлен?
+    echo -ne "  ${WHITE}wgcf:${NC}        "
+    if _wgcf_installed; then
+        echo -e "${GREEN}установлен ($(wgcf --version 2>/dev/null | head -1))${NC}"
+    else
+        echo -e "${RED}не установлен${NC}"
+    fi
+
+    # Профиль есть?
+    echo -ne "  ${WHITE}Профиль:${NC}     "
+    if [ -f "$WGCF_CONF" ]; then
+        echo -e "${GREEN}${WGCF_CONF}${NC}"
+    else
+        echo -e "${YELLOW}не создан (п.27)${NC}"
+    fi
+
+    # Туннель запущен?
+    echo -ne "  ${WHITE}Туннель:${NC}     "
+    if _wgcf_running; then
+        echo -e "${GREEN}${WGCF_IFACE} запущен${NC}"
+        echo ""
+        echo -e "  ${CYAN}── wg show ──${NC}"
+        wg show "$WGCF_IFACE" 2>/dev/null | while IFS= read -r l; do
+            echo -e "  ${WHITE}${l}${NC}"
+        done
+        echo ""
+
+        # Тест IP
+        echo -ne "  ${WHITE}CF IP:${NC}       "
+        local wip
+        wip=$(curl -s4 --max-time 8 --interface "$WGCF_IFACE" https://api4.ipify.org 2>/dev/null)
+        if [ -n "$wip" ]; then
+            echo -e "${GREEN}${wip}${NC}"
+        else
+            echo -e "${YELLOW}нет ответа${NC}"
+        fi
+    else
+        echo -e "${YELLOW}не запущен (п.28)${NC}"
+    fi
+
+    # Аккаунт
+    if [ -f "$WGCF_DIR/wgcf-account.toml" ]; then
+        echo ""
+        echo -e "  ${CYAN}── Аккаунт ──${NC}"
+        grep -v "private_key\|device_token" "$WGCF_DIR/wgcf-account.toml" 2>/dev/null | \
+            while IFS= read -r l; do echo -e "  ${WHITE}${l}${NC}"; done
+    fi
+
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN MENU
 # ═══════════════════════════════════════════════════════════════
 
@@ -2334,6 +2650,12 @@ show_menu() {
         echo -e " 25)  ${GREEN}Тест WARP (проверить что работает)${NC}"
         echo -e " ${CYAN}── РОУТЕР ───────────────────────────${NC}"
         echo -e " 21)  AmneziaWG на OpenWrt / Keenetic"
+        echo -e " ${CYAN}── WGCF (WARP → WireGuard) ──────────${NC}"
+        echo -e " 26)  Установить wgcf"
+        echo -e " 27)  Создать WireGuard профиль CF"
+        echo -e " 28)  Поднять wgcf туннель"
+        echo -e " 29)  Остановить wgcf туннель"
+        echo -e " 30)  Статус wgcf"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e " 22)  Проверка конфликтов"
         echo -e " 23)  Обновить скрипт"
@@ -2369,6 +2691,11 @@ show_menu() {
             23) self_update ;;
             24) full_uninstall ;;
             25) warp_test ;;
+            26) wgcf_install ;;
+            27) wgcf_generate ;;
+            28) wgcf_up ;;
+            29) wgcf_down ;;
+            30) wgcf_status ;;
             0)  clear; exit 0 ;;
         esac
     done
