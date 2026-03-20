@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.4"
+VERSION="2.6"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -1318,25 +1318,27 @@ change_warp_port() {
         echo -e "\n${RED}WARP не установлен.${NC}"
         read -p "Нажмите Enter..."; return
     fi
+    clear
     echo -e "\n${CYAN}━━━ Изменение порта SOCKS5 ━━━${NC}\n"
-    echo -e "${WHITE}Текущий порт: ${GREEN}${WARP_SOCKS_PORT}${NC}\n"
+    echo -e "${WHITE}Текущий порт: ${GREEN}${WARP_SOCKS_PORT}${NC}"
+    echo -e "${WHITE}Введите новый порт (1024-65535) или Enter для отмены:${NC}\n"
     local new_port
     while true; do
-        read -p "Новый порт (1024-65535): " new_port
+        read -p "> " new_port
+        [ -z "$new_port" ] && echo -e "${CYAN}Отменено.${NC}" && read -p "Нажмите Enter..." && return
         [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 1024 && new_port <= 65535 )) && break
-        echo -e "${RED}Некорректный порт.${NC}"
+        echo -e "${RED}Некорректный порт. Введите число от 1024 до 65535 или Enter для отмены:${NC}"
     done
-    # Проверка что порт свободен
     if ss -tlnp 2>/dev/null | grep -q ":${new_port} "; then
-        echo -e "${RED}[ERROR] Порт ${new_port} уже занят!${NC}"
-        ss -tlnp 2>/dev/null | grep ":${new_port} "
+        local occupant; occupant=$(ss -tlnp 2>/dev/null | grep ":${new_port} " | sed 's/.*users:(("//' | cut -d'"' -f1)
+        echo -e "${RED}[ERROR] Порт ${new_port} уже занят процессом: ${occupant}${NC}"
         read -p "Нажмите Enter..."; return
     fi
     warp-cli --accept-tos proxy port "$new_port" > /dev/null 2>&1
     save_config_val "WARP_SOCKS_PORT" "$new_port"
     WARP_SOCKS_PORT="$new_port"
-    echo -e "${GREEN}[OK] Порт изменён на ${new_port}.${NC}"
-    echo -e "${YELLOW}Не забудьте обновить outbound в xray config (п.13)!${NC}"
+    echo -e "${GREEN}[OK] Порт изменён: ${WARP_SOCKS_PORT} → ${new_port}${NC}"
+    echo -e "${YELLOW}Обновите outbound в xray config (п.17) если он был добавлен.${NC}"
     log_action "WARP PORT: changed to ${new_port}"
     read -p "Нажмите Enter..."
 }
@@ -1444,29 +1446,82 @@ fmt_ip_short() {
 manage_aliases_menu() {
     while true; do
         clear
-        echo -e "${CYAN}━━━ Имена серверов ━━━${NC}"
-        local -a ips=()
-        while read -r ip; do [ -n "$ip" ] && ips+=("$ip"); done <<< "$(get_target_ips)"
-        if [ ${#ips[@]} -eq 0 ]; then
-            echo -e "${YELLOW}Нет серверов в правилах.${NC}"
-            read -p "Enter..."; return
+        echo -e "\n${CYAN}━━━ Имена серверов ━━━${NC}\n"
+        echo -e "${WHITE}Назначьте понятные имена IP адресам серверов.${NC}"
+        echo -e "${WHITE}Имена отображаются в меню, логах и ping тестах.${NC}\n"
+
+        # Показываем все известные IP — из правил И из файла алиасов
+        local -a all_ips=()
+        # Из правил iptables
+        while read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(get_target_ips)"
+        # Из файла алиасов (могут быть добавлены вручную)
+        if [ -f "$ALIASES_FILE" ]; then
+            while IFS='=' read -r ip_key _; do
+                local already=0
+                for existing in "${all_ips[@]}"; do [ "$existing" = "$ip_key" ] && already=1; done
+                [ "$already" -eq 0 ] && validate_ip "$ip_key" 2>/dev/null && all_ips+=("$ip_key")
+            done < "$ALIASES_FILE"
         fi
-        for i in "${!ips[@]}"; do
-            echo -e "  ${YELLOW}[$((i+1))]${NC} $(fmt_ip "${ips[$i]}")"
-            local note; note=$(get_alias_field "${ips[$i]}" "note")
-            [ -n "$note" ] && echo -e "       ${WHITE}${note}${NC}"
-        done
+
+        if [ ${#all_ips[@]} -gt 0 ]; then
+            echo -e "${CYAN}Текущие серверы:${NC}"
+            for i in "${!all_ips[@]}"; do
+                local ip="${all_ips[$i]}"
+                local name; name=$(get_alias_field "$ip" "name" 2>/dev/null)
+                local note; note=$(get_alias_field "$ip" "note" 2>/dev/null)
+                local country; country=$(get_alias_field "$ip" "country" 2>/dev/null)
+                local display="${name:-$ip}"
+                [ -n "$country" ] && display="$display ${YELLOW}(${country})${NC}"
+                [ -n "$note" ] && display="$display — ${WHITE}${note}${NC}"
+                echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}${ip}${NC}  ${display}"
+            done
+            echo ""
+        else
+            echo -e "  ${YELLOW}Серверов пока нет.${NC}\n"
+        fi
+
+        echo -e "  ${YELLOW}[a]${NC} Добавить сервер вручную"
+        [ ${#all_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[1-${#all_ips[@]}]${NC} Редактировать имя/примечание"
         echo -e "  ${YELLOW}[0]${NC} Назад"
-        read -p "Сервер: " choice
-        [[ "$choice" == "0" || -z "$choice" ]] && return
-        local idx=$((choice - 1))
-        [ -z "${ips[$idx]:-}" ] && continue
-        local sel="${ips[$idx]}"
-        echo -e "Новое имя (Enter — оставить):"
-        read -p "> " nn; [ -n "$nn" ] && set_alias "$sel" "$nn"
-        echo -e "Примечание (Enter — оставить):"
-        read -p "> " nt; [ -n "$nt" ] && set_alias_note "$sel" "$nt"
-        echo -e "${GREEN}[OK]${NC}"; read -p "Enter..."
+        echo ""
+        read -p "Выбор: " choice
+
+        case "$choice" in
+            a|A)
+                echo -e "\n${WHITE}IP адрес сервера:${NC}"
+                read -p "> " new_ip
+                [ -z "$new_ip" ] && continue
+                if ! [[ "$new_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                    echo -e "${RED}Некорректный IP.${NC}"; read -p "Enter..."; continue
+                fi
+                echo -e "${WHITE}Имя (например: RU-bridge, AMS-exit):${NC}"
+                read -p "> " new_name
+                echo -e "${WHITE}Примечание (необязательно):${NC}"
+                read -p "> " new_note
+                # GeoIP lookup
+                local geo_result country isp
+                echo -e "${YELLOW}[*] GeoIP lookup...${NC}"
+                geo_result=$(geoip_lookup "$new_ip" 2>/dev/null)
+                country=$(echo "$geo_result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+                isp=$(echo "$geo_result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('isp',''))" 2>/dev/null)
+                set_alias_full "$new_ip" "${new_name:-$new_ip}" "$new_note" "$country" "$isp"
+                echo -e "${GREEN}[OK] Сервер добавлен: ${new_ip} → ${new_name:-$new_ip} ${country}${NC}"
+                read -p "Нажмите Enter..."
+                ;;
+            0|"") return ;;
+            *)
+                [[ "$choice" =~ ^[0-9]+$ ]] || continue
+                local idx=$((choice - 1))
+                [ -z "${all_ips[$idx]:-}" ] && continue
+                local sel="${all_ips[$idx]}"
+                echo -e "\n${WHITE}Редактирование: ${GREEN}${sel}${NC}"
+                echo -e "${WHITE}Новое имя (Enter — без изменений):${NC}"
+                read -p "> " nn; [ -n "$nn" ] && set_alias "$sel" "$nn"
+                echo -e "${WHITE}Примечание (Enter — без изменений):${NC}"
+                read -p "> " nt; [ -n "$nt" ] && set_alias_note "$sel" "$nt"
+                echo -e "${GREEN}[OK] Сохранено.${NC}"; read -p "Нажмите Enter..."
+                ;;
+        esac
     done
 }
 
@@ -1907,6 +1962,106 @@ ping_live() {
     read -p "Нажмите Enter..."
 }
 
+chain_test_menu() {
+    clear
+    echo -e "\n${CYAN}━━━ Тест цепочки соединения ━━━${NC}\n"
+    echo -e "${WHITE}Измеряем задержку на каждом уровне цепочки:${NC}"
+    echo -e "  ${CYAN}Клиент → RU bridge → AMS exit → интернет${NC}\n"
+
+    # Получаем IP из алиасов или правил
+    local ru_ip ams_ip
+    ru_ip=$(get_target_ips | head -1)
+    ams_ip=$(get_target_ips | tail -1)
+
+    if [ -z "$ru_ip" ]; then
+        echo -e "${YELLOW}Нет серверов в правилах. Введите IP вручную:${NC}\n"
+        echo -e "${WHITE}RU bridge IP (или Enter чтобы пропустить):${NC}"
+        read -p "> " ru_ip
+        echo -e "${WHITE}AMS exit IP (или Enter чтобы пропустить):${NC}"
+        read -p "> " ams_ip
+    elif [ "$ru_ip" = "$ams_ip" ]; then
+        ams_ip=""
+    fi
+
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    # 1. Этот сервер → интернет (прямой)
+    echo -e "\n${WHITE}[1/4] Этот сервер → интернет (прямой):${NC}"
+    local t1_start t1_end t1_ms
+    t1_start=$(date +%s%3N)
+    curl -s4 --max-time 5 https://api4.ipify.org > /dev/null 2>&1
+    t1_end=$(date +%s%3N)
+    t1_ms=$((t1_end - t1_start))
+    echo -e "  ${GREEN}✓${NC} HTTP запрос: ${GREEN}${t1_ms}ms${NC}  IP: ${WHITE}${MY_IP}${NC}"
+
+    # 2. Этот сервер → WARP (если запущен)
+    echo -e "\n${WHITE}[2/4] Этот сервер → Cloudflare WARP:${NC}"
+    if is_warp_running; then
+        local t2_start t2_end t2_ms wip
+        t2_start=$(date +%s%3N)
+        wip=$(curl -s4 --max-time 8 --proxy "socks5://127.0.0.1:${WARP_SOCKS_PORT}" \
+            https://api4.ipify.org 2>/dev/null)
+        t2_end=$(date +%s%3N)
+        t2_ms=$((t2_end - t2_start))
+        if [ -n "$wip" ]; then
+            echo -e "  ${GREEN}✓${NC} Через WARP: ${GREEN}${t2_ms}ms${NC}  CF IP: ${WHITE}${wip}${NC}"
+        else
+            echo -e "  ${RED}✗${NC} WARP не ответил"
+        fi
+    else
+        echo -e "  ${YELLOW}⚠${NC} WARP не запущен (п.10)"
+    fi
+
+    # 3. Ping до RU bridge (если есть)
+    if [ -n "$ru_ip" ] && validate_ip "$ru_ip" 2>/dev/null; then
+        echo -e "\n${WHITE}[3/4] Этот сервер → RU bridge (${ru_ip}):${NC}"
+        local ping_ru
+        ping_ru=$(ping -c 3 -W 3 "$ru_ip" 2>/dev/null | \
+            awk '/rtt/ {gsub(/.*=/, ""); split($1,a,"/"); printf "%.1f", a[2]}')
+        if [ -n "$ping_ru" ]; then
+            local color="$GREEN"
+            (( $(echo "$ping_ru > 100" | bc -l 2>/dev/null || echo 0) )) && color="$YELLOW"
+            (( $(echo "$ping_ru > 200" | bc -l 2>/dev/null || echo 0) )) && color="$RED"
+            echo -e "  ${GREEN}✓${NC} ICMP ping avg: ${color}${ping_ru}ms${NC}"
+        else
+            # TCP ping как fallback
+            local port; port=$(get_port_for_ip "$ru_ip" 2>/dev/null || echo "443")
+            local raw; raw=$(tcp_ping "$ru_ip" "$port" 3 2>/dev/null)
+            [ -n "$raw" ] && \
+                echo -e "  ${GREEN}✓${NC} TCP ping :${port}: ${GREEN}${raw}ms${NC}" || \
+                echo -e "  ${RED}✗${NC} Недоступен"
+        fi
+    else
+        echo -e "\n${WHITE}[3/4] RU bridge:${NC} ${YELLOW}не настроен${NC}"
+    fi
+
+    # 4. Ping до AMS exit (если есть и отличается от RU)
+    if [ -n "$ams_ip" ] && validate_ip "$ams_ip" 2>/dev/null; then
+        echo -e "\n${WHITE}[4/4] Этот сервер → AMS exit (${ams_ip}):${NC}"
+        local ping_ams
+        ping_ams=$(ping -c 3 -W 3 "$ams_ip" 2>/dev/null | \
+            awk '/rtt/ {gsub(/.*=/, ""); split($1,a,"/"); printf "%.1f", a[2]}')
+        if [ -n "$ping_ams" ]; then
+            local color="$GREEN"
+            (( $(echo "$ping_ams > 100" | bc -l 2>/dev/null || echo 0) )) && color="$YELLOW"
+            echo -e "  ${GREEN}✓${NC} ICMP ping avg: ${color}${ping_ams}ms${NC}"
+        else
+            local port; port=$(get_port_for_ip "$ams_ip" 2>/dev/null || echo "443")
+            local raw; raw=$(tcp_ping "$ams_ip" "$port" 3 2>/dev/null)
+            [ -n "$raw" ] && \
+                echo -e "  ${GREEN}✓${NC} TCP ping :${port}: ${GREEN}${raw}ms${NC}" || \
+                echo -e "  ${RED}✗${NC} Недоступен"
+        fi
+    else
+        echo -e "\n${WHITE}[4/4] AMS exit:${NC} ${YELLOW}не настроен${NC}"
+    fi
+
+    echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}Добавьте серверы через п.21 (Имена серверов) для автоопределения.${NC}"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
 ping_menu() {
     while true; do
         clear
@@ -1945,6 +2100,7 @@ ping_menu() {
         echo ""
         echo -e "  ${YELLOW}[1]${NC} Live ping (выбрать сервер)"
         echo -e "  ${YELLOW}[2]${NC} Проверить все серверы сейчас"
+        echo -e "  ${GREEN}[6]${NC} Тест цепочки: Клиент → RU → AMS → интернет"
         echo -e "  ${GREEN}[3]${NC} Включить автомониторинг"
         echo -e "  ${RED}[4]${NC} Выключить автомониторинг"
         echo -e "  ${YELLOW}[5]${NC} Показать лог мониторинга"
@@ -2010,6 +2166,7 @@ ping_menu() {
                 echo ""
                 read -p "Нажмите Enter..."
                 ;;
+            6)  chain_test_menu ;;
             0|"") return ;;
         esac
     done
@@ -2122,31 +2279,84 @@ _monitor_daemon() {
 # ═══════════════════════════════════════════════════════════════
 
 show_system_stats() {
-    clear
-    echo -e "\n${CYAN}━━━ Системная информация ━━━${NC}\n"
-    local cpu_count load_avg mem_info disk_info uptime_str cpu_usage
-    cpu_count=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "?")
-    load_avg=$(cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}')
-    mem_info=$(free -m 2>/dev/null | awk '/^Mem:/ {printf "%d/%dMB (%.1f%%)", $3, $2, $3/$2*100}')
-    disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s)", $3, $2, $5}')
-    uptime_str=$(uptime -p 2>/dev/null || uptime | sed 's/.*up //; s/,.*load.*//')
-    cpu_usage=$(awk '/^cpu / {u=$2+$4; t=$2+$3+$4+$5+$6+$7+$8; if(t>0) printf "%.1f%%", u/t*100}' /proc/stat 2>/dev/null)
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Системная информация ━━━${NC}\n"
+        local cpu_count load_avg mem_info disk_info uptime_str cpu_usage
+        cpu_count=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "?")
+        load_avg=$(cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}')
+        mem_info=$(free -m 2>/dev/null | awk '/^Mem:/ {printf "%d/%dMB (%.1f%%)", $3, $2, $3/$2*100}')
+        disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s)", $3, $2, $5}')
+        uptime_str=$(uptime -p 2>/dev/null || uptime | sed 's/.*up //; s/,.*load.*//')
+        cpu_usage=$(awk '/^cpu / {u=$2+$4; t=$2+$3+$4+$5+$6+$7+$8; if(t>0) printf "%.1f%%", u/t*100}' /proc/stat 2>/dev/null)
 
-    echo -e "  ${WHITE}Uptime:  ${GREEN}${uptime_str}${NC}"
-    echo -e "  ${WHITE}CPU:     ${GREEN}${cpu_count} ядер | ${cpu_usage}${NC}"
-    echo -e "  ${WHITE}Load:    ${GREEN}${load_avg}${NC}"
-    echo -e "  ${WHITE}RAM:     ${GREEN}${mem_info}${NC}"
-    echo -e "  ${WHITE}Диск /:  ${GREEN}${disk_info}${NC}"
-    echo -e "  ${WHITE}IP:      ${GREEN}${MY_IP}${NC}"
-    echo -e "  ${WHITE}Iface:   ${GREEN}${IFACE}${NC}"
-    echo ""
+        echo -e "  ${WHITE}Uptime:  ${GREEN}${uptime_str}${NC}"
+        echo -e "  ${WHITE}CPU:     ${GREEN}${cpu_count} ядер | ${cpu_usage}${NC}"
+        echo -e "  ${WHITE}Load:    ${GREEN}${load_avg}${NC}"
+        echo -e "  ${WHITE}RAM:     ${GREEN}${mem_info}${NC}"
+        echo -e "  ${WHITE}Диск /:  ${GREEN}${disk_info}${NC}"
+        echo -e "  ${WHITE}IP:      ${GREEN}${MY_IP}${NC}"
+        echo -e "  ${WHITE}Iface:   ${GREEN}${IFACE}${NC}"
+        echo ""
 
-    # Топ процессы по CPU
-    echo -e "${CYAN}━━━ Топ процессы (CPU) ━━━${NC}"
-    ps aux --sort=-%cpu 2>/dev/null | head -6 | tail -5 | \
-        awk '{printf "  %-20s CPU: %s%%  MEM: %s%%\n", $11, $3, $4}'
-    echo ""
-    read -p "Нажмите Enter..."
+        # Топ процессы по CPU
+        echo -e "${CYAN}── Топ процессы (CPU) ──${NC}"
+        ps aux --sort=-%cpu 2>/dev/null | head -6 | tail -5 | \
+            awk '{printf "  %-20s CPU: %s%%  MEM: %s%%\n", $11, $3, $4}'
+        echo ""
+
+        # Бэкапы
+        local bak_count
+        bak_count=$(ls "$BACKUP_DIR"/*.bak.* 2>/dev/null | wc -l)
+        echo -e "${CYAN}── Бэкапы (${BACKUP_DIR}) ──${NC}"
+        if [ "$bak_count" -gt 0 ]; then
+            ls -t "$BACKUP_DIR"/*.bak.* 2>/dev/null | head -5 | while read -r f; do
+                echo -e "  ${WHITE}$(basename "$f")${NC}  $(du -sh "$f" 2>/dev/null | cut -f1)"
+            done
+            [ "$bak_count" -gt 5 ] && echo -e "  ${YELLOW}... и ещё $((bak_count-5)) бэкапов${NC}"
+        else
+            echo -e "  ${YELLOW}Бэкапов нет${NC}"
+        fi
+        echo ""
+        echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
+        echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
+        echo -e "  ${YELLOW}[x]${NC}  Перезапустить x-ui / 3x-ui"
+        echo -e "  ${YELLOW}[w]${NC}  Перезапустить WARP"
+        echo -e "  ${YELLOW}[b]${NC}  Показать все бэкапы (п.18)"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Действие: " act
+        case "$act" in
+            r)
+                read -p "$(echo -e "${RED}Перезагрузить сервер? (y/n): ${NC}")" confirm
+                [[ "$confirm" == "y" ]] && reboot
+                ;;
+            x)
+                echo -e "${YELLOW}[*] Перезапуск x-ui...${NC}"
+                systemctl restart x-ui 2>/dev/null && \
+                    echo -e "${GREEN}[OK] x-ui перезапущен.${NC}" || \
+                    echo -e "${RED}[ERROR] x-ui не найден или не запустился.${NC}"
+                read -p "Нажмите Enter..."
+                ;;
+            w)
+                echo -e "${YELLOW}[*] Перезапуск WARP...${NC}"
+                systemctl restart warp-svc 2>/dev/null
+                sleep 2
+                warp-cli --accept-tos connect > /dev/null 2>&1
+                sleep 2
+                if is_warp_running; then
+                    echo -e "${GREEN}[OK] WARP запущен.${NC}"
+                else
+                    echo -e "${RED}[ERROR] WARP не запустился.${NC}"
+                fi
+                read -p "Нажмите Enter..."
+                ;;
+            b)
+                show_backups
+                ;;
+            0|"") return ;;
+        esac
+    done
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -2826,9 +3036,21 @@ wgcf_menu() {
         clear
         echo -e "\n${CYAN}━━━ wgcf — WireGuard профиль Cloudflare ━━━${NC}\n"
         echo -e "${WHITE}wgcf создаёт стандартный WireGuard туннель к Cloudflare.${NC}"
-        echo -e "${WHITE}В отличие от warp-cli — работает с любых IP включая РФ хостинги.${NC}"
-        echo -e "${WHITE}Используется для маршрутизации трафика Docker/AWG через Cloudflare.${NC}"
+        echo -e "${WHITE}Работает с любых IP включая РФ хостинги (в отличие от warp-cli).${NC}"
         echo ""
+        echo -e "${CYAN}Для какой панели:${NC}"
+        echo -e "  ${GREEN}✓${NC} ${WHITE}3x-ui / x-ui-pro${NC} — туннель поднимается на хосте, трафик"
+        echo -e "    направляется через него как дополнение к WARP SOCKS5"
+        echo -e "  ${YELLOW}⚠${NC} ${WHITE}Amnezia (Docker)${NC} — туннель поднимается, но направить"
+        echo -e "    трафик Amnezia контейнеров через него не получится"
+        echo -e "    (Amnezia использует собственный сетевой стек amn0)"
+        echo -e "    ${CYAN}Рекомендация для Amnezia: используйте WARP SOCKS5 (п.8-15)${NC}"
+        echo ""
+
+        # Проверяем есть ли Amnezia
+        local has_amnezia=0
+        command -v docker &>/dev/null && \
+            docker ps --format '{{.Names}}' 2>/dev/null | grep -qi "amnezia" && has_amnezia=1
 
         local wgcf_st="${RED}не установлен${NC}"
         _wgcf_installed && wgcf_st="${GREEN}установлен ($(wgcf --version 2>/dev/null | head -1))${NC}"
@@ -2840,6 +3062,8 @@ wgcf_menu() {
         echo -e "  ${WHITE}wgcf:     ${wgcf_st}"
         echo -e "  ${WHITE}Профиль:  ${prof_st}"
         echo -e "  ${WHITE}Туннель:  ${tun_st}"
+        [ "$has_amnezia" -eq 1 ] && \
+            echo -e "  ${YELLOW}⚠ Обнаружена Amnezia — маршрутизация контейнеров ограничена${NC}"
         echo ""
         echo -e "  ${YELLOW}[1]${NC} Установить wgcf"
         echo -e "  ${YELLOW}[2]${NC} Создать WireGuard профиль CF"
@@ -2904,20 +3128,19 @@ show_menu() {
         echo -e " 14)  ${RED}Удалить WARP${NC}"
         echo -e " 15)  ${GREEN}★ Тест WARP (проверить прохождение трафика)${NC}"
         echo -e " ${CYAN}── 3X-UI / XRAY ─────────────────────${NC}"
-        echo -e " 16)  JSON для ручного добавления"
-        echo -e " 17)  ${GREEN}Применить WARP в config.json (авто)${NC}"
-        echo -e " 18)  Бэкапы и Rollback"
+        echo -e " 16)  JSON для ручного добавления через панель"
+        echo -e " 17)  ${GREEN}Применить WARP в xray (авто, через БД)${NC}"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
-        echo -e " 19)  Ping (live) + мониторинг"
-        echo -e " 20)  Системная статистика"
-        echo -e " 21)  Имена серверов"
+        echo -e " 18)  Ping + тест цепочки + мониторинг"
+        echo -e " 19)  Статистика, бэкапы, управление"
+        echo -e " 20)  Имена серверов"
         echo -e " ${CYAN}── РОУТЕР / ДОПОЛНИТЕЛЬНО ───────────${NC}"
-        echo -e " 22)  AmneziaWG на OpenWrt / Keenetic"
-        echo -e " 23)  wgcf — WireGuard профиль CF"
+        echo -e " 21)  AmneziaWG на роутер  ${YELLOW}(только Amnezia)${NC}"
+        echo -e " 22)  wgcf — WireGuard профиль CF"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
-        echo -e " 24)  Проверка конфликтов"
-        echo -e " 25)  Обновить скрипт"
-        echo -e " 26)  ${RED}Полное удаление${NC}"
+        echo -e " 23)  Проверка конфликтов"
+        echo -e " 24)  Обновить скрипт"
+        echo -e " 25)  ${RED}Полное удаление${NC}"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         read -p "Выбор: " ch
@@ -2941,15 +3164,14 @@ show_menu() {
             15) warp_test ;;
             16) show_xray_json ;;
             17) apply_xray_warp ;;
-            18) show_backups ;;
-            19) ping_menu ;;
-            20) show_system_stats ;;
-            21) manage_aliases_menu ;;
-            22) show_amnezia_router ;;
-            23) wgcf_menu ;;
-            24) check_conflicts ;;
-            25) self_update ;;
-            26) full_uninstall ;;
+            18) ping_menu ;;
+            19) show_system_stats ;;
+            20) manage_aliases_menu ;;
+            21) show_amnezia_router ;;
+            22) wgcf_menu ;;
+            23) check_conflicts ;;
+            24) self_update ;;
+            25) full_uninstall ;;
             0)
                 clear
                 # Проверка что команда govpn работает
