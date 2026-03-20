@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.1"
+VERSION="3.2"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -1952,7 +1952,7 @@ chain_test_menu() {
     # Если серверов нет — предложить ввести вручную
     if [ ${#chain_ips[@]} -eq 0 ]; then
         echo -e "${YELLOW}Серверов не найдено.${NC}"
-        echo -e "${WHITE}Введите IP вручную (или добавьте через п.18 (нажмите номер сервера)):${NC}\n"
+        echo -e "${WHITE}Введите IP вручную:${NC}\n"
         local ip1 ip2
         echo -e "${WHITE}Сервер 1 (Enter — пропустить):${NC}"
         read -p "> " ip1
@@ -2051,7 +2051,6 @@ chain_test_menu() {
     done
 
     echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${WHITE}Совет: добавьте серверы через п.18 (Серверы).${NC}"
     echo ""
     read -p "Нажмите Enter..."
 }
@@ -2097,47 +2096,41 @@ ping_menu() {
         for i in "${!menu_ips[@]}"; do
             local ip="${menu_ips[$i]}"
             local label="${menu_labels[$i]}"
-            local is_current=""
-            [ "$ip" = "$MY_IP" ] && is_current=" ${CYAN}←${NC}"
+            local is_cur=""
+            [ "$ip" = "$MY_IP" ] && is_cur="${CYAN} ←${NC}"
 
-            # Для текущего сервера не добавляем IP в label если он уже там есть
-            local display_label="$label"
-            local display_ip="$ip"
-            # Убрать IP из label если он там уже дублируется
-            if echo "$label" | grep -q "$ip"; then
-                display_ip=""
-            fi
-
-            # Пинг — для текущего сервера используем loopback
-            local ms_str
+            local ms_str color
             if [ "$ip" = "$MY_IP" ]; then
                 local lo_ms
                 lo_ms=$(ping -c 1 -W 1 127.0.0.1 2>/dev/null | \
                     sed -n 's/.*time=\([0-9.]*\).*/\1/p')
                 ms_str="${lo_ms:-0.1}ms"
-                local color="$GREEN"
-                printf "  ${YELLOW}[%d]${NC} ${color}●${NC} %-20s ${WHITE}%s${NC}${is_current}  ${color}%s${NC}\n" \
-                    "$((i+1))" "$display_label" "$display_ip" "$ms_str"
+                color="$GREEN"
             else
                 local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
                 if [ -n "$raw" ]; then
-                    local ms="${raw#*|}"
-                    local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
-                    local color="$GREEN"
+                    ms_str="${raw#*|}"
+                    ms_str="${ms_str}ms"
+                    local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",${raw#*|}+0.5}")
+                    color="$GREEN"
                     (( ms_int > 80 )) && color="$YELLOW"
                     (( ms_int > 150 )) && color="$RED"
-                    printf "  ${YELLOW}[%d]${NC} ${color}●${NC} %-20s ${WHITE}%s${NC}${is_current}  ${color}%s${NC}\n" \
-                        "$((i+1))" "$display_label" "$display_ip" "${ms}ms"
                 else
-                    printf "  ${YELLOW}[%d]${NC} ${RED}●${NC} %-20s ${WHITE}%s${NC}${is_current}  ${RED}%s${NC}\n" \
-                        "$((i+1))" "$display_label" "$display_ip" "недоступен"
+                    ms_str="недоступен"
+                    color="$RED"
                 fi
             fi
+
+            # Фиксированная ширина без цветовых кодов в printf
+            local num="[$((i+1))]"
+            echo -e "  ${YELLOW}${num}${NC} ${color}●${NC} ${WHITE}${label}${NC}${is_cur}"
+            echo -e "       ${WHITE}${ip}${NC}  ${color}${ms_str}${NC}"
         done
 
         if is_warp_running; then
             local wip; wip=$(get_warp_ip)
-            printf "      ${GREEN}●${NC} %-20s ${WHITE}%s${NC}\n" "Cloudflare WARP" "${wip}"
+            echo -e "      ${GREEN}●${NC} ${WHITE}Cloudflare WARP${NC}"
+            echo -e "         ${WHITE}${wip}${NC}"
         fi
 
         echo ""
@@ -2146,11 +2139,6 @@ ping_menu() {
         echo -e "  $((total+3)))  Проверить сайт / IP"
         echo -e "  $((total+4)))  Автомониторинг"
         echo -e "  0)  Назад"
-        if [ "$total" -le 1 ] && [ ! -s "$ALIASES_FILE" ]; then
-            echo ""
-            echo -e "  ${YELLOW}Совет:${NC} нажмите ${YELLOW}[1]${NC} чтобы добавить имя этому серверу"
-            echo -e "  ${WHITE}и добавьте остальные серверы цепочки (RU, AMS).${NC}"
-        fi
         echo ""
         read -p "Выбор: " choice
 
