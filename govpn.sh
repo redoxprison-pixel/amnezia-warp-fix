@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.6"
+VERSION="2.7"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -1926,76 +1926,159 @@ make_ping_bar() {
 ping_live() {
     local ip="$1"
     local label; label=$(fmt_ip_short "$ip")
-    local -a results=()
-    local count=0 lost=0 running=1
+    clear
+    echo -e "\n${CYAN}━━━ Тест скорости и задержки: ${WHITE}${label}${CYAN} ━━━${NC}\n"
+    echo -e "${WHITE}Нажмите Ctrl+C для остановки.${NC}\n"
+
     local _port; _port=$(get_port_for_ip "$ip")
-    trap 'running=0' INT
-    while [ "$running" -eq 1 ]; do
-        local raw method="" ms=""
-        raw=$(smart_ping "$ip" 3 "${_port:-}")
-        if [ -n "$raw" ]; then method="${raw%%|*}"; ms="${raw#*|}"; fi
-        ((count++))
-        clear
-        echo -e "${CYAN}━━━ Live Ping: ${WHITE}${label}${CYAN}  [Ctrl+C — стоп] ━━━${NC}"
-        if [ -n "$ms" ]; then
+    trap '' INT
+
+    # 1. Задержка (10 пингов)
+    echo -e "${CYAN}[1/3] Задержка (ICMP ping × 10):${NC}"
+    local -a results=() lost=0
+    for i in $(seq 1 10); do
+        local raw; raw=$(smart_ping "$ip" 3 "${_port:-}")
+        if [ -n "$raw" ]; then
+            local ms="${raw#*|}"
             results+=("$ms")
+            local ms_int; ms_int=$(awk "BEGIN{printf \"%d\",$ms+0.5}")
+            local color="$GREEN"
+            (( ms_int > 80 )) && color="$YELLOW"
+            (( ms_int > 150 )) && color="$RED"
             local bar; bar=$(make_ping_bar "$ms")
-            printf "  ${GREEN}#%-4d %7sms${NC} ${CYAN}[%s]${NC} %b\n" "$count" "$ms" "$method" "$bar"
+            printf "  ${WHITE}#%-2d${NC}  ${color}%7sms${NC}  %b\n" "$i" "$ms" "$bar"
         else
             ((lost++))
-            printf "  ${RED}#%-4d   TIMEOUT${NC}  " "$count"
-            for (( b=0; b<25; b++ )); do echo -ne "${RED}█${NC}"; done
-            echo ""
+            printf "  ${WHITE}#%-2d${NC}  ${RED}TIMEOUT${NC}\n" "$i"
         fi
-        if [ ${#results[@]} -gt 0 ]; then
-            local stats
-            stats=$(printf '%s\n' "${results[@]}" | \
-                awk 'BEGIN{mn=999999;mx=0;s=0} {s+=$1;if($1<mn)mn=$1;if($1>mx)mx=$1} END{printf "%.2f|%.2f|%.2f",mn,mx,s/NR}')
-            IFS='|' read -r s_min s_max s_avg <<< "$stats"
-            echo -e "  ${WHITE}Мин: ${s_min}ms │ Макс: ${s_max}ms │ Сред: ${s_avg}ms${NC}"
-        fi
-        echo -e "  ${WHITE}Потеряно: ${lost}/${count}${NC}"
-        sleep 1
     done
+
+    # Статистика задержки
+    if [ ${#results[@]} -gt 0 ]; then
+        local stats
+        stats=$(printf '%s\n' "${results[@]}" | \
+            awk 'BEGIN{mn=999999;mx=0;s=0;n=0} {s+=$1;n++;if($1<mn)mn=$1;if($1>mx)mx=$1} END{printf "%.1f|%.1f|%.1f",mn,mx,s/n}')
+        IFS='|' read -r s_min s_max s_avg <<< "$stats"
+        echo -e "\n  ${WHITE}Мин: ${GREEN}${s_min}ms${NC}  Макс: ${RED}${s_max}ms${NC}  Сред: ${CYAN}${s_avg}ms${NC}  Потери: ${lost}/10${NC}"
+    fi
+
+    # 2. Тест скачивания (через curl)
+    echo -e "\n${CYAN}[2/3] Скорость скачивания (5 сек):${NC}"
+    local dl_speed
+    dl_speed=$(curl -s4 --max-time 8 -o /dev/null -w '%{speed_download}' \
+        "https://speed.cloudflare.com/__down?bytes=5000000" 2>/dev/null)
+    if [ -n "$dl_speed" ] && [ "$dl_speed" != "0.000000" ]; then
+        local dl_mbps; dl_mbps=$(awk "BEGIN{printf \"%.2f\", $dl_speed/1048576*8}")
+        local dl_color="$GREEN"
+        (( $(echo "$dl_mbps < 10" | bc -l 2>/dev/null || echo 0) )) && dl_color="$YELLOW"
+        echo -e "  ${dl_color}↓ ${dl_mbps} Мбит/с${NC}"
+    else
+        echo -e "  ${YELLOW}Не удалось измерить${NC}"
+    fi
+
+    # 3. Тест загрузки (через curl upload)
+    echo -e "\n${CYAN}[3/3] Скорость загрузки (5 сек):${NC}"
+    local ul_speed
+    ul_speed=$(dd if=/dev/urandom bs=1M count=5 2>/dev/null | \
+        curl -s4 --max-time 8 -X POST -o /dev/null -w '%{speed_upload}' \
+        --data-binary @- "https://speed.cloudflare.com/__up" 2>/dev/null)
+    if [ -n "$ul_speed" ] && [ "$ul_speed" != "0.000000" ]; then
+        local ul_mbps; ul_mbps=$(awk "BEGIN{printf \"%.2f\", $ul_speed/1048576*8}")
+        local ul_color="$GREEN"
+        echo -e "  ${ul_color}↑ ${ul_mbps} Мбит/с${NC}"
+    else
+        echo -e "  ${YELLOW}Не удалось измерить${NC}"
+    fi
+
     trap - INT
     echo ""
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     read -p "Нажмите Enter..."
 }
 
 chain_test_menu() {
     clear
     echo -e "\n${CYAN}━━━ Тест цепочки соединения ━━━${NC}\n"
-    echo -e "${WHITE}Измеряем задержку на каждом уровне цепочки:${NC}"
-    echo -e "  ${CYAN}Клиент → RU bridge → AMS exit → интернет${NC}\n"
 
-    # Получаем IP из алиасов или правил
-    local ru_ip ams_ip
-    ru_ip=$(get_target_ips | head -1)
-    ams_ip=$(get_target_ips | tail -1)
+    # Собираем серверы из алиасов и правил iptables
+    local -a chain_ips=()
+    local -a chain_names=()
 
-    if [ -z "$ru_ip" ]; then
-        echo -e "${YELLOW}Нет серверов в правилах. Введите IP вручную:${NC}\n"
-        echo -e "${WHITE}RU bridge IP (или Enter чтобы пропустить):${NC}"
-        read -p "> " ru_ip
-        echo -e "${WHITE}AMS exit IP (или Enter чтобы пропустить):${NC}"
-        read -p "> " ams_ip
-    elif [ "$ru_ip" = "$ams_ip" ]; then
-        ams_ip=""
+    if [ -f "$ALIASES_FILE" ]; then
+        while IFS='=' read -r ip_key val; do
+            validate_ip "$ip_key" 2>/dev/null || continue
+            local name; name=$(echo "$val" | cut -d'|' -f1)
+            local country; country=$(echo "$val" | cut -d'|' -f3)
+            local display="${name:-$ip_key}"
+            [ -n "$country" ] && display="$display ($country)"
+            chain_ips+=("$ip_key")
+            chain_names+=("$display")
+        done < "$ALIASES_FILE"
     fi
 
+    while read -r ip; do
+        [ -z "$ip" ] && continue
+        local dup=0
+        for existing in "${chain_ips[@]}"; do [ "$existing" = "$ip" ] && dup=1; done
+        if [ "$dup" -eq 0 ]; then
+            chain_ips+=("$ip")
+            chain_names+=("$ip")
+        fi
+    done <<< "$(get_target_ips)"
+
+    # Если серверов нет — предложить ввести вручную
+    if [ ${#chain_ips[@]} -eq 0 ]; then
+        echo -e "${YELLOW}Серверов не найдено.${NC}"
+        echo -e "${WHITE}Введите IP вручную (или добавьте через п.20 для автоопределения):${NC}\n"
+        local ip1 ip2
+        echo -e "${WHITE}Сервер 1 (Enter — пропустить):${NC}"
+        read -p "> " ip1
+        if [ -n "$ip1" ] && [[ "$ip1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            # GeoIP для введённого IP
+            local geo1; geo1=$(geoip_lookup "$ip1" 2>/dev/null)
+            local country1; country1=$(echo "$geo1" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+            local city1; city1=$(echo "$geo1" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
+            local label1="${ip1}"
+            [ -n "$city1" ] && label1="${ip1} (${city1}, ${country1})"
+            chain_ips+=("$ip1"); chain_names+=("$label1")
+        fi
+        echo -e "${WHITE}Сервер 2 (Enter — пропустить):${NC}"
+        read -p "> " ip2
+        if [ -n "$ip2" ] && [[ "$ip2" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            local geo2; geo2=$(geoip_lookup "$ip2" 2>/dev/null)
+            local country2; country2=$(echo "$geo2" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+            local city2; city2=$(echo "$geo2" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
+            local label2="${ip2}"
+            [ -n "$city2" ] && label2="${ip2} (${city2}, ${country2})"
+            chain_ips+=("$ip2"); chain_names+=("$label2")
+        fi
+        [ ${#chain_ips[@]} -eq 0 ] && echo -e "${RED}Нет серверов для теста.${NC}" && read -p "Enter..." && return
+        echo ""
+    fi
+
+    # Показываем цепочку
+    echo -e "${WHITE}Цепочка:${NC}"
+    local chain_display="  ${GREEN}Этот сервер (${MY_IP})${NC}"
+    for i in "${!chain_ips[@]}"; do
+        chain_display+=" → ${CYAN}${chain_names[$i]}${NC}"
+    done
+    chain_display+=" → ${WHITE}Интернет${NC}"
+    echo -e "$chain_display"
+    echo ""
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-    # 1. Этот сервер → интернет (прямой)
-    echo -e "\n${WHITE}[1/4] Этот сервер → интернет (прямой):${NC}"
+    # Этап 1: этот сервер → интернет
+    echo -ne "\n${WHITE}[1] Этот сервер → интернет:${NC}  "
     local t1_start t1_end t1_ms
     t1_start=$(date +%s%3N)
     curl -s4 --max-time 5 https://api4.ipify.org > /dev/null 2>&1
     t1_end=$(date +%s%3N)
     t1_ms=$((t1_end - t1_start))
-    echo -e "  ${GREEN}✓${NC} HTTP запрос: ${GREEN}${t1_ms}ms${NC}  IP: ${WHITE}${MY_IP}${NC}"
+    local c1="$GREEN"; (( t1_ms > 100 )) && c1="$YELLOW"; (( t1_ms > 300 )) && c1="$RED"
+    echo -e "${c1}${t1_ms}ms${NC}  ${WHITE}IP: ${MY_IP}${NC}"
 
-    # 2. Этот сервер → WARP (если запущен)
-    echo -e "\n${WHITE}[2/4] Этот сервер → Cloudflare WARP:${NC}"
+    # Этап 2: через WARP
+    echo -ne "\n${WHITE}[2] Через Cloudflare WARP:${NC}  "
     if is_warp_running; then
         local t2_start t2_end t2_ms wip
         t2_start=$(date +%s%3N)
@@ -2004,60 +2087,48 @@ chain_test_menu() {
         t2_end=$(date +%s%3N)
         t2_ms=$((t2_end - t2_start))
         if [ -n "$wip" ]; then
-            echo -e "  ${GREEN}✓${NC} Через WARP: ${GREEN}${t2_ms}ms${NC}  CF IP: ${WHITE}${wip}${NC}"
+            local c2="$GREEN"; (( t2_ms > 200 )) && c2="$YELLOW"; (( t2_ms > 500 )) && c2="$RED"
+            echo -e "${c2}${t2_ms}ms${NC}  ${WHITE}CF IP: ${wip}${NC}"
         else
-            echo -e "  ${RED}✗${NC} WARP не ответил"
+            echo -e "${RED}нет ответа${NC}"
         fi
     else
-        echo -e "  ${YELLOW}⚠${NC} WARP не запущен (п.10)"
+        echo -e "${YELLOW}WARP не запущен${NC}"
     fi
 
-    # 3. Ping до RU bridge (если есть)
-    if [ -n "$ru_ip" ] && validate_ip "$ru_ip" 2>/dev/null; then
-        echo -e "\n${WHITE}[3/4] Этот сервер → RU bridge (${ru_ip}):${NC}"
-        local ping_ru
-        ping_ru=$(ping -c 3 -W 3 "$ru_ip" 2>/dev/null | \
-            awk '/rtt/ {gsub(/.*=/, ""); split($1,a,"/"); printf "%.1f", a[2]}')
-        if [ -n "$ping_ru" ]; then
-            local color="$GREEN"
-            (( $(echo "$ping_ru > 100" | bc -l 2>/dev/null || echo 0) )) && color="$YELLOW"
-            (( $(echo "$ping_ru > 200" | bc -l 2>/dev/null || echo 0) )) && color="$RED"
-            echo -e "  ${GREEN}✓${NC} ICMP ping avg: ${color}${ping_ru}ms${NC}"
-        else
-            # TCP ping как fallback
-            local port; port=$(get_port_for_ip "$ru_ip" 2>/dev/null || echo "443")
-            local raw; raw=$(tcp_ping "$ru_ip" "$port" 3 2>/dev/null)
-            [ -n "$raw" ] && \
-                echo -e "  ${GREEN}✓${NC} TCP ping :${port}: ${GREEN}${raw}ms${NC}" || \
-                echo -e "  ${RED}✗${NC} Недоступен"
-        fi
-    else
-        echo -e "\n${WHITE}[3/4] RU bridge:${NC} ${YELLOW}не настроен${NC}"
-    fi
+    # Этап 3+: пинг до каждого сервера
+    local step=3
+    for i in "${!chain_ips[@]}"; do
+        local ip="${chain_ips[$i]}"
+        local name="${chain_names[$i]}"
+        echo -ne "\n${WHITE}[${step}] → ${name}:${NC}  "
+        ((step++))
 
-    # 4. Ping до AMS exit (если есть и отличается от RU)
-    if [ -n "$ams_ip" ] && validate_ip "$ams_ip" 2>/dev/null; then
-        echo -e "\n${WHITE}[4/4] Этот сервер → AMS exit (${ams_ip}):${NC}"
-        local ping_ams
-        ping_ams=$(ping -c 3 -W 3 "$ams_ip" 2>/dev/null | \
+        local ping_ms
+        ping_ms=$(ping -c 3 -W 3 "$ip" 2>/dev/null | \
             awk '/rtt/ {gsub(/.*=/, ""); split($1,a,"/"); printf "%.1f", a[2]}')
-        if [ -n "$ping_ams" ]; then
+
+        if [ -n "$ping_ms" ]; then
             local color="$GREEN"
-            (( $(echo "$ping_ams > 100" | bc -l 2>/dev/null || echo 0) )) && color="$YELLOW"
-            echo -e "  ${GREEN}✓${NC} ICMP ping avg: ${color}${ping_ams}ms${NC}"
+            local ping_int="${ping_ms%.*}"
+            (( ping_int > 80 )) && color="$YELLOW"
+            (( ping_int > 150 )) && color="$RED"
+            echo -e "${color}${ping_ms}ms${NC} ${WHITE}(ICMP)${NC}"
         else
-            local port; port=$(get_port_for_ip "$ams_ip" 2>/dev/null || echo "443")
-            local raw; raw=$(tcp_ping "$ams_ip" "$port" 3 2>/dev/null)
-            [ -n "$raw" ] && \
-                echo -e "  ${GREEN}✓${NC} TCP ping :${port}: ${GREEN}${raw}ms${NC}" || \
-                echo -e "  ${RED}✗${NC} Недоступен"
+            local port; port=$(get_port_for_ip "$ip" 2>/dev/null || echo "443")
+            local tcp_ms; tcp_ms=$(tcp_ping "$ip" "$port" 3 2>/dev/null)
+            if [ -n "$tcp_ms" ]; then
+                local color="$GREEN"
+                (( ${tcp_ms%.*} > 80 )) && color="$YELLOW"
+                echo -e "${color}${tcp_ms}ms${NC} ${WHITE}(TCP :${port})${NC}"
+            else
+                echo -e "${RED}недоступен${NC}"
+            fi
         fi
-    else
-        echo -e "\n${WHITE}[4/4] AMS exit:${NC} ${YELLOW}не настроен${NC}"
-    fi
+    done
 
     echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${WHITE}Добавьте серверы через п.21 (Имена серверов) для автоопределения.${NC}"
+    echo -e "${WHITE}Совет: добавьте серверы через п.20 чтобы не вводить IP каждый раз.${NC}"
     echo ""
     read -p "Нажмите Enter..."
 }
@@ -2100,10 +2171,10 @@ ping_menu() {
         echo ""
         echo -e "  ${YELLOW}[1]${NC} Live ping (выбрать сервер)"
         echo -e "  ${YELLOW}[2]${NC} Проверить все серверы сейчас"
-        echo -e "  ${GREEN}[6]${NC} Тест цепочки: Клиент → RU → AMS → интернет"
-        echo -e "  ${GREEN}[3]${NC} Включить автомониторинг"
-        echo -e "  ${RED}[4]${NC} Выключить автомониторинг"
-        echo -e "  ${YELLOW}[5]${NC} Показать лог мониторинга"
+        echo -e "  ${YELLOW}[3]${NC} ${GREEN}Тест цепочки по серверам${NC}"
+        echo -e "  ${YELLOW}[4]${NC} Включить автомониторинг"
+        echo -e "  ${RED}[5]${NC} Выключить автомониторинг"
+        echo -e "  ${YELLOW}[6]${NC} Показать лог мониторинга"
         echo -e "  ${YELLOW}[0]${NC} Назад"
         echo ""
         read -p "Выбор: " choice
@@ -2151,14 +2222,15 @@ ping_menu() {
                 echo ""
                 read -p "Нажмите Enter..."
                 ;;
-            3)
+            3)  chain_test_menu ;;
+            4)
                 _start_monitor
                 ;;
-            4)
+            5)
                 _stop_monitor
                 read -p "Нажмите Enter..."
                 ;;
-            5)
+            6)
                 clear
                 echo -e "${CYAN}━━━ Лог мониторинга (последние 30 строк) ━━━${NC}\n"
                 grep "MONITOR" "$LOG_FILE" 2>/dev/null | tail -30 || \
@@ -2166,7 +2238,6 @@ ping_menu() {
                 echo ""
                 read -p "Нажмите Enter..."
                 ;;
-            6)  chain_test_menu ;;
             0|"") return ;;
         esac
     done
