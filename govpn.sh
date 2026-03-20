@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.2"
+VERSION="2.3"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2595,6 +2595,7 @@ wgcf_generate() {
     echo -e "${GREEN}  ✓ Профиль создан: ${WGCF_DIR}/wgcf-profile.conf${NC}"
 
     echo -e "${YELLOW}[3/3]${NC} Установка профиля..."
+    mkdir -p /etc/wireguard
     # Убираем DNS из профиля чтобы не ломать системный DNS
     # Добавляем Table=off чтобы не перехватывать весь трафик
     python3 - <<EOF
@@ -2710,13 +2711,39 @@ PYEOF
         if [ -n "$wip" ]; then
             echo -e "  ${WHITE}CF IP через туннель: ${GREEN}${wip}${NC}"
         fi
-        echo ""
-        echo -e "${CYAN}Туннель работает в режиме Table=off${NC}"
-        echo -e "${WHITE}Трафик хоста НЕ перенаправляется автоматически.${NC}"
-        echo -e "${WHITE}Для routing Docker подсетей через туннель:${NC}"
-        echo -e "  ${CYAN}ip rule add from \$(docker network inspect bridge | python3 -c \"import json,sys; print(json.load(sys.stdin)[0]['IPAM']['Config'][0]['Subnet'])\") lookup 51820${NC}"
-        echo -e "  ${CYAN}ip route add default dev ${WGCF_IFACE} table 51820${NC}"
         log_action "WGCF UP: iface=${WGCF_IFACE}, cf_ip=${wip}"
+
+        # Если есть Docker — предложить настроить routing
+        if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+            echo ""
+            echo -e "${CYAN}━━━ Обнаружен Docker ━━━${NC}"
+            echo -e "${WHITE}Хотите направить трафик Docker контейнеров через Cloudflare?${NC}"
+            echo -e "${WHITE}(трафик Amnezia/AWG клиентов выйдет через CF IP ${wip})${NC}"
+            echo ""
+            read -p "Настроить routing Docker → wgcf0? (y/n): " do_route
+            if [[ "$do_route" == "y" ]]; then
+                echo -e "${YELLOW}[*] Настройка policy routing...${NC}"
+                local docker_subnet
+                docker_subnet=$(docker network inspect bridge 2>/dev/null | \
+                    python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['IPAM']['Config'][0]['Subnet'])" 2>/dev/null)
+                if [ -n "$docker_subnet" ]; then
+                    ip route add default dev "$WGCF_IFACE" table 51820 2>/dev/null || true
+                    ip rule add from "$docker_subnet" lookup 51820 2>/dev/null || true
+                    echo -e "${GREEN}  ✓ Routing: ${docker_subnet} → ${WGCF_IFACE} (Cloudflare)${NC}"
+                    echo -e "${YELLOW}  ⚠ Routing сбросится при перезагрузке.${NC}"
+                    echo -e "${WHITE}  Для автозапуска добавьте в /etc/rc.local:${NC}"
+                    echo -e "  ${CYAN}ip route add default dev ${WGCF_IFACE} table 51820${NC}"
+                    echo -e "  ${CYAN}ip rule add from ${docker_subnet} lookup 51820${NC}"
+                    log_action "WGCF ROUTING: docker ${docker_subnet} → ${WGCF_IFACE}"
+                else
+                    echo -e "${RED}[ERROR] Не удалось определить подсеть Docker bridge.${NC}"
+                fi
+            fi
+        else
+            echo ""
+            echo -e "${CYAN}Туннель работает в режиме Table=off.${NC}"
+            echo -e "${WHITE}Трафик хоста не перенаправляется автоматически.${NC}"
+        fi
     else
         echo -e "${RED}[ERROR] Туннель не поднялся.${NC}"
         echo -e "${WHITE}Проверьте: ${CYAN}wg show${NC}"
