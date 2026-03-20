@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.1"
+VERSION="2.2"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2598,20 +2598,40 @@ wgcf_generate() {
     # Убираем DNS из профиля чтобы не ломать системный DNS
     # Добавляем Table=off чтобы не перехватывать весь трафик
     python3 - <<EOF
-import re
+import re, subprocess
 
 with open('${WGCF_DIR}/wgcf-profile.conf', 'r') as f:
     content = f.read()
 
-# Убрать DNS — будем использовать системный
-content = re.sub(r'^DNS\s*=.*$', '# DNS = disabled (using system DNS)', content, flags=re.MULTILINE)
+# Проверить поддержку IPv6
+ipv6_enabled = True
+try:
+    r = subprocess.run(['cat', '/proc/sys/net/ipv6/conf/all/disable_ipv6'],
+                       capture_output=True, text=True)
+    if r.stdout.strip() == '1':
+        ipv6_enabled = False
+except:
+    pass
 
-# Добавить Table=off чтобы не перехватывать весь трафик хоста
-# Маршрутизацию настроим вручную через ip rule
+# Убрать DNS — используем системный
+content = re.sub(r'^DNS\s*=.*\$', '# DNS = disabled (using system DNS)', content, flags=re.MULTILINE)
+
+# Добавить Table=off
 content = re.sub(r'(\[Interface\])', r'\1\nTable = off', content)
 
-# Убрать AllowedIPs 0.0.0.0/0 — заменим на только CF диапазоны
-content = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0, ::/0', content)
+if not ipv6_enabled:
+    # Убрать IPv6 адрес из Address (оставить только IPv4)
+    def fix_address(m):
+        addrs = [a.strip() for a in m.group(1).split(',')]
+        ipv4_only = [a for a in addrs if ':' not in a]
+        return 'Address = ' + ', '.join(ipv4_only)
+    content = re.sub(r'Address\s*=\s*(.+)', fix_address, content)
+
+    # Убрать IPv6 из AllowedIPs
+    content = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0', content)
+    print("NOTE: IPv6 отключён на сервере — конфиг адаптирован для IPv4 only")
+else:
+    content = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0, ::/0', content)
 
 with open('${WGCF_CONF}', 'w') as f:
     f.write(content)
@@ -2652,23 +2672,44 @@ wgcf_up() {
     fi
 
     echo -e "${YELLOW}[*] Поднимаем туннель ${WGCF_IFACE}...${NC}"
-    wg-quick up "$WGCF_CONF" 2>&1 | while IFS= read -r l; do
-        echo -e "  ${WHITE}${l}${NC}"
-    done
+    local up_output
+    up_output=$(wg-quick up "$WGCF_CONF" 2>&1)
+    echo "$up_output" | while IFS= read -r l; do echo -e "  ${WHITE}${l}${NC}"; done
+
+    # Автофикс если ошибка IPv6
+    if echo "$up_output" | grep -qi "ipv6.*disabled\|IPv6 is disabled"; then
+        echo -e "${YELLOW}[*] IPv6 отключён — пересоздаём конфиг без IPv6...${NC}"
+        # Убрать IPv6 из конфига
+        python3 - <<'PYEOF'
+import re
+with open('/etc/wireguard/wgcf0.conf', 'r') as f:
+    content = f.read()
+# Убрать IPv6 из Address
+def fix_addr(m):
+    addrs = [a.strip() for a in m.group(1).split(',')]
+    return 'Address = ' + ', '.join(a for a in addrs if ':' not in a)
+content = re.sub(r'Address\s*=\s*(.+)', fix_addr, content)
+# Убрать IPv6 из AllowedIPs
+content = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0', content)
+with open('/etc/wireguard/wgcf0.conf', 'w') as f:
+    f.write(content)
+print("Конфиг адаптирован для IPv4 only")
+PYEOF
+        echo -e "${YELLOW}[*] Повторная попытка запуска...${NC}"
+        up_output=$(wg-quick up "$WGCF_CONF" 2>&1)
+        echo "$up_output" | while IFS= read -r l; do echo -e "  ${WHITE}${l}${NC}"; done
+    fi
 
     sleep 2
 
     if _wgcf_running; then
         echo ""
         echo -e "${GREEN}[OK] Туннель ${WGCF_IFACE} поднят!${NC}"
-
-        # Тест IP через туннель
         local wip
         wip=$(curl -s4 --max-time 8 --interface "$WGCF_IFACE" https://api4.ipify.org 2>/dev/null)
         if [ -n "$wip" ]; then
             echo -e "  ${WHITE}CF IP через туннель: ${GREEN}${wip}${NC}"
         fi
-
         echo ""
         echo -e "${CYAN}Туннель работает в режиме Table=off${NC}"
         echo -e "${WHITE}Трафик хоста НЕ перенаправляется автоматически.${NC}"
