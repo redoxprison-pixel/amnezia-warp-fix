@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.8"
+VERSION="1.9"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -612,6 +612,10 @@ get_warp_ip_display() {
 _warp_detect_state() {
     # Возвращает: ok | no_registration | not_connected | not_installed | broken
     if ! is_warp_installed; then echo "not_installed"; return; fi
+    # Проверяем что демон вообще запущен
+    if ! systemctl is-active warp-svc &>/dev/null; then
+        echo "broken"; return
+    fi
     local st
     st=$(warp-cli --accept-tos status 2>/dev/null)
     if echo "$st" | grep -qi "registration missing"; then echo "no_registration"; return; fi
@@ -1211,23 +1215,30 @@ uninstall_warp() {
     clear
     echo -e "\n${RED}━━━ Удаление WARP ━━━${NC}\n"
     echo -e "${WHITE}Будут удалены:${NC}"
-    echo -e "  ${RED}•${NC} Пакет cloudflare-warp"
+    echo -e "  ${RED}•${NC} Пакет cloudflare-warp (полная очистка с --purge)"
+    echo -e "  ${RED}•${NC} Состояние демона (/var/lib/cloudflare-warp/)"
     echo -e "  ${RED}•${NC} Репозиторий и GPG-ключ"
     echo -e "${GREEN}НЕ будет затронуто:${NC}"
-    echo -e "  ${GREEN}•${NC} 3X-UI / xray (outbound 'warp' нужно убрать вручную или через п.13)"
+    echo -e "  ${GREEN}•${NC} 3X-UI / xray (outbound 'warp' нужно убрать вручную или через п.16)"
     echo -e "  ${GREEN}•${NC} Конфигурация ${SCRIPT_NAME}"
     echo ""
     read -p "Удалить WARP? (y/n): " confirm
     [[ "$confirm" != "y" ]] && return
+    echo -e "${YELLOW}[*] Удаление...${NC}"
     warp-cli --accept-tos disconnect > /dev/null 2>&1
     warp-cli --accept-tos registration delete > /dev/null 2>&1
+    systemctl stop warp-svc > /dev/null 2>&1
+    systemctl disable warp-svc > /dev/null 2>&1
     export DEBIAN_FRONTEND=noninteractive
-    apt-get remove -y cloudflare-warp > /dev/null 2>&1
+    apt-get remove -y --purge cloudflare-warp > /dev/null 2>&1
     apt-get autoremove -y > /dev/null 2>&1
+    rm -rf /var/lib/cloudflare-warp/
     rm -f /etc/apt/sources.list.d/cloudflare-client.list
     rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    echo -e "${GREEN}[OK] WARP удалён.${NC}"
-    log_action "WARP UNINSTALL"
+    rm -f /usr/bin/warp-cli /usr/local/bin/warp-cli
+    ip link delete warp0 2>/dev/null || true
+    echo -e "${GREEN}[OK] WARP полностью удалён.${NC}"
+    log_action "WARP UNINSTALL: full purge"
     read -p "Нажмите Enter..."
 }
 
@@ -2639,27 +2650,27 @@ show_menu() {
         echo -e " 12)  Перевыпустить ключ"
         echo -e " 13)  Изменить порт SOCKS5"
         echo -e " 14)  ${RED}Удалить WARP${NC}"
+        echo -e " 15)  ${GREEN}Тест WARP${NC}"
         echo -e " ${CYAN}── 3X-UI / XRAY ─────────────────────${NC}"
-        echo -e " 15)  JSON для ручного добавления"
-        echo -e " 16)  ${GREEN}Применить в config.json (авто)${NC}"
-        echo -e " 17)  Бэкапы и Rollback"
-        echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
-        echo -e " 18)  Ping (live)"
-        echo -e " 19)  Системная статистика"
-        echo -e " 20)  Имена серверов"
-        echo -e " 25)  ${GREEN}Тест WARP (проверить что работает)${NC}"
-        echo -e " ${CYAN}── РОУТЕР ───────────────────────────${NC}"
-        echo -e " 21)  AmneziaWG на OpenWrt / Keenetic"
+        echo -e " 16)  JSON для ручного добавления"
+        echo -e " 17)  ${GREEN}Применить в config.json (авто)${NC}"
+        echo -e " 18)  Бэкапы и Rollback"
         echo -e " ${CYAN}── WGCF (WARP → WireGuard) ──────────${NC}"
-        echo -e " 26)  Установить wgcf"
-        echo -e " 27)  Создать WireGuard профиль CF"
-        echo -e " 28)  Поднять wgcf туннель"
-        echo -e " 29)  Остановить wgcf туннель"
-        echo -e " 30)  Статус wgcf"
+        echo -e " 19)  Установить wgcf"
+        echo -e " 20)  Создать профиль CF"
+        echo -e " 21)  Поднять туннель wgcf0"
+        echo -e " 22)  Остановить туннель"
+        echo -e " 23)  Статус wgcf"
+        echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
+        echo -e " 24)  Ping (live) + мониторинг"
+        echo -e " 25)  Системная статистика"
+        echo -e " 26)  Имена серверов"
+        echo -e " ${CYAN}── РОУТЕР ───────────────────────────${NC}"
+        echo -e " 27)  AmneziaWG на OpenWrt / Keenetic"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
-        echo -e " 22)  Проверка конфликтов"
-        echo -e " 23)  Обновить скрипт"
-        echo -e " 24)  ${RED}Полное удаление${NC}"
+        echo -e " 28)  Проверка конфликтов"
+        echo -e " 29)  Обновить скрипт"
+        echo -e " 30)  ${RED}Полное удаление${NC}"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         read -p "Выбор: " ch
@@ -2680,22 +2691,22 @@ show_menu() {
             12) rekey_warp ;;
             13) change_warp_port ;;
             14) uninstall_warp ;;
-            15) show_xray_json ;;
-            16) apply_xray_warp ;;
-            17) show_backups ;;
-            18) ping_menu ;;
-            19) show_system_stats ;;
-            20) manage_aliases_menu ;;
-            21) show_amnezia_router ;;
-            22) check_conflicts ;;
-            23) self_update ;;
-            24) full_uninstall ;;
-            25) warp_test ;;
-            26) wgcf_install ;;
-            27) wgcf_generate ;;
-            28) wgcf_up ;;
-            29) wgcf_down ;;
-            30) wgcf_status ;;
+            15) warp_test ;;
+            16) show_xray_json ;;
+            17) apply_xray_warp ;;
+            18) show_backups ;;
+            19) wgcf_install ;;
+            20) wgcf_generate ;;
+            21) wgcf_up ;;
+            22) wgcf_down ;;
+            23) wgcf_status ;;
+            24) ping_menu ;;
+            25) show_system_stats ;;
+            26) manage_aliases_menu ;;
+            27) show_amnezia_router ;;
+            28) check_conflicts ;;
+            29) self_update ;;
+            30) full_uninstall ;;
             0)  clear; exit 0 ;;
         esac
     done
@@ -2742,10 +2753,22 @@ run_startup() {
 
     ((s++))
     printf "  ${CYAN}[%d/%d]${NC}  ${YELLOW}⏳${NC}  Установка команды ${SCRIPT_NAME}..." "$s" "$total"
-    if [ "$(readlink -f "$0" 2>/dev/null)" != "$INSTALL_PATH" ]; then
-        cp -f "$0" "$INSTALL_PATH"; chmod +x "$INSTALL_PATH"
+    local self_path
+    self_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    if [ "$self_path" != "$INSTALL_PATH" ]; then
+        if [ -f "$self_path" ] && [ "$self_path" != "/dev/stdin" ]; then
+            cp -f "$self_path" "$INSTALL_PATH"
+        else
+            # pipe режим (bash <(curl...)) — скачиваем напрямую
+            curl -fsSL "$GOVPN_REPO_URL" -o "$INSTALL_PATH" 2>/dev/null
+        fi
+        chmod +x "$INSTALL_PATH"
     fi
-    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Команда: ${SCRIPT_NAME}                     \n" "$s" "$total"
+    # Убедиться что /usr/local/bin в PATH текущей сессии
+    export PATH="/usr/local/bin:$PATH"
+    # Symlink в /usr/bin на случай если /usr/local/bin не в PATH
+    ln -sf "$INSTALL_PATH" /usr/bin/${SCRIPT_NAME} 2>/dev/null
+    printf "\r  ${CYAN}[%d/%d]${NC}  ${GREEN}✓${NC}   Команда: ${SCRIPT_NAME} (${INSTALL_PATH})          \n" "$s" "$total"
 
     echo ""
     local bar=""
