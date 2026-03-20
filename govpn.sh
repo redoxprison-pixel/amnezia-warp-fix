@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="2.0"
+VERSION="2.1"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -405,73 +405,200 @@ EOF
 }
 
 apply_xray_warp() {
-    local cfg
-    cfg=$(detect_xray_config)
-    if [ -z "$cfg" ]; then
-        echo -e "${RED}[ERROR] xray config.json не найден.${NC}"
-        echo -e "${WHITE}Проверен: /usr/local/x-ui/bin/config.json и другие пути.${NC}"
-        read -p "Нажмите Enter..."; return 1
-    fi
-
-    echo -e "${CYAN}[*] Конфиг: ${WHITE}${cfg}${NC}"
+    clear
+    echo -e "\n${CYAN}━━━ Применение WARP outbound в xray ━━━${NC}\n"
 
     if ! is_warp_running; then
-        echo -e "${RED}[ERROR] WARP не запущен! Сначала запустите WARP (п.9).${NC}"
+        echo -e "${RED}[ERROR] WARP не запущен! Сначала запустите WARP (п.10).${NC}"
         read -p "Нажмите Enter..."; return 1
     fi
 
-    # Бэкап
-    local bak
-    bak=$(backup_xray_config "$cfg")
-    if [ $? -ne 0 ]; then read -p "Нажмите Enter..."; return 1; fi
+    local cfg; cfg=$(detect_xray_config)
+    if [ -z "$cfg" ]; then
+        echo -e "${RED}[ERROR] xray config.json не найден.${NC}"
+        read -p "Нажмите Enter..."; return 1
+    fi
+    echo -e "${WHITE}Конфиг: ${CYAN}${cfg}${NC}"
+
+    # Определяем метод патча
+    local xui_db="/etc/x-ui/x-ui.db"
+    local use_db=0
+    if command -v sqlite3 &>/dev/null && [ -f "$xui_db" ]; then
+        local tmpl; tmpl=$(sqlite3 "$xui_db" "SELECT value FROM settings WHERE key='xrayTemplateConfig';" 2>/dev/null)
+        [ -n "$tmpl" ] && use_db=1
+    fi
+
+    if [ "$use_db" -eq 1 ]; then
+        echo -e "${GREEN}[✓] Найдена x-ui БД — патчим xrayTemplateConfig (постоянный метод)${NC}"
+        echo -e "${WHITE}    Outbound сохранится после рестарта x-ui.${NC}\n"
+        _patch_xui_db "$xui_db" "$cfg"
+    else
+        echo -e "${YELLOW}[*] БД не найдена — патчим config.json напрямую${NC}"
+        echo -e "${WHITE}    Outbound может сброситься при рестарте x-ui.${NC}\n"
+        _patch_xray_file "$cfg"
+    fi
+}
+
+_patch_xui_db() {
+    local db="$1" cfg="$2"
+
+    # Бэкап БД
+    local db_bak="${BACKUP_DIR}/x-ui.db.bak.$(date +%s)"
+    cp "$db" "$db_bak"
+    echo -e "${GREEN}[✓] Бэкап БД: ${db_bak}${NC}"
+
+    # Патч xrayTemplateConfig в БД
+    local result
+    result=$(python3 - <<EOF
+import json, sys
+try:
+    import subprocess
+    # Читаем текущий template из БД
+    r = subprocess.run(['sqlite3', '${db}',
+        "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
+        capture_output=True, text=True)
+    tmpl_str = r.stdout.strip()
+    if not tmpl_str:
+        print("ERROR: xrayTemplateConfig not found in DB", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = json.loads(tmpl_str)
+
+    # Удалить старые warp outbounds (любого регистра)
+    cfg['outbounds'] = [o for o in cfg.get('outbounds', [])
+                        if o.get('tag', '').lower() != 'warp']
+
+    # Добавить новый
+    cfg['outbounds'].append({
+        "tag": "WARP",
+        "protocol": "socks",
+        "settings": {
+            "servers": [{"address": "127.0.0.1", "port": ${WARP_SOCKS_PORT}, "users": []}]
+        }
+    })
+
+    new_tmpl = json.dumps(cfg, ensure_ascii=False, indent=2)
+
+    # Записываем обратно в БД
+    # Экранируем одинарные кавычки для sqlite
+    new_tmpl_escaped = new_tmpl.replace("'", "''")
+    r2 = subprocess.run(['sqlite3', '${db}',
+        f"UPDATE settings SET value='{new_tmpl_escaped}' WHERE key='xrayTemplateConfig';"],
+        capture_output=True, text=True)
+    if r2.returncode != 0:
+        print(f"ERROR: sqlite3: {r2.stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    # Подсчитаем routing rules для WARP
+    rules = [r for r in cfg.get('routing', {}).get('rules', [])
+             if r.get('outboundTag', '').upper() == 'WARP']
+    print(f"OK|rules={len(rules)}")
+    sys.exit(0)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+EOF
+)
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[ERROR] Патч БД не удался.${NC}"
+        echo -e "${YELLOW}[*] Откат БД...${NC}"
+        cp "$db_bak" "$db"
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    local rules_count; rules_count=$(echo "$result" | grep -oE 'rules=[0-9]+' | cut -d= -f2)
+    echo -e "${GREEN}[✓] xrayTemplateConfig обновлён в БД${NC}"
+
+    # Перезапускаем x-ui — теперь он сгенерирует конфиг с WARP
+    echo -e "${YELLOW}[*] Перезапуск x-ui...${NC}"
+    systemctl restart x-ui 2>/dev/null
+    sleep 3
+
+    # Проверяем что outbound появился в runtime конфиге
+    local out_count
+    out_count=$(python3 -c "
+import json
+cfg = json.load(open('${cfg}'))
+outs = [o for o in cfg.get('outbounds',[]) if o.get('tag','').upper()=='WARP']
+print(len(outs))
+" 2>/dev/null)
+
+    if [ "${out_count:-0}" -gt 0 ]; then
+        echo -e "${GREEN}[✓] WARP outbound подтверждён в runtime config!${NC}"
+        log_action "XRAY PATCH DB: WARP outbound added to xrayTemplateConfig, port=${WARP_SOCKS_PORT}"
+    else
+        echo -e "${RED}[ERROR] WARP outbound не появился в runtime config после рестарта.${NC}"
+        echo -e "${YELLOW}[*] Откат БД...${NC}"
+        cp "$db_bak" "$db"
+        systemctl restart x-ui 2>/dev/null
+        read -p "Нажмите Enter..."; return 1
+    fi
+
+    echo ""
+    echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  WARP outbound успешно добавлен!${NC}"
+    echo -e "${WHITE}  Тег:    WARP${NC}"
+    echo -e "${WHITE}  SOCKS5: 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+    echo -e "${WHITE}  Метод:  xrayTemplateConfig в БД (постоянный)${NC}"
+    echo -e "${WHITE}  Бэкап БД: ${db_bak}${NC}"
+    if [ "${rules_count:-0}" -gt 0 ]; then
+        echo -e "${GREEN}  Routing rules: ${rules_count} (уже настроены)${NC}"
+    else
+        echo -e "${YELLOW}  Routing rules: не настроены${NC}"
+        echo -e "${WHITE}  Добавьте в 3x-ui UI → Xray Settings → Routing:${NC}"
+        echo -e "  ${CYAN}outboundTag: WARP${NC}"
+        echo -e "  ${CYAN}inboundTag: [ваши inbound теги]${NC}"
+    fi
+    echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+_patch_xray_file() {
+    local cfg="$1"
+
+    local bak; bak=$(backup_xray_config "$cfg")
+    [ $? -ne 0 ] && read -p "Нажмите Enter..." && return 1
     echo -e "${GREEN}[✓] Бэкап: ${bak}${NC}"
 
-    # Патч
-    echo -e "${YELLOW}[*] Добавление outbound warp → 127.0.0.1:${WARP_SOCKS_PORT}...${NC}"
     local result
     result=$(patch_xray_warp_outbound "$cfg" "$WARP_SOCKS_PORT")
     if [ $? -ne 0 ]; then
-        echo -e "${RED}[ERROR] Патч не удался: ${result}${NC}"
-        echo -e "${YELLOW}[*] Откат...${NC}"
+        echo -e "${RED}[ERROR] Патч не удался.${NC}"
         rollback_xray_config "$bak"
         read -p "Нажмите Enter..."; return 1
     fi
 
-    # Валидация JSON
     if ! validate_xray_config "$cfg"; then
-        echo -e "${RED}[ERROR] JSON невалиден после патча!${NC}"
-        echo -e "${YELLOW}[*] Автоматический откат...${NC}"
+        echo -e "${RED}[ERROR] JSON невалиден.${NC}"
         rollback_xray_config "$bak"
         read -p "Нажмите Enter..."; return 1
     fi
 
-    # Перезапуск xray
-    echo -e "${YELLOW}[*] Перезапуск x-ui...${NC}"
-    systemctl restart x-ui 2>/dev/null
-    sleep 2
+    # Перезапускаем только xray процесс без x-ui
+    local xray_pid; xray_pid=$(pgrep -f "xray-linux-amd" | head -1)
+    if [ -n "$xray_pid" ]; then
+        echo -e "${YELLOW}[*] Перезапуск xray (PID ${xray_pid})...${NC}"
+        kill -SIGTERM "$xray_pid" 2>/dev/null
+        sleep 3
+    fi
 
-    # Проверка
-    if systemctl is-active x-ui &>/dev/null; then
-        echo -e "${GREEN}[✓] x-ui запущен успешно!${NC}"
-        log_action "XRAY PATCH: warp outbound added, port=${WARP_SOCKS_PORT}, cfg=${cfg}"
+    local out_count
+    out_count=$(python3 -c "
+import json
+cfg = json.load(open('${cfg}'))
+outs = [o for o in cfg.get('outbounds',[]) if o.get('tag','').lower()=='warp']
+print(len(outs))
+" 2>/dev/null)
+
+    if [ "${out_count:-0}" -gt 0 ]; then
+        echo -e "${GREEN}[✓] WARP outbound в файле.${NC}"
+        echo -e "${YELLOW}⚠ Предупреждение: может сброситься при рестарте x-ui.${NC}"
+        log_action "XRAY PATCH FILE: warp outbound added, port=${WARP_SOCKS_PORT}"
     else
-        echo -e "${RED}[ERROR] x-ui не запустился после патча!${NC}"
-        echo -e "${YELLOW}[*] Автоматический откат...${NC}"
-        rollback_xray_config "$bak"
-        read -p "Нажмите Enter..."; return 1
+        echo -e "${RED}[ERROR] Outbound пропал — x-ui перегенерировал конфиг.${NC}"
+        echo -e "${WHITE}Используйте x-ui-pro UI для добавления outbound через панель.${NC}"
     fi
-
-    echo ""
-    echo -e "${GREEN}══════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  Outbound 'warp' успешно добавлен!${NC}"
-    echo -e "${WHITE}  SOCKS5: 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
-    echo -e "${WHITE}  Бэкап:  ${bak}${NC}"
-    echo -e "${WHITE}  Rollback: govpn rollback ${bak}${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "${CYAN}Теперь добавьте routing rule в 3x-ui UI:${NC}"
-    echo -e "  outboundTag: warp"
-    echo -e "  domain: geosite:openai, geosite:netflix, ..."
     echo ""
     read -p "Нажмите Enter..."
 }
@@ -2293,16 +2420,15 @@ warp_test() {
         warp_out_count=$(python3 -c "
 import json
 cfg = json.load(open('${xray_cfg}'))
-outs = [o for o in cfg.get('outbounds',[]) if o.get('tag')=='warp']
+outs = [o for o in cfg.get('outbounds',[]) if o.get('tag','').lower()=='warp']
 print(len(outs))
 " 2>/dev/null)
         if [ "${warp_out_count:-0}" -gt 0 ]; then
-            # Проверяем routing rules
             local warp_rules
             warp_rules=$(python3 -c "
 import json
 cfg = json.load(open('${xray_cfg}'))
-rules = [r for r in cfg.get('routing',{}).get('rules',[]) if r.get('outboundTag')=='warp']
+rules = [r for r in cfg.get('routing',{}).get('rules',[]) if r.get('outboundTag','').lower()=='warp']
 print(len(rules))
 " 2>/dev/null)
             if [ "${warp_rules:-0}" -gt 0 ]; then
@@ -2310,10 +2436,10 @@ print(len(rules))
                 echo -e "        ${CYAN}Трафик по routing rules идёт через Cloudflare${NC}"
             else
                 echo -e "${YELLOW}⚠ outbound добавлен, но нет routing rules${NC}"
-                echo -e "        ${WHITE}Добавьте routing rules в 3x-ui UI или используйте п.17${NC}"
+                echo -e "        ${WHITE}Добавьте routing rules в 3x-ui UI${NC}"
             fi
         else
-            echo -e "${YELLOW}⚠ outbound 'warp' не добавлен в xray${NC}"
+            echo -e "${YELLOW}⚠ outbound 'warp'/'WARP' не добавлен в xray${NC}"
             echo -e "        ${WHITE}Применить: п.17 → Применить WARP в config.json${NC}"
         fi
     fi
