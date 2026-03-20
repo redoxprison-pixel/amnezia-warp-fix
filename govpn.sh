@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.2"
+VERSION="3.3"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2101,10 +2101,22 @@ ping_menu() {
 
             local ms_str color
             if [ "$ip" = "$MY_IP" ]; then
-                local lo_ms
-                lo_ms=$(ping -c 1 -W 1 127.0.0.1 2>/dev/null | \
-                    sed -n 's/.*time=\([0-9.]*\).*/\1/p')
-                ms_str="${lo_ms:-0.1}ms"
+                # Для текущего сервера — TCP на любой открытый порт
+                local self_ms
+                self_ms=$(curl -so /dev/null -w '%{time_connect}' \
+                    --max-time 2 --connect-timeout 2 \
+                    "http://127.0.0.1:${WARP_SOCKS_PORT}/" 2>/dev/null)
+                if [ -z "$self_ms" ] || [ "$self_ms" = "0.000000" ]; then
+                    # Попробуем SSH порт
+                    self_ms=$(curl -so /dev/null -w '%{time_connect}' \
+                        --max-time 2 --connect-timeout 2 \
+                        "http://127.0.0.1:22/" 2>/dev/null)
+                fi
+                if [ -n "$self_ms" ] && [ "$self_ms" != "0.000000" ]; then
+                    ms_str=$(awk "BEGIN{printf \"%.1f\", $self_ms*1000}")ms
+                else
+                    ms_str="<1ms"
+                fi
                 color="$GREEN"
             else
                 local raw; raw=$(smart_ping "$ip" 2 "$(get_port_for_ip "$ip")")
@@ -2334,13 +2346,26 @@ speed_test() {
 
     for i in $(seq 1 10); do
         local ms=""
-        # Сначала ICMP
-        ms=$(ping -c 1 -W 2 "$test_ip" 2>/dev/null | \
-            sed -n 's/.*time=\([0-9.]*\).*/\1/p')
-        # Fallback: TCP если ICMP не работает
-        if [ -z "$ms" ] && [ "$test_ip" != "127.0.0.1" ]; then
-            local port; port=$(get_port_for_ip "$ip" 2>/dev/null || echo "443")
-            ms=$(tcp_ping "$ip" "$port" 2 2>/dev/null)
+        if [ "$ip" = "$MY_IP" ]; then
+            # Текущий сервер — TCP на WARP порт или SSH
+            ms=$(curl -so /dev/null -w '%{time_connect}' \
+                --max-time 2 --connect-timeout 2 \
+                "http://127.0.0.1:${WARP_SOCKS_PORT}/" 2>/dev/null)
+            [ -z "$ms" ] || [ "$ms" = "0.000000" ] && \
+                ms=$(curl -so /dev/null -w '%{time_connect}' \
+                    --max-time 2 --connect-timeout 2 \
+                    "http://127.0.0.1:22/" 2>/dev/null)
+            [ -n "$ms" ] && [ "$ms" != "0.000000" ] && \
+                ms=$(awk "BEGIN{printf \"%.2f\", $ms*1000}") || ms=""
+        else
+            # Сначала ICMP
+            ms=$(ping -c 1 -W 2 "$ip" 2>/dev/null | \
+                sed -n 's/.*time=\([0-9.]*\).*/\1/p')
+            # Fallback: TCP
+            if [ -z "$ms" ]; then
+                local port; port=$(get_port_for_ip "$ip" 2>/dev/null || echo "443")
+                ms=$(tcp_ping "$ip" "$port" 2 2>/dev/null)
+            fi
         fi
 
         if [ -n "$ms" ]; then
