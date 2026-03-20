@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасная установка: бэкап → патч → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="1.9"
+VERSION="2.0"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2273,17 +2273,49 @@ warp_test() {
             echo -e "${YELLOW}⚠ IP не изменился${NC}"
             echo -e "        ${WHITE}Прямой IP:  ${direct_ip}${NC}"
             echo -e "        ${WHITE}WARP IP:    ${warp_ip}${NC}"
-            echo -e "        ${YELLOW}WARP проксирует трафик, но выходной IP совпадает.${NC}"
-            echo -e "        ${WHITE}Это может быть нормально если сервер уже в сети Cloudflare.${NC}"
+            echo -e "        ${YELLOW}Возможно сервер уже в сети Cloudflare.${NC}"
         else
             echo -e "${GREEN}✓ IP изменился${NC}"
-            echo -e "        ${WHITE}Прямой IP:  ${WHITE}${direct_ip}${NC}"
+            echo -e "        ${WHITE}Прямой IP:  ${direct_ip}${NC}"
             echo -e "        ${WHITE}WARP IP:    ${GREEN}${warp_ip}${NC} ${CYAN}(Cloudflare)${NC}"
         fi
     else
         echo -e "${RED}✗ нет ответа через SOCKS5${NC}"
         echo -e "        ${WHITE}curl не смог получить IP через socks5://127.0.0.1:${WARP_SOCKS_PORT}${NC}"
         all_ok=0
+    fi
+
+    # 7. Проверка xray outbound (если есть 3x-ui)
+    local xray_cfg; xray_cfg=$(detect_xray_config 2>/dev/null)
+    if [ -n "$xray_cfg" ]; then
+        echo -ne "  ${WHITE}[7/7]${NC} WARP outbound в xray...    "
+        local warp_out_count
+        warp_out_count=$(python3 -c "
+import json
+cfg = json.load(open('${xray_cfg}'))
+outs = [o for o in cfg.get('outbounds',[]) if o.get('tag')=='warp']
+print(len(outs))
+" 2>/dev/null)
+        if [ "${warp_out_count:-0}" -gt 0 ]; then
+            # Проверяем routing rules
+            local warp_rules
+            warp_rules=$(python3 -c "
+import json
+cfg = json.load(open('${xray_cfg}'))
+rules = [r for r in cfg.get('routing',{}).get('rules',[]) if r.get('outboundTag')=='warp']
+print(len(rules))
+" 2>/dev/null)
+            if [ "${warp_rules:-0}" -gt 0 ]; then
+                echo -e "${GREEN}✓ outbound добавлен, routing настроен (${warp_rules} правил)${NC}"
+                echo -e "        ${CYAN}Трафик по routing rules идёт через Cloudflare${NC}"
+            else
+                echo -e "${YELLOW}⚠ outbound добавлен, но нет routing rules${NC}"
+                echo -e "        ${WHITE}Добавьте routing rules в 3x-ui UI или используйте п.17${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ outbound 'warp' не добавлен в xray${NC}"
+            echo -e "        ${WHITE}Применить: п.17 → Применить WARP в config.json${NC}"
+        fi
     fi
 
     # Итог
@@ -2295,18 +2327,18 @@ warp_test() {
         echo -e "  ${WHITE}Прямой IP сервера:  ${direct_ip}${NC}"
         echo -e "  ${WHITE}IP через WARP:      ${GREEN}${warp_ip}${NC}"
         echo ""
-        echo -e "  ${CYAN}Как использовать:${NC}"
-        echo -e "  Настройте приложение на использование SOCKS5 прокси:"
-        echo -e "  ${WHITE}socks5://127.0.0.1:${WARP_SOCKS_PORT}${NC}"
-        echo -e "  Или добавьте как outbound в xray (п.16) — тогда весь"
-        echo -e "  трафик клиентов будет выходить через Cloudflare."
+        if [ -n "$xray_cfg" ] && [ "${warp_out_count:-0}" -gt 0 ] && [ "${warp_rules:-0}" -gt 0 ]; then
+            echo -e "  ${GREEN}✅ xray роутит трафик через Cloudflare по ${warp_rules} правилам${NC}"
+        elif [ -n "$xray_cfg" ]; then
+            echo -e "  ${YELLOW}⚠  xray: добавьте WARP outbound (п.17) для перенаправления клиентского трафика${NC}"
+        fi
     else
         echo -e "  ${RED}❌ Найдены проблемы — следуйте инструкциям выше.${NC}"
         echo -e "  ${WHITE}Быстрое исправление: п.8r (авторемонт)${NC}"
     fi
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    log_action "WARP TEST: direct=${direct_ip} warp=${warp_ip} ok=${all_ok}"
+    log_action "WARP TEST: direct=${direct_ip} warp=${warp_ip} ok=${all_ok} xray_out=${warp_out_count:-0} xray_rules=${warp_rules:-0}"
     read -p "Нажмите Enter..."
 }
 
@@ -2608,6 +2640,45 @@ wgcf_status() {
     read -p "Нажмите Enter..."
 }
 
+wgcf_menu() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ wgcf — WireGuard профиль Cloudflare ━━━${NC}\n"
+        echo -e "${WHITE}wgcf создаёт стандартный WireGuard туннель к Cloudflare.${NC}"
+        echo -e "${WHITE}В отличие от warp-cli — работает с любых IP включая РФ хостинги.${NC}"
+        echo -e "${WHITE}Используется для маршрутизации трафика Docker/AWG через Cloudflare.${NC}"
+        echo ""
+
+        local wgcf_st="${RED}не установлен${NC}"
+        _wgcf_installed && wgcf_st="${GREEN}установлен ($(wgcf --version 2>/dev/null | head -1))${NC}"
+        local prof_st="${YELLOW}нет профиля${NC}"
+        [ -f "$WGCF_CONF" ] && prof_st="${GREEN}есть (${WGCF_CONF})${NC}"
+        local tun_st="${YELLOW}не запущен${NC}"
+        _wgcf_running && tun_st="${GREEN}запущен (${WGCF_IFACE})${NC}"
+
+        echo -e "  ${WHITE}wgcf:     ${wgcf_st}"
+        echo -e "  ${WHITE}Профиль:  ${prof_st}"
+        echo -e "  ${WHITE}Туннель:  ${tun_st}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC} Установить wgcf"
+        echo -e "  ${YELLOW}[2]${NC} Создать WireGuard профиль CF"
+        echo -e "  ${YELLOW}[3]${NC} Поднять туннель ${WGCF_IFACE}"
+        echo -e "  ${YELLOW}[4]${NC} Остановить туннель"
+        echo -e "  ${YELLOW}[5]${NC} Статус и тест"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выбор: " wch
+        case "$wch" in
+            1) wgcf_install ;;
+            2) wgcf_generate ;;
+            3) wgcf_up ;;
+            4) wgcf_down ;;
+            5) wgcf_status ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  MAIN MENU
 # ═══════════════════════════════════════════════════════════════
@@ -2650,27 +2721,22 @@ show_menu() {
         echo -e " 12)  Перевыпустить ключ"
         echo -e " 13)  Изменить порт SOCKS5"
         echo -e " 14)  ${RED}Удалить WARP${NC}"
-        echo -e " 15)  ${GREEN}Тест WARP${NC}"
+        echo -e " 15)  ${GREEN}★ Тест WARP (проверить прохождение трафика)${NC}"
         echo -e " ${CYAN}── 3X-UI / XRAY ─────────────────────${NC}"
         echo -e " 16)  JSON для ручного добавления"
-        echo -e " 17)  ${GREEN}Применить в config.json (авто)${NC}"
+        echo -e " 17)  ${GREEN}Применить WARP в config.json (авто)${NC}"
         echo -e " 18)  Бэкапы и Rollback"
-        echo -e " ${CYAN}── WGCF (WARP → WireGuard) ──────────${NC}"
-        echo -e " 19)  Установить wgcf"
-        echo -e " 20)  Создать профиль CF"
-        echo -e " 21)  Поднять туннель wgcf0"
-        echo -e " 22)  Остановить туннель"
-        echo -e " 23)  Статус wgcf"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
-        echo -e " 24)  Ping (live) + мониторинг"
-        echo -e " 25)  Системная статистика"
-        echo -e " 26)  Имена серверов"
-        echo -e " ${CYAN}── РОУТЕР ───────────────────────────${NC}"
-        echo -e " 27)  AmneziaWG на OpenWrt / Keenetic"
+        echo -e " 19)  Ping (live) + мониторинг"
+        echo -e " 20)  Системная статистика"
+        echo -e " 21)  Имена серверов"
+        echo -e " ${CYAN}── РОУТЕР / ДОПОЛНИТЕЛЬНО ───────────${NC}"
+        echo -e " 22)  AmneziaWG на OpenWrt / Keenetic"
+        echo -e " 23)  wgcf — WireGuard профиль CF"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
-        echo -e " 28)  Проверка конфликтов"
-        echo -e " 29)  Обновить скрипт"
-        echo -e " 30)  ${RED}Полное удаление${NC}"
+        echo -e " 24)  Проверка конфликтов"
+        echo -e " 25)  Обновить скрипт"
+        echo -e " 26)  ${RED}Полное удаление${NC}"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         read -p "Выбор: " ch
@@ -2695,19 +2761,29 @@ show_menu() {
             16) show_xray_json ;;
             17) apply_xray_warp ;;
             18) show_backups ;;
-            19) wgcf_install ;;
-            20) wgcf_generate ;;
-            21) wgcf_up ;;
-            22) wgcf_down ;;
-            23) wgcf_status ;;
-            24) ping_menu ;;
-            25) show_system_stats ;;
-            26) manage_aliases_menu ;;
-            27) show_amnezia_router ;;
-            28) check_conflicts ;;
-            29) self_update ;;
-            30) full_uninstall ;;
-            0)  clear; exit 0 ;;
+            19) ping_menu ;;
+            20) show_system_stats ;;
+            21) manage_aliases_menu ;;
+            22) show_amnezia_router ;;
+            23) wgcf_menu ;;
+            24) check_conflicts ;;
+            25) self_update ;;
+            26) full_uninstall ;;
+            0)
+                clear
+                # Проверка что команда govpn работает
+                if ! command -v govpn &>/dev/null; then
+                    echo -e "${YELLOW}[!] Команда 'govpn' не найдена в PATH.${NC}"
+                    echo -e "${WHITE}Исправление...${NC}"
+                    ln -sf "$INSTALL_PATH" /usr/local/bin/govpn 2>/dev/null
+                    ln -sf "$INSTALL_PATH" /usr/bin/govpn 2>/dev/null
+                    hash -r 2>/dev/null
+                    echo -e "${GREEN}[OK] Теперь доступна команда: govpn${NC}"
+                    echo -e "${WHITE}Если не работает — выполните: ${CYAN}source ~/.bashrc${NC}"
+                    echo ""
+                fi
+                exit 0
+                ;;
         esac
     done
 }
