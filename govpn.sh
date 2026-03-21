@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.4"
+VERSION="3.5"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2627,6 +2627,297 @@ show_system_stats() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  AMNEZIA WG — WARP per-client routing
+# ═══════════════════════════════════════════════════════════════
+
+AWG_WARP_DIR="/opt/warp"
+AWG_WARP_CONF="${AWG_WARP_DIR}/warp.conf"
+AWG_WARP_CLIENTS="${AWG_WARP_DIR}/clients.list"
+AWG_MARKER_BEGIN="# --- GOVPN WARP BEGIN ---"
+AWG_MARKER_END="# --- GOVPN WARP END ---"
+
+# Найти активный Amnezia контейнер
+_awg_container() {
+    local ct
+    ct=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^amnezia-awg2$|^amnezia-awg$' | head -1)
+    [ -z "$ct" ] && ct=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg" | head -1)
+    echo "$ct"
+}
+
+# Определить конфиг и интерфейс внутри контейнера
+_awg_detect_conf() {
+    local ct="$1"
+    for f in /opt/amnezia/awg/wg0.conf /opt/amnezia/awg/awg0.conf /etc/wireguard/wg0.conf; do
+        docker exec "$ct" sh -c "[ -f '$f' ]" 2>/dev/null && echo "$f" && return
+    done
+}
+
+_awg_iface() {
+    local conf="$1"
+    [[ "$conf" == *"awg0"* ]] && echo "awg0" || echo "wg0"
+}
+
+# Загрузить выбранных клиентов из файла
+_awg_load_selected() {
+    local ct="$1"
+    docker exec "$ct" sh -c "cat '${AWG_WARP_CLIENTS}' 2>/dev/null || true" | tr -d '\r'
+}
+
+# Получить всех клиентов из wg конфига
+_awg_get_all_clients() {
+    local ct="$1" conf="$2"
+    docker exec "$ct" sh -c "grep 'AllowedIPs' '$conf'" 2>/dev/null | \
+        grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32' | tr -d '\r'
+}
+
+# Получить имя клиента из clientsTable
+_awg_get_name() {
+    local ct="$1" ip="$2"
+    local bare="${ip%/32}"
+    docker exec "$ct" sh -c "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" | \
+        python3 -c "
+import json,sys
+try:
+    data = json.load(sys.stdin)
+    for c in data:
+        ud = c.get('userData', {})
+        if ud.get('allowedIps','').startswith('${bare}'):
+            print(ud.get('clientName',''))
+            break
+        if c.get('clientId','') and '${bare}' in ud.get('allowedIps',''):
+            print(ud.get('clientName',''))
+            break
+except: pass
+" 2>/dev/null
+}
+
+# Применить ip rule внутри контейнера
+_awg_apply_rules() {
+    local ct="$1"
+    local -a selected=("${@:2}")
+
+    # Очистить старые правила
+    docker exec "$ct" sh -c '
+        ip rule list | grep "lookup 100" | awk "{print \$1}" | sed "s/://" | sort -rn | \
+            while read -r pr; do ip rule del priority "$pr" 2>/dev/null || true; done
+        iptables -t nat -S POSTROUTING 2>/dev/null | grep "o warp -j MASQUERADE" | \
+            sed "s/^-A /-D /" | while read -r r; do iptables -t nat $r 2>/dev/null || true; done
+        ip route flush table 100 2>/dev/null || true
+    ' >/dev/null 2>&1
+
+    [ "${#selected[@]}" -eq 0 ] && return 0
+
+    # Добавить маршрут через warp в таблицу 100
+    docker exec "$ct" sh -c \
+        "ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"
+
+    local prio=100
+    for ip in "${selected[@]}"; do
+        docker exec "$ct" sh -c "
+            ip rule add from ${ip} table 100 priority ${prio} 2>/dev/null || true
+            iptables -t nat -C POSTROUTING -s ${ip} -o warp -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -I POSTROUTING 1 -s ${ip} -o warp -j MASQUERADE
+        " >/dev/null 2>&1
+        ((prio++))
+    done
+}
+
+# Записать выбранных клиентов в файл
+_awg_save_clients() {
+    local ct="$1"
+    shift
+    local content=""
+    for ip in "$@"; do content+="${ip}"$'\n'; done
+    docker exec "$ct" sh -c "mkdir -p '${AWG_WARP_DIR}' && printf '%s' '${content}' > '${AWG_WARP_CLIENTS}'"
+}
+
+# Вшить блок запуска в start.sh контейнера (персистентность)
+_awg_patch_start_sh() {
+    local ct="$1"
+    local start_sh="/opt/amnezia/start.sh"
+    shift
+    local -a selected=("$@")
+
+    # Бэкап оригинала (один раз)
+    docker exec "$ct" sh -c \
+        "[ -f /opt/amnezia/start.sh.govpn-backup ] || cp '${start_sh}' /opt/amnezia/start.sh.govpn-backup" 2>/dev/null
+
+    # Собираем блок
+    local block="${AWG_MARKER_BEGIN}"$'\n'
+    block+="if [ -f '${AWG_WARP_CONF}' ]; then"$'\n'
+    block+="  wg-quick up '${AWG_WARP_CONF}' 2>/dev/null || true"$'\n'
+    block+="  sleep 2"$'\n'
+    block+="fi"$'\n'
+
+    if [ "${#selected[@]}" -gt 0 ]; then
+        block+="ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
+        local prio=100
+        for ip in "${selected[@]}"; do
+            block+="ip rule add from ${ip} table 100 priority ${prio} 2>/dev/null || true"$'\n'
+            block+="iptables -t nat -C POSTROUTING -s ${ip} -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s ${ip} -o warp -j MASQUERADE"$'\n'
+            ((prio++))
+        done
+    fi
+    block+="${AWG_MARKER_END}"
+
+    # Удалить старый блок если есть
+    docker exec "$ct" sh -c \
+        "sed -i '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d' '${start_sh}' 2>/dev/null || true"
+
+    # Вставить перед tail -f /dev/null или в конец
+    docker exec "$ct" bash -c "
+if grep -qF 'tail -f /dev/null' '${start_sh}'; then
+    tmpf=\$(mktemp)
+    while IFS= read -r line; do
+        if echo \"\$line\" | grep -qF 'tail -f /dev/null'; then
+            printf '%s\n' '${block}'
+        fi
+        echo \"\$line\"
+    done < '${start_sh}' > \"\$tmpf\"
+    mv \"\$tmpf\" '${start_sh}'
+    chmod +x '${start_sh}'
+else
+    printf '\n%s\n' '${block}' >> '${start_sh}'
+    chmod +x '${start_sh}'
+fi
+" 2>/dev/null
+}
+
+awg_warp_menu() {
+    local ct; ct=$(_awg_container)
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ AmneziaWG — WARP для клиентов ━━━${NC}\n"
+
+        if [ -z "$ct" ]; then
+            echo -e "${RED}Контейнер amnezia-awg не найден.${NC}"
+            echo -e "${WHITE}Убедитесь что AmneziaWG запущен через Docker.${NC}"
+            echo ""
+            read -p "Нажмите Enter..."; return
+        fi
+
+        local conf; conf=$(_awg_detect_conf "$ct")
+        local iface; iface=$(_awg_iface "$conf")
+
+        # Статус warp интерфейса внутри контейнера
+        local warp_running=0
+        docker exec "$ct" sh -c "ip addr show warp >/dev/null 2>&1" 2>/dev/null && warp_running=1
+
+        local warp_ip=""
+        if [ "$warp_running" -eq 1 ]; then
+            warp_ip=$(docker exec "$ct" sh -c \
+                "curl -s --interface warp --connect-timeout 5 https://api4.ipify.org 2>/dev/null || true")
+        fi
+
+        # Загружаем клиентов
+        local -a all_ips=()
+        while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_get_all_clients "$ct" "$conf")"
+
+        local -a sel_ips=()
+        while IFS= read -r ip; do [ -n "$ip" ] && sel_ips+=("$ip"); done <<< "$(_awg_load_selected "$ct")"
+
+        # Статус
+        echo -e "  ${WHITE}Контейнер:${NC} ${CYAN}${ct}${NC}"
+        echo -e "  ${WHITE}Интерфейс:${NC} ${CYAN}${iface}${NC}"
+        if [ "$warp_running" -eq 1 ]; then
+            echo -e "  ${WHITE}WARP:${NC}      ${GREEN}● запущен${NC}"
+            [ -n "$warp_ip" ] && echo -e "  ${WHITE}WARP IP:${NC}   ${GREEN}${warp_ip}${NC}"
+        else
+            echo -e "  ${WHITE}WARP:${NC}      ${RED}● не запущен${NC}"
+        fi
+        echo -e "  ${WHITE}Клиентов через WARP:${NC} ${CYAN}${#sel_ips[@]}${NC} из ${#all_ips[@]}"
+        echo ""
+
+        # Список клиентов
+        if [ "${#all_ips[@]}" -gt 0 ]; then
+            echo -e "${WHITE}Клиенты:${NC}"
+            for i in "${!all_ips[@]}"; do
+                local ip="${all_ips[$i]}"
+                local name; name=$(_awg_get_name "$ct" "$ip")
+                local label="${name:-$ip}"
+                local in_warp=0
+                for s in "${sel_ips[@]}"; do [ "$s" = "$ip" ] && in_warp=1; done
+                if [ "$in_warp" -eq 1 ]; then
+                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${GREEN}${ip}${NC}"
+                else
+                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
+                fi
+            done
+            echo ""
+        fi
+
+        echo -e "  ${YELLOW}[a]${NC}  Включить WARP всем"
+        echo -e "  ${YELLOW}[n]${NC}  Выключить WARP всем"
+        echo -e "  ${YELLOW}[s]${NC}  Применить и перезапустить контейнер"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Выбор: " ch
+
+        case "$ch" in
+            [1-9])
+                local idx=$((ch-1))
+                [ -z "${all_ips[$idx]:-}" ] && continue
+                local tip="${all_ips[$idx]}"
+                local already=0
+                for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
+                if [ "$already" -eq 1 ]; then
+                    sel_ips=("${sel_ips[@]/$tip}")
+                    sel_ips=("${sel_ips[@]}")
+                    # Пересобрать массив без пустых
+                    local -a tmp=()
+                    for s in "${sel_ips[@]}"; do [ -n "$s" ] && tmp+=("$s"); done
+                    sel_ips=("${tmp[@]}")
+                else
+                    sel_ips+=("$tip")
+                fi
+                ;;
+            a|A) sel_ips=("${all_ips[@]}") ;;
+            n|N) sel_ips=() ;;
+            s|S)
+                echo ""
+                echo -e "${YELLOW}[1/3]${NC} Сохраняем список клиентов..."
+                _awg_save_clients "$ct" "${sel_ips[@]}"
+                echo -e "${GREEN}  ✓${NC}"
+
+                echo -e "${YELLOW}[2/3]${NC} Патчим start.sh (персистентность)..."
+                _awg_patch_start_sh "$ct" "${sel_ips[@]}"
+                echo -e "${GREEN}  ✓${NC}"
+
+                echo -e "${YELLOW}[3/3]${NC} Перезапуск контейнера ${ct}..."
+                docker restart "$ct" >/dev/null 2>&1
+                local a=0
+                while [ "$a" -lt 15 ]; do
+                    docker exec "$ct" sh -c "true" 2>/dev/null && break
+                    sleep 1; ((a++))
+                done
+
+                if docker exec "$ct" sh -c "true" 2>/dev/null; then
+                    echo -e "${GREEN}  ✓ Контейнер перезапущен${NC}"
+                    sleep 2
+                    # Проверяем warp
+                    if docker exec "$ct" sh -c "ip addr show warp >/dev/null 2>&1" 2>/dev/null; then
+                        local new_wip
+                        new_wip=$(docker exec "$ct" sh -c \
+                            "curl -s --interface warp --connect-timeout 5 https://api4.ipify.org 2>/dev/null || true")
+                        echo -e "${GREEN}  ✓ WARP поднят: ${new_wip}${NC}"
+                    else
+                        echo -e "${YELLOW}  ⚠ WARP не поднялся — возможно не установлен (нужен wgcf)${NC}"
+                    fi
+                else
+                    echo -e "${RED}  ✗ Контейнер не отвечает${NC}"
+                fi
+
+                log_action "AWG WARP CLIENTS: ${#sel_ips[@]} selected, container restarted"
+                echo ""
+                read -p "Нажмите Enter..."
+                ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  AMNEZIA WG — роутер
 # ═══════════════════════════════════════════════════════════════
 
@@ -3419,6 +3710,7 @@ show_menu() {
         echo -e " 19)  Статистика, бэкапы, управление"
         echo -e " ${CYAN}── РОУТЕР / ДОПОЛНИТЕЛЬНО ───────────${NC}"
         echo -e " 20)  AmneziaWG на роутер  ${YELLOW}(только Amnezia)${NC}"
+        echo -e " 20w) ${GREEN}WARP для клиентов Amnezia${NC}"
         echo -e " 21)  wgcf — WireGuard профиль CF"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e " 22)  Проверка конфликтов"
@@ -3450,6 +3742,7 @@ show_menu() {
             18) ping_menu ;;
             19) show_system_stats ;;
             20) show_amnezia_router ;;
+            20w) awg_warp_menu ;;
             21) wgcf_menu ;;
             22) check_conflicts ;;
             23) self_update ;;
