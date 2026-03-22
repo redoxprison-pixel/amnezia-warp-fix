@@ -100,26 +100,36 @@ detect_mode() {
     systemctl is-active x-ui &>/dev/null 2>&1 && has_3xui=1
     [ "$has_3xui" -eq 0 ] && [ -f "/etc/x-ui/x-ui.db" ] && has_3xui=1
 
-    # Проверяем AmneziaWG — ищем контейнер с активными клиентами
+    # Проверяем AmneziaWG — ищем контейнер с наибольшим числом пиров
     if command -v docker &>/dev/null; then
         local best_ct="" best_peers=0
         while IFS= read -r ct; do
             [ -z "$ct" ] && continue
-            local peers
-            peers=$(docker exec "$ct" sh -c "wg show 2>/dev/null | grep -c 'latest handshake'" 2>/dev/null || echo "0")
-            peers=$(echo "$peers" | tr -d '[:space:]')
+            # Считаем пиры в конфиге (не активные хендшейки)
+            local peers=0
+            local conf_file
+            for f in /opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf; do
+                if docker exec "$ct" sh -c "[ -f '$f' ]" 2>/dev/null; then
+                    peers=$(docker exec "$ct" sh -c "grep -c '\[Peer\]' '$f' 2>/dev/null || echo 0" 2>/dev/null)
+                    peers=$(echo "$peers" | tr -d '[:space:]')
+                    break
+                fi
+            done
             if (( peers > best_peers )); then
                 best_peers=$peers
                 best_ct=$ct
             fi
         done < <(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg")
 
-        # Если нет активных — берём любой amnezia контейнер
+        # Если нет пиров нигде — берём любой amnezia контейнер
         if [ -z "$best_ct" ]; then
             best_ct=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg" | head -1)
         fi
 
-        [ -n "$best_ct" ] && has_amnezia=1 && AWG_CONTAINER="$best_ct"
+        if [ -n "$best_ct" ]; then
+            has_amnezia=1
+            AWG_CONTAINER="$best_ct"
+        fi
     fi
 
     # Определяем режим
