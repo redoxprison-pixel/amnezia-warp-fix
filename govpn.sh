@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.7"
+VERSION="3.8"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2920,6 +2920,10 @@ _awg_install_warp() {
 awg_warp_menu() {
     local ct; ct=$(_awg_container)
 
+    # sel_ips объявляем ВНЕ цикла чтобы изменения сохранялись
+    local -a sel_ips=()
+    local sel_loaded=0
+
     while true; do
         clear
         echo -e "\n${CYAN}━━━ AmneziaWG — WARP для клиентов ━━━${NC}\n"
@@ -2948,8 +2952,11 @@ awg_warp_menu() {
         local -a all_ips=()
         while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_get_all_clients "$ct" "$conf")"
 
-        local -a sel_ips=()
-        while IFS= read -r ip; do [ -n "$ip" ] && sel_ips+=("$ip"); done <<< "$(_awg_load_selected "$ct")"
+        # Загружаем sel_ips только при первом входе
+        if [ "$sel_loaded" -eq 0 ]; then
+            while IFS= read -r ip; do [ -n "$ip" ] && sel_ips+=("$ip"); done <<< "$(_awg_load_selected "$ct")"
+            sel_loaded=1
+        fi
 
         # Статус
         echo -e "  ${WHITE}Контейнер:${NC} ${CYAN}${ct}${NC}"
