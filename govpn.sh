@@ -904,27 +904,25 @@ fmt_ip() {
 }
 
 get_rules_list() {
-    # Показываем ВСЕ DNAT правила — и govpn и Amnezia и любые другие
     iptables -t nat -S PREROUTING 2>/dev/null | grep "DNAT" | \
         while read -r rule; do
-            local proto port dest source comment
-            proto=$(echo "$rule" | grep -oP '\-p \K\w+')
-            port=$(echo "$rule" | grep -oP 'dpt:\K[0-9]+')
-            dest=$(echo "$rule" | grep -oP 'to:\K[\d.:]+')
-            comment=$(echo "$rule" | grep -oP 'comment "\K[^"]+' || echo "")
+            local proto port dest comment
+            proto=$(echo "$rule" | awk '{for(i=1;i<=NF;i++) if($i=="-p") print $(i+1)}')
+            port=$(echo "$rule" | sed 's/.*--dport \([0-9]*\).*/\1/')
+            dest=$(echo "$rule" | sed 's/.*--to-destination \([^ ]*\).*/\1/')
+            comment=$(echo "$rule" | sed -n 's/.*--comment "\([^"]*\)".*/\1/p')
             [ -n "$port" ] && [ -n "$dest" ] && \
                 echo "${proto:-any}|${port}|${dest}|${comment}"
         done
 }
 
 get_govpn_rules() {
-    # Только правила добавленные govpn (для удаления)
     iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:" | \
         while read -r rule; do
             local proto port dest
-            proto=$(echo "$rule" | grep -oP '\-p \K\w+')
-            port=$(echo "$rule" | grep -oP 'dpt:\K[0-9]+')
-            dest=$(echo "$rule" | grep -oP 'to:\K[\d.:]+')
+            proto=$(echo "$rule" | awk '{for(i=1;i<=NF;i++) if($i=="-p") print $(i+1)}')
+            port=$(echo "$rule" | sed 's/.*--dport \([0-9]*\).*/\1/')
+            dest=$(echo "$rule" | sed 's/.*--to-destination \([^ ]*\).*/\1/')
             [ -n "$port" ] && [ -n "$dest" ] && echo "${proto}|${port}|${dest}"
         done
 }
@@ -2093,37 +2091,44 @@ awg_peers_menu() {
         echo -e "${YELLOW}Amnezia не обнаружен.${NC}"; read -p "Enter..."; return
     fi
 
-    # Установить qrencode если нужно
     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+
+    local sort_mode="name"  # name | ip | activity
 
     while true; do
         clear
         echo -e "\n${CYAN}━━━ Клиенты AWG ━━━${NC}\n"
-        echo -e "  ${WHITE}Контейнер: ${CYAN}${AWG_CONTAINER}${NC}\n"
+        echo -e "  ${WHITE}Контейнер: ${CYAN}${AWG_CONTAINER}${NC}  Сортировка: ${YELLOW}${sort_mode}${NC}\n"
 
-        # Собираем клиентов и сортируем по имени
         local conf; conf=$(_awg_conf)
         local -a all_ips=()
         while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
 
-        # Сортировка по имени через ассоциативный массив
+        # Кешируем wg show
+        local wg_show
+        wg_show=$(docker exec "$AWG_CONTAINER" sh -c "wg show $(_awg_iface) 2>/dev/null" 2>/dev/null)
+
+        # Сортировка
         local -a sorted_ips=()
         if [ ${#all_ips[@]} -gt 0 ]; then
-            # Собираем пары "имя|ip" и сортируем
             local -a pairs=()
             for ip in "${all_ips[@]}"; do
                 local name; name=$(_awg_client_name "$ip")
-                pairs+=("${name:-zzz}|${ip}")
+                local bare="${ip%/32}"
+                local hshake
+                hshake=$(echo "$wg_show" | \
+                    awk "/allowed ips:.*${bare}/{f=1} f && /latest handshake/{print; f=0}" | \
+                    sed 's/.*latest handshake: //')
+                case "$sort_mode" in
+                    name)     pairs+=("${name:-zzz_$bare}|${ip}") ;;
+                    ip)       pairs+=("${bare}|${ip}") ;;
+                    activity) [ -n "$hshake" ] && pairs+=("0|${ip}") || pairs+=("1|${ip}") ;;
+                esac
             done
-            # Сортируем по имени
             while IFS='|' read -r _ ip; do
                 sorted_ips+=("$ip")
             done < <(printf '%s\n' "${pairs[@]}" | sort -f)
         fi
-
-        # Получаем wg show один раз для всех (оптимизация)
-        local wg_show
-        wg_show=$(docker exec "$AWG_CONTAINER" sh -c "wg show $(_awg_iface) 2>/dev/null" 2>/dev/null)
 
         if [ ${#sorted_ips[@]} -gt 0 ]; then
             echo -e "${WHITE}Клиенты:${NC}"
@@ -2131,20 +2136,16 @@ awg_peers_menu() {
                 local ip="${sorted_ips[$i]}"
                 local name; name=$(_awg_client_name "$ip")
                 local bare="${ip%/32}"
-
-                # Хендшейк из кешированного wg show
                 local hshake
                 hshake=$(echo "$wg_show" | \
-                    awk "/allowed ips:.*${bare}/{found=1} found && /latest handshake/{print; found=0}" | \
+                    awk "/allowed ips:.*${bare}/{f=1} f && /latest handshake/{print; f=0}" | \
                     sed 's/.*latest handshake: //')
-
                 local status_icon="${RED}●${NC}"
                 local status_txt="${RED}не подключён${NC}"
                 if [ -n "$hshake" ]; then
                     status_icon="${GREEN}●${NC}"
                     status_txt="${GREEN}${hshake}${NC}"
                 fi
-
                 printf "  ${YELLOW}[%d]${NC} %b ${WHITE}%-20s${NC}  ${CYAN}%s${NC}\n" \
                     "$((i+1))" "$status_icon" "${name:-$bare}" "$ip"
                 echo -e "       ${status_txt}"
@@ -2155,19 +2156,30 @@ awg_peers_menu() {
 
         echo ""
         echo -e "  ${YELLOW}[+]${NC}   Добавить клиента"
-        [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC} Показать конфиг / QR код"
+        [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC} Конфиг / QR код"
         [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[-]${NC}   Удалить клиента"
+        echo -e "  ${YELLOW}[/]${NC}   Сменить сортировку (${sort_mode})"
         echo -e "  ${YELLOW}[0]${NC}   Назад"
         echo ""
-        read -p "Выбор: " ch
+        read -p "Выбор (Enter = обновить): " ch
+
+        # Пустой Enter — обновить
+        [ -z "$ch" ] && continue
 
         case "$ch" in
             +)  _awg_add_peer ;;
             -)  _awg_del_peer "${sorted_ips[@]}" ;;
-            0|"") return ;;
+            /)
+                case "$sort_mode" in
+                    name)     sort_mode="ip" ;;
+                    ip)       sort_mode="activity" ;;
+                    activity) sort_mode="name" ;;
+                esac ;;
+            0)  return ;;
             *)
-                [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#sorted_ips[@]} )) || continue
-                _awg_show_client_menu "${sorted_ips[$((ch-1))]}"
+                [[ "$ch" =~ ^[0-9]+$ ]] && \
+                    (( ch >= 1 && ch <= ${#sorted_ips[@]} )) && \
+                    _awg_show_client_menu "${sorted_ips[$((ch-1))]}"
                 ;;
         esac
     done
