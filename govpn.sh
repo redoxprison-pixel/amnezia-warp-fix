@@ -378,9 +378,28 @@ _awg_warp_ip() {
 }
 
 _awg_all_clients() {
-    local conf; conf=$(_awg_conf)
-    docker exec "$AWG_CONTAINER" sh -c "grep 'AllowedIPs' '$conf'" 2>/dev/null | \
-        grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32' | tr -d '\r'
+    # Читаем из clientsTable (основной источник)
+    local result
+    result=$(docker exec "$AWG_CONTAINER" sh -c \
+        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null | \
+        python3 -c "
+import json,sys
+try:
+    data=json.load(sys.stdin)
+    for c in data:
+        ip=c.get('userData',{}).get('allowedIps','')
+        if ip: print(ip if '/' in ip else ip+'/32')
+except: pass
+" 2>/dev/null)
+
+    # Fallback — читаем из конфига если clientsTable пуст
+    if [ -z "$result" ]; then
+        local conf; conf=$(_awg_conf)
+        result=$(docker exec "$AWG_CONTAINER" sh -c "grep 'AllowedIPs' '$conf'" 2>/dev/null | \
+            grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32' | tr -d '\r')
+    fi
+
+    echo "$result"
 }
 
 _awg_client_name() {
