@@ -2365,8 +2365,7 @@ _awg_show_qr() {
     fi
 
     echo -e "${WHITE}Формат QR:${NC}"
-    echo -e "  ${YELLOW}[1]${NC} WireGuard (.conf — для WireGuard приложения)"
-    echo -e "  ${YELLOW}[2]${NC} AmneziaWG (JSON — для Amnezia приложения)"
+    echo -e "  ${YELLOW}[1]${NC} WireGuard / AmneziaWG (.conf)"
     echo -e "  ${YELLOW}[0]${NC} Назад"
     echo ""; read -p "Выбор: " fmt
 
@@ -2377,50 +2376,15 @@ _awg_show_qr() {
 
     case "$fmt" in
         1)
-            echo -e "\n${WHITE}QR для WireGuard:${NC}\n"
+            echo -e "\n${WHITE}QR код:${NC}\n"
             echo "$cfg" | qrencode -t ansiutf8 2>/dev/null || \
                 echo -e "${RED}Ошибка qrencode${NC}"
             ;;
         2)
-            local dns endpoint
-            dns=$(echo "$cfg"     | awk '/^DNS/{print $3}')
-            endpoint=$(echo "$cfg"| awk '/^Endpoint/{print $3}')
-            local host="${endpoint%%:*}"
-            local port="${endpoint##*:}"
-
-            # Правильный формат Amnezia — containers с last_config
-            local amn_json
-            amn_json=$(python3 - << PYEOF
-import json, sys
-
-cfg = """${cfg}"""
-
-data = {
-    "containers": [{
-        "container": "amnezia-awg",
-        "awg": {
-            "last_config": cfg
-        }
-    }],
-    "defaultContainer": "amnezia-awg",
-    "description": "${name:-VPN}",
-    "dns1": "${dns:-1.1.1.1}",
-    "dns2": "8.8.8.8",
-    "hostName": "${host}",
-    "port": "${port}",
-    "splitTunnelSites": [],
-    "splitTunnelType": 0
-}
-print(json.dumps(data, ensure_ascii=False, separators=(',', ':')))
-PYEOF
-)
-            if [ -n "$amn_json" ]; then
-                echo -e "\n${WHITE}QR для Amnezia:${NC}\n"
-                echo "$amn_json" | qrencode -t ansiutf8 2>/dev/null || \
-                    echo -e "${RED}Ошибка qrencode${NC}"
-            else
-                echo -e "${RED}Ошибка генерации JSON — проверьте python3${NC}"
-            fi
+            # Amnezia читает обычный .conf формат через QR — тот же что WireGuard
+            echo -e "\n${WHITE}QR для Amnezia (AWG конфиг):${NC}\n"
+            echo "$cfg" | qrencode -t ansiutf8 2>/dev/null || \
+                echo -e "${RED}Ошибка qrencode${NC}"
             ;;
         0|"") return ;;
     esac
@@ -2514,38 +2478,57 @@ _awg_add_peer() {
     local iface_block
     iface_block=$(docker exec "$AWG_CONTAINER" sh -c \
         "awk '/^\[Interface\]/{p=1} /^\[Peer\]/{p=0} p' '$conf'" 2>/dev/null)
-    local jc jmin jmax s1 s2 h1 h2 h3 h4
+    local jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5
     jc=$(echo "$iface_block"   | awk '/^Jc = /{print $3; exit}')
     jmin=$(echo "$iface_block" | awk '/^Jmin = /{print $3; exit}')
     jmax=$(echo "$iface_block" | awk '/^Jmax = /{print $3; exit}')
     s1=$(echo "$iface_block"   | awk '/^S1 = /{print $3; exit}')
     s2=$(echo "$iface_block"   | awk '/^S2 = /{print $3; exit}')
+    s3=$(echo "$iface_block"   | awk '/^S3 = /{print $3; exit}')
+    s4=$(echo "$iface_block"   | awk '/^S4 = /{print $3; exit}')
     h1=$(echo "$iface_block"   | awk '/^H1 = /{print $3; exit}')
     h2=$(echo "$iface_block"   | awk '/^H2 = /{print $3; exit}')
     h3=$(echo "$iface_block"   | awk '/^H3 = /{print $3; exit}')
     h4=$(echo "$iface_block"   | awk '/^H4 = /{print $3; exit}')
+    i1=$(echo "$iface_block"   | awk '/^I1 = /{sub(/^I1 = /,""); print; exit}')
+    i2=$(echo "$iface_block"   | awk '/^I2 = /{sub(/^I2 = /,""); print; exit}')
+    i3=$(echo "$iface_block"   | awk '/^I3 = /{sub(/^I3 = /,""); print; exit}')
+    i4=$(echo "$iface_block"   | awk '/^I4 = /{sub(/^I4 = /,""); print; exit}')
+    i5=$(echo "$iface_block"   | awk '/^I5 = /{sub(/^I5 = /,""); print; exit}')
 
-    # Конфиг клиента
+    # DNS берём из контейнера (Amnezia использует свой DNS)
+    local server_dns
+    server_dns=$(echo "$iface_block" | awk '/^DNS = /{sub(/^DNS = /,""); print; exit}')
+    [ -z "$server_dns" ] && server_dns="1.1.1.1, 1.0.0.1"
+
+    # Конфиг клиента — формат точно как Amnezia
     local bare="${client_ip%/32}"
     local client_conf
     client_conf="[Interface]
-PrivateKey = ${privkey}
 Address = ${client_ip}/32
-DNS = ${MY_IP}
+DNS = ${server_dns}
+PrivateKey = ${privkey}
 Jc = ${jc:-4}
 Jmin = ${jmin:-40}
-Jmax = ${jmax:-70}
+Jmax = ${jmax:-50}
 S1 = ${s1:-0}
 S2 = ${s2:-0}
+S3 = ${s3:-0}
+S4 = ${s4:-0}
 H1 = ${h1:-1}
 H2 = ${h2:-2}
 H3 = ${h3:-3}
 H4 = ${h4:-4}
+I1 = ${i1}
+I2 = ${i2}
+I3 = ${i3}
+I4 = ${i4}
+I5 = ${i5}
 
 [Peer]
 PublicKey = ${server_pubkey}
 PresharedKey = ${psk}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = ${endpoint_ip}:${endpoint_port}
 PersistentKeepalive = 25"
 
