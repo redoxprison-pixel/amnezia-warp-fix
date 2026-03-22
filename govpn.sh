@@ -904,15 +904,28 @@ fmt_ip() {
 }
 
 get_rules_list() {
-    iptables -t nat -S PREROUTING 2>/dev/null | \
-        grep -E "govpn:" | \
+    # Показываем ВСЕ DNAT правила — и govpn и Amnezia и любые другие
+    iptables -t nat -S PREROUTING 2>/dev/null | grep "DNAT" | \
+        while read -r rule; do
+            local proto port dest source comment
+            proto=$(echo "$rule" | grep -oP '\-p \K\w+')
+            port=$(echo "$rule" | grep -oP 'dpt:\K[0-9]+')
+            dest=$(echo "$rule" | grep -oP 'to:\K[\d.:]+')
+            comment=$(echo "$rule" | grep -oP 'comment "\K[^"]+' || echo "")
+            [ -n "$port" ] && [ -n "$dest" ] && \
+                echo "${proto:-any}|${port}|${dest}|${comment}"
+        done
+}
+
+get_govpn_rules() {
+    # Только правила добавленные govpn (для удаления)
+    iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:" | \
         while read -r rule; do
             local proto port dest
             proto=$(echo "$rule" | grep -oP '\-p \K\w+')
             port=$(echo "$rule" | grep -oP 'dpt:\K[0-9]+')
             dest=$(echo "$rule" | grep -oP 'to:\K[\d.:]+')
-            [ -n "$proto" ] && [ -n "$port" ] && [ -n "$dest" ] && \
-                echo "${proto}|${port}|${dest}"
+            [ -n "$port" ] && [ -n "$dest" ] && echo "${proto}|${port}|${dest}"
         done
 }
 
@@ -940,15 +953,29 @@ iptables_menu() {
         echo -e "\n${CYAN}━━━ iptables Проброс ━━━${NC}\n"
         echo -e "  ${WHITE}Этот сервер: ${GREEN}${MY_IP}${NC}\n"
 
-        # Показать активные правила
+        # Показать все DNAT правила
         local rules; rules=$(get_rules_list)
         if [ -n "$rules" ]; then
-            echo -e "${WHITE}Активные правила:${NC}"
-            while IFS='|' read -r proto port dest; do
+            echo -e "${WHITE}Активные правила DNAT:${NC}"
+            while IFS='|' read -r proto port dest comment; do
                 local dest_ip="${dest%:*}" dest_port="${dest#*:}"
-                echo -e "  ${GREEN}●${NC} ${proto} :${port} → $(fmt_ip "$dest_ip"):${dest_port}"
+                local dest_label; dest_label=$(fmt_ip "$dest_ip")
+                local tag=""
+                if echo "$comment" | grep -q "govpn:"; then
+                    tag=" ${CYAN}[govpn]${NC}"
+                elif [ -n "$comment" ]; then
+                    tag=" ${YELLOW}[${comment}]${NC}"
+                else
+                    tag=" ${YELLOW}[внешнее]${NC}"
+                fi
+                # Проверяем петлю на себя
+                local loop=""
+                [ "$dest_ip" = "$MY_IP" ] && loop=" ${YELLOW}← себя${NC}"
+                echo -e "  ${GREEN}●${NC} ${proto} :${port} → ${dest_label}:${dest_port}${tag}${loop}"
             done <<< "$rules"
             echo ""
+        else
+            echo -e "  ${YELLOW}Правил нет${NC}\n"
         fi
 
         echo -e "  ${YELLOW}[1]${NC}  AmneziaWG / WireGuard (UDP)"
@@ -973,7 +1000,9 @@ iptables_menu() {
                     iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:" | \
                         sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
                     save_iptables
-                    echo -e "${GREEN}Сброшено.${NC}"; sleep 1
+                    echo -e "${GREEN}Правила govpn сброшены.${NC}"
+                    echo -e "${YELLOW}Внешние правила (Amnezia) не затронуты.${NC}"
+                    sleep 2
                 } ;;
             0|"") return ;;
         esac
@@ -1053,22 +1082,35 @@ _delete_rule() {
 
     clear
     echo -e "\n${CYAN}━━━ Удалить правило ━━━${NC}\n"
+    echo -e "${WHITE}Удалить можно только правила govpn. Внешние правила (Amnezia) удаляются через их приложение.${NC}\n"
+
     local -a rule_arr=()
     local i=1
-    while IFS='|' read -r proto port dest; do
-        echo -e "  ${YELLOW}[$i]${NC} ${proto} :${port} → ${dest}"
-        rule_arr+=("${proto}|${port}|${dest}")
-        ((i++))
+    while IFS='|' read -r proto port dest comment; do
+        local dest_ip="${dest%:*}" dest_port="${dest#*:}"
+        local is_govpn=0
+        echo "$comment" | grep -q "govpn:" && is_govpn=1
+
+        if [ "$is_govpn" -eq 1 ]; then
+            echo -e "  ${YELLOW}[$i]${NC} ${proto} :${port} → ${dest_ip}:${dest_port} ${CYAN}[govpn]${NC}"
+            rule_arr+=("${proto}|${port}|${dest}|${comment}")
+            ((i++))
+        else
+            echo -e "  ${WHITE}    ${proto} :${port} → ${dest_ip}:${dest_port} ${YELLOW}[внешнее — нельзя удалить]${NC}"
+        fi
     done <<< "$rules"
+
+    [ ${#rule_arr[@]} -eq 0 ] && echo -e "\n${YELLOW}Нет правил govpn для удаления.${NC}" && \
+        read -p "Enter..." && return
+
     echo -e "  ${YELLOW}[0]${NC} Назад"
     echo ""
     read -p "Выбор: " ch
     [[ "$ch" == "0" || -z "$ch" ]] && return
     [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#rule_arr[@]} )) || return
 
-    IFS='|' read -r proto port dest <<< "${rule_arr[$((ch-1))]}"
-    local comment="govpn:${port}:${proto}"
-    iptables -t nat -S PREROUTING 2>/dev/null | grep "$comment" | \
+    IFS='|' read -r proto port dest comment <<< "${rule_arr[$((ch-1))]}"
+    iptables -t nat -S PREROUTING 2>/dev/null | grep "${comment}" | \
         sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
     save_iptables
     echo -e "${GREEN}  ✓ Удалено.${NC}"
@@ -1604,6 +1646,900 @@ _full_uninstall() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  ADGUARD HOME
+# ═══════════════════════════════════════════════════════════════
+
+AGH_DIR="/opt/AdGuardHome"
+AGH_CONF="${AGH_DIR}/AdGuardHome.yaml"
+AGH_CLIENTS_FILE="${CONF_DIR}/adguard_clients.list"
+AGH_MARKER_B="# --- GOVPN AGH BEGIN ---"
+AGH_MARKER_E="# --- GOVPN AGH END ---"
+
+_agh_running() { systemctl is-active AdGuardHome &>/dev/null 2>&1; }
+
+_agh_installed() { [ -f "${AGH_DIR}/AdGuardHome" ]; }
+
+_agh_port() {
+    grep "^  port:" "$AGH_CONF" 2>/dev/null | head -1 | awk '{print $2}' || echo "5335"
+}
+
+_agh_check_port() {
+    local port="$1"
+    ss -tlnup 2>/dev/null | grep -q ":${port} " && return 1 || return 0
+}
+
+_agh_ask_port() {
+    local default_port="5335"
+    # Проверяем 53
+    if _agh_check_port 53; then
+        default_port="53"
+        echo -e "  ${GREEN}✓ Порт 53 свободен${NC}"
+    else
+        local occupant; occupant=$(ss -tlnup 2>/dev/null | grep ":53 " | \
+            sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
+        echo -e "  ${YELLOW}⚠ Порт 53 занят: ${occupant}${NC}"
+        echo -e "  ${WHITE}Рекомендуется: ${GREEN}5335${NC}"
+    fi
+
+    # Проверяем предложенный порт
+    if ! _agh_check_port "$default_port" 2>/dev/null; then
+        echo -e "  ${YELLOW}⚠ Порт ${default_port} тоже занят!${NC}"
+        default_port="5353"
+    fi
+
+    echo -e "\n  ${WHITE}DNS порт для AdGuard Home:${NC}"
+    echo -e "  ${CYAN}Enter${NC} — использовать ${GREEN}${default_port}${NC}, или введите свой:"
+    read -p "  > " user_port
+    if [ -z "$user_port" ]; then
+        echo "$default_port"
+    else
+        validate_port "$user_port" && echo "$user_port" || echo "$default_port"
+    fi
+}
+
+_agh_install() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка AdGuard Home ━━━${NC}\n"
+
+    echo -e "${YELLOW}[1/5]${NC} Скачивание AdGuard Home..."
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *) echo -e "${RED}  ✗ Архитектура не поддерживается${NC}"; return 1 ;;
+    esac
+
+    local url="https://static.adguard.com/adguardhome/release/AdGuardHome_linux_${arch}.tar.gz"
+    mkdir -p /tmp/agh_install
+    curl -fsSL "$url" -o /tmp/agh_install/agh.tar.gz 2>/dev/null || {
+        echo -e "${RED}  ✗ Не удалось скачать${NC}"; return 1
+    }
+    tar -xzf /tmp/agh_install/agh.tar.gz -C /tmp/agh_install/ 2>/dev/null
+    mkdir -p "$AGH_DIR"
+    cp /tmp/agh_install/AdGuardHome/AdGuardHome "$AGH_DIR/"
+    chmod +x "${AGH_DIR}/AdGuardHome"
+    rm -rf /tmp/agh_install
+    echo -e "${GREEN}  ✓${NC}"
+
+    echo -e "${YELLOW}[2/5]${NC} Выбор DNS порта..."
+    local dns_port; dns_port=$(_agh_ask_port)
+    echo -e "${GREEN}  ✓ Порт: ${dns_port}${NC}"
+
+    echo -e "${YELLOW}[3/5]${NC} Отключение systemd-resolved stub listener..."
+    if systemctl is-active systemd-resolved &>/dev/null && [ "$dns_port" = "53" ]; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        cat > /etc/systemd/resolved.conf.d/govpn.conf << 'EOF'
+[Resolve]
+DNSStubListener=no
+EOF
+        systemctl restart systemd-resolved > /dev/null 2>&1
+        echo -e "${GREEN}  ✓ stub listener отключён${NC}"
+    else
+        echo -e "${GREEN}  ✓ не нужно (порт ${dns_port})${NC}"
+    fi
+
+    echo -e "${YELLOW}[4/5]${NC} Создание конфигурации..."
+    cat > "$AGH_CONF" << EOF
+bind_host: 0.0.0.0
+bind_port: 3000
+users:
+  - name: admin
+    password: \$2a\$10\$NOTSET
+auth_attempts: 5
+block_auth_min: 15
+http_proxy: ""
+language: ""
+theme: auto
+debug_pprof: false
+web_session_ttl: 720
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: ${dns_port}
+  anonymize_client_ip: false
+  ratelimit: 20
+  ratelimit_subnet_len_ipv4: 24
+  ratelimit_subnet_len_ipv6: 56
+  ratelimit_whitelist: []
+  refuse_any: true
+  upstreams:
+    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
+  bootstrap_dns:
+    - 1.1.1.1
+    - 8.8.8.8
+  fallback_dns: []
+  upstream_mode: parallel
+  fastest_timeout: 1s
+  allowed_clients: []
+  disallowed_clients: []
+  blocked_hosts:
+    - version.bind
+    - id.server
+    - hostname.bind
+  trusted_proxies:
+    - 127.0.0.0/8
+    - ::1/128
+  cache_size: 4194304
+  cache_ttl_min: 0
+  cache_ttl_max: 0
+  cache_optimistic: true
+  bogus_nxdomain: []
+  aaaa_disabled: false
+  enable_dnssec: false
+  edns_client_subnet:
+    custom_ip: ""
+    enabled: false
+    use_custom: false
+  max_goroutines: 300
+  handle_ddr: true
+  ipset: []
+  ipset_file: ""
+  bootstrap_prefer_ipv6: false
+  upstream_timeout: 10s
+  private_networks: []
+  use_private_ptr_resolvers: true
+  local_ptr_upstreams: []
+  use_dns64: false
+  dns64_prefixes: []
+  serve_http3: false
+  use_http3_upstreams: false
+  serve_plain_dns: true
+  hostsfile_enabled: true
+filtering:
+  blocking_ipv4: ""
+  blocking_ipv6: ""
+  blocked_response_ttl: 10
+  protection_disabled_until: null
+  safe_search:
+    enabled: false
+    bing: true
+    duckduckgo: true
+    ecosia: true
+    google: true
+    pixabay: true
+    yandex: true
+    youtube: true
+  blocking_mode: default
+  parental_block_host: family-block.dns.adguard.com
+  safebrowsing_block_host: standard-block.dns.adguard.com
+  rewrites: []
+  safe_browsing_cache_size: 1048576
+  safe_search_cache_size: 1048576
+  parental_cache_size: 1048576
+  cache_time: 30
+  filters_update_interval: 24
+  blocked_services:
+    schedule:
+      time_zone: Local
+    ids: []
+  custom_blocked_response: ""
+  filtering_enabled: true
+  filters:
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+      name: AdGuard DNS filter
+      id: 1
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
+      name: AdGuard DNS Popup Hosts filter
+      id: 2
+    - enabled: true
+      url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+      name: StevenBlack unified hosts
+      id: 3
+  whitelist_filters: []
+  user_rules: []
+  parental_enabled: false
+  safebrowsing_enabled: false
+log:
+  enabled: true
+  file: ""
+  max_backups: 0
+  max_size: 100
+  max_age: 3
+  compress: false
+  local_time: true
+  verbose: false
+os:
+  group: ""
+  user: ""
+  rlimit_nofile: 0
+schema_version: 28
+EOF
+
+    save_config "AGH_DNS_PORT" "$dns_port"
+    echo -e "${GREEN}  ✓ Конфиг создан${NC}"
+
+    echo -e "${YELLOW}[5/5]${NC} Запуск сервиса..."
+    "${AGH_DIR}/AdGuardHome" -s install > /dev/null 2>&1
+    systemctl enable AdGuardHome > /dev/null 2>&1
+    systemctl start AdGuardHome > /dev/null 2>&1
+    sleep 2
+
+    _agh_running && echo -e "${GREEN}  ✓ AdGuard Home запущен${NC}" || {
+        echo -e "${RED}  ✗ Не запустился${NC}"
+        return 1
+    }
+
+    log_action "AGH INSTALL: port=${dns_port}"
+    echo -e "\n${GREEN}AdGuard Home установлен!${NC}"
+    echo -e "${WHITE}Веб-панель: ${CYAN}http://${MY_IP}:3000${NC}"
+    echo -e "${WHITE}DNS порт: ${CYAN}${dns_port}${NC}"
+    return 0
+}
+
+_agh_apply_clients() {
+    local iface; iface=$(_awg_iface)
+    local -a selected=("$@")
+    local dns_port; dns_port=$(grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2)
+    dns_port="${dns_port:-5335}"
+
+    # Очистить старые правила
+    iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:agh" | \
+        sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
+
+    [ "${#selected[@]}" -eq 0 ] && return 0
+
+    for ip in "${selected[@]}"; do
+        # Редирект DNS трафика клиента на AdGuard
+        iptables -t nat -A PREROUTING -i "$iface" -s "$ip" \
+            -p udp --dport 53 -j REDIRECT --to-port "$dns_port" \
+            -m comment --comment "govpn:agh:${ip}" > /dev/null 2>&1
+        iptables -t nat -A PREROUTING -i "$iface" -s "$ip" \
+            -p tcp --dport 53 -j REDIRECT --to-port "$dns_port" \
+            -m comment --comment "govpn:agh:${ip}" > /dev/null 2>&1
+    done
+    save_iptables
+}
+
+_agh_patch_start_sh() {
+    # Аналогично WARP — для контейнера Amnezia
+    local start_sh="/opt/amnezia/start.sh"
+    local iface; iface=$(_awg_iface)
+    local dns_port; dns_port=$(grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2)
+    dns_port="${dns_port:-5335}"
+    local -a selected=("$@")
+
+    docker exec "$AWG_CONTAINER" sh -c \
+        "[ -f /opt/amnezia/start.sh.govpn-backup ] || cp '${start_sh}' /opt/amnezia/start.sh.govpn-backup" 2>/dev/null
+
+    local block="${AGH_MARKER_B}"$'\n'
+    for ip in "${selected[@]}"; do
+        block+="iptables -t nat -C PREROUTING -i ${iface} -s ${ip} -p udp --dport 53 -j REDIRECT --to-port ${dns_port} 2>/dev/null || \\"$'\n'
+        block+="    iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p udp --dport 53 -j REDIRECT --to-port ${dns_port}"$'\n'
+        block+="iptables -t nat -C PREROUTING -i ${iface} -s ${ip} -p tcp --dport 53 -j REDIRECT --to-port ${dns_port} 2>/dev/null || \\"$'\n'
+        block+="    iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p tcp --dport 53 -j REDIRECT --to-port ${dns_port}"$'\n'
+    done
+    block+="${AGH_MARKER_E}"
+
+    docker exec "$AWG_CONTAINER" sh -c \
+        "sed -i '/# --- GOVPN AGH BEGIN ---/,/# --- GOVPN AGH END ---/d' '${start_sh}' 2>/dev/null || true"
+    docker exec "$AWG_CONTAINER" bash -c "printf '\n%s\n' '${block}' >> '${start_sh}'; chmod +x '${start_sh}'" 2>/dev/null
+}
+
+adguard_menu() {
+    if ! _agh_installed; then
+        clear
+        echo -e "\n${CYAN}━━━ AdGuard Home ━━━${NC}\n"
+        echo -e "${WHITE}AdGuard Home не установлен.${NC}"
+        echo -e "${WHITE}Установить DNS фильтрацию рекламы для клиентов?${NC}\n"
+        echo -e "  ${YELLOW}[1]${NC} Установить AdGuard Home"
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        read -p "Выбор: " ch
+        [ "$ch" = "1" ] && _agh_install || return
+        _agh_running || { read -p "Enter..."; return; }
+    fi
+
+    # Загружаем список клиентов с AGH
+    local -a agh_sel=()
+    local agh_loaded=0
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ AdGuard Home — DNS фильтрация ━━━${NC}\n"
+
+        local dns_port; dns_port=$(grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2)
+        dns_port="${dns_port:-5335}"
+
+        if _agh_running; then
+            echo -e "  ${WHITE}Статус:   ${GREEN}● запущен${NC}"
+            echo -e "  ${WHITE}DNS порт: ${CYAN}${dns_port}${NC}"
+            echo -e "  ${WHITE}Веб:      ${CYAN}http://${MY_IP}:3000${NC}"
+        else
+            echo -e "  ${WHITE}Статус:   ${RED}● не запущен${NC}"
+        fi
+        echo ""
+
+        # Клиенты AWG
+        local -a all_ips=()
+        if is_amnezia; then
+            while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
+        fi
+
+        # Также клиенты из iptables правил (для non-Amnezia)
+        if [ ${#all_ips[@]} -eq 0 ]; then
+            echo -e "${YELLOW}Нет клиентов AWG.${NC}\n"
+        else
+            if [ "$agh_loaded" -eq 0 ]; then
+                while IFS= read -r ip; do [ -n "$ip" ] && agh_sel+=("$ip"); done < \
+                    <([ -f "$AGH_CLIENTS_FILE" ] && cat "$AGH_CLIENTS_FILE" || true)
+                agh_loaded=1
+            fi
+
+            echo -e "${WHITE}Клиенты (DNS фильтрация):${NC}"
+            for i in "${!all_ips[@]}"; do
+                local ip="${all_ips[$i]}"
+                local name; name=$(_awg_client_name "$ip")
+                local label="${name:-${ip%/32}}"
+                local in_agh=0
+                for s in "${agh_sel[@]}"; do [ "$s" = "$ip" ] && in_agh=1; done
+                if [ "$in_agh" -eq 1 ]; then
+                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}"
+                else
+                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
+                fi
+            done
+            echo ""
+        fi
+
+        echo -e "  ${YELLOW}[a]${NC}  Включить всем"
+        echo -e "  ${YELLOW}[n]${NC}  Выключить всем"
+        echo -e "  ${YELLOW}[s]${NC}  Применить"
+        echo -e "  ${YELLOW}[r]${NC}  Перезапустить AdGuard"
+        echo -e "  ${RED}[x]${NC}  Удалить AdGuard Home"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Выбор: " ch
+
+        case "$ch" in
+            [1-9])
+                local idx=$((ch-1))
+                [ -z "${all_ips[$idx]:-}" ] && continue
+                local tip="${all_ips[$idx]}"
+                local already=0
+                for s in "${agh_sel[@]}"; do [ "$s" = "$tip" ] && already=1; done
+                if [ "$already" -eq 1 ]; then
+                    local -a tmp=()
+                    for s in "${agh_sel[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
+                    agh_sel=("${tmp[@]}")
+                else
+                    agh_sel+=("$tip")
+                fi ;;
+            a|A) agh_sel=("${all_ips[@]}") ;;
+            n|N) agh_sel=() ;;
+            s|S)
+                echo ""
+                echo -e "${YELLOW}[1/3]${NC} Сохраняем список..."
+                printf '%s\n' "${agh_sel[@]}" > "$AGH_CLIENTS_FILE"
+                echo -e "${GREEN}  ✓${NC}"
+
+                echo -e "${YELLOW}[2/3]${NC} Применяем iptables правила..."
+                if is_amnezia; then
+                    # Внутри контейнера
+                    docker exec "$AWG_CONTAINER" sh -c "
+                        iptables -t nat -S PREROUTING | grep 'govpn:agh' | \
+                            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null; done
+                    " > /dev/null 2>&1
+                    local iface; iface=$(_awg_iface)
+                    for ip in "${agh_sel[@]}"; do
+                        docker exec "$AWG_CONTAINER" sh -c "
+                            iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p udp --dport 53 \
+                                -j REDIRECT --to-port ${dns_port} 2>/dev/null || true
+                            iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p tcp --dport 53 \
+                                -j REDIRECT --to-port ${dns_port} 2>/dev/null || true
+                        " > /dev/null 2>&1
+                    done
+                else
+                    _agh_apply_clients "${agh_sel[@]}"
+                fi
+                echo -e "${GREEN}  ✓${NC}"
+
+                echo -e "${YELLOW}[3/3]${NC} Персистентность (start.sh)..."
+                is_amnezia && _agh_patch_start_sh "${agh_sel[@]}"
+                echo -e "${GREEN}  ✓${NC}"
+
+                log_action "AGH CLIENTS: ${#agh_sel[@]} с DNS фильтрацией"
+                echo -e "\n${GREEN}Применено. DNS трафик выбранных клиентов → AdGuard Home${NC}"
+                read -p "Нажмите Enter..." ;;
+            r|R)
+                systemctl restart AdGuardHome && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Ошибка${NC}"
+                sleep 1 ;;
+            x|X)
+                read -p "$(echo -e "${RED}Удалить AdGuard Home? (y/n): ${NC}")" c
+                [ "$c" = "y" ] && {
+                    systemctl stop AdGuardHome > /dev/null 2>&1
+                    "${AGH_DIR}/AdGuardHome" -s uninstall > /dev/null 2>&1
+                    rm -rf "$AGH_DIR"
+                    iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:agh" | \
+                        sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
+                    save_iptables
+                    echo -e "${GREEN}Удалён.${NC}"
+                    log_action "AGH UNINSTALL"
+                    read -p "Enter..."; return
+                } ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  УПРАВЛЕНИЕ ПИРАМИ AWG (создание/удаление клиентов)
+# ═══════════════════════════════════════════════════════════════
+
+awg_peers_menu() {
+    if ! is_amnezia; then
+        echo -e "${YELLOW}Amnezia не обнаружен.${NC}"; read -p "Enter..."; return
+    fi
+
+    # Установить qrencode если нужно
+    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Клиенты AWG ━━━${NC}\n"
+        echo -e "  ${WHITE}Контейнер: ${CYAN}${AWG_CONTAINER}${NC}\n"
+
+        # Собираем клиентов и сортируем по имени
+        local conf; conf=$(_awg_conf)
+        local -a all_ips=()
+        while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
+
+        # Сортировка по имени через ассоциативный массив
+        local -a sorted_ips=()
+        if [ ${#all_ips[@]} -gt 0 ]; then
+            # Собираем пары "имя|ip" и сортируем
+            local -a pairs=()
+            for ip in "${all_ips[@]}"; do
+                local name; name=$(_awg_client_name "$ip")
+                pairs+=("${name:-zzz}|${ip}")
+            done
+            # Сортируем по имени
+            while IFS='|' read -r _ ip; do
+                sorted_ips+=("$ip")
+            done < <(printf '%s\n' "${pairs[@]}" | sort -f)
+        fi
+
+        # Получаем wg show один раз для всех (оптимизация)
+        local wg_show
+        wg_show=$(docker exec "$AWG_CONTAINER" sh -c "wg show $(_awg_iface) 2>/dev/null" 2>/dev/null)
+
+        if [ ${#sorted_ips[@]} -gt 0 ]; then
+            echo -e "${WHITE}Клиенты:${NC}"
+            for i in "${!sorted_ips[@]}"; do
+                local ip="${sorted_ips[$i]}"
+                local name; name=$(_awg_client_name "$ip")
+                local bare="${ip%/32}"
+
+                # Хендшейк из кешированного wg show
+                local hshake
+                hshake=$(echo "$wg_show" | \
+                    awk "/allowed ips:.*${bare}/{found=1} found && /latest handshake/{print; found=0}" | \
+                    sed 's/.*latest handshake: //')
+
+                local status_icon="${RED}●${NC}"
+                local status_txt="${RED}не подключён${NC}"
+                if [ -n "$hshake" ]; then
+                    status_icon="${GREEN}●${NC}"
+                    status_txt="${GREEN}${hshake}${NC}"
+                fi
+
+                printf "  ${YELLOW}[%d]${NC} %b ${WHITE}%-20s${NC}  ${CYAN}%s${NC}\n" \
+                    "$((i+1))" "$status_icon" "${name:-$bare}" "$ip"
+                echo -e "       ${status_txt}"
+            done
+        else
+            echo -e "  ${YELLOW}Клиентов нет${NC}"
+        fi
+
+        echo ""
+        echo -e "  ${YELLOW}[+]${NC}   Добавить клиента"
+        [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC} Показать конфиг / QR код"
+        [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[-]${NC}   Удалить клиента"
+        echo -e "  ${YELLOW}[0]${NC}   Назад"
+        echo ""
+        read -p "Выбор: " ch
+
+        case "$ch" in
+            +)  _awg_add_peer ;;
+            -)  _awg_del_peer "${sorted_ips[@]}" ;;
+            0|"") return ;;
+            *)
+                [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#sorted_ips[@]} )) || continue
+                _awg_show_client_menu "${sorted_ips[$((ch-1))]}"
+                ;;
+        esac
+    done
+}
+
+_awg_show_client_menu() {
+    local client_ip="$1"
+    local name; name=$(_awg_client_name "$client_ip")
+    local label="${name:-${client_ip%/32}}"
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Клиент: ${WHITE}${label}${CYAN} ━━━${NC}\n"
+        echo -e "  ${WHITE}IP:   ${CYAN}${client_ip}${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC}  Показать конфиг (текст)"
+        echo -e "  ${YELLOW}[2]${NC}  Показать QR код"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Выбор: " ch
+        case "$ch" in
+            1) _awg_show_config "$client_ip" ;;
+            2) _awg_show_qr "$client_ip" ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+_awg_get_client_config() {
+    local client_ip="$1"
+    local conf; conf=$(_awg_conf)
+
+    # Получаем данные клиента из clientsTable
+    local privkey psk
+    local client_data
+    client_data=$(docker exec "$AWG_CONTAINER" sh -c \
+        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
+
+    # Ищем приватный ключ в файлах клиентов (если сохранён)
+    # В Amnezia приватные ключи хранятся в отдельных файлах или в самом конфиге
+    local client_dir="/opt/amnezia/awg"
+    local bare="${client_ip%/32}"
+
+    # Ищем сохранённый конфиг клиента
+    local saved_conf
+    saved_conf=$(docker exec "$AWG_CONTAINER" sh -c \
+        "find '${client_dir}' -name '*.conf' 2>/dev/null | xargs grep -l '${bare}' 2>/dev/null | grep -v wg0 | head -1")
+
+    if [ -n "$saved_conf" ]; then
+        docker exec "$AWG_CONTAINER" sh -c "cat '${saved_conf}'" 2>/dev/null
+        return 0
+    fi
+
+    # Если конфиг создан нашим скриптом — ищем в govpn storage
+    local govpn_conf="${CONF_DIR}/awg_clients/${bare}.conf"
+    [ -f "$govpn_conf" ] && cat "$govpn_conf" && return 0
+
+    return 1
+}
+
+_awg_show_config() {
+    local client_ip="$1"
+    local name; name=$(_awg_client_name "$client_ip")
+    clear
+    echo -e "\n${CYAN}━━━ Конфиг: ${WHITE}${name:-${client_ip%/32}}${CYAN} ━━━${NC}\n"
+
+    local cfg; cfg=$(_awg_get_client_config "$client_ip")
+    if [ -n "$cfg" ]; then
+        echo -e "${GREEN}${cfg}${NC}"
+    else
+        echo -e "${YELLOW}Конфиг не найден.${NC}"
+        echo -e "${WHITE}Клиент был добавлен через Amnezia приложение —${NC}"
+        echo -e "${WHITE}приватный ключ хранится только на устройстве клиента.${NC}"
+        echo -e "${WHITE}Для повторной выдачи: удалите и создайте клиента заново.${NC}"
+    fi
+
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+_awg_show_qr() {
+    local client_ip="$1"
+    local name; name=$(_awg_client_name "$client_ip")
+    clear
+    echo -e "\n${CYAN}━━━ QR код: ${WHITE}${name:-${client_ip%/32}}${CYAN} ━━━${NC}\n"
+
+    local cfg; cfg=$(_awg_get_client_config "$client_ip")
+    if [ -z "$cfg" ]; then
+        echo -e "${YELLOW}Конфиг не найден.${NC}"
+        echo -e "${WHITE}Клиент добавлен через Amnezia — ключ только на устройстве.${NC}"
+        echo -e "${WHITE}Для повторной выдачи: удалите и создайте клиента заново.${NC}"
+        echo ""
+        read -p "Нажмите Enter..."; return
+    fi
+
+    if command -v qrencode &>/dev/null; then
+        echo "$cfg" | qrencode -t ansiutf8
+    else
+        echo -e "${RED}qrencode не установлен.${NC}"
+        echo -e "${WHITE}Установите: apt-get install qrencode${NC}"
+    fi
+
+    echo ""
+    echo -e "${WHITE}Отсканируйте QR в WireGuard/Amnezia приложении.${NC}"
+    read -p "Нажмите Enter..."
+}
+
+_awg_next_ip() {
+    # Найти следующий свободный IP в подсети 10.8.1.x
+    local conf; conf=$(_awg_conf)
+    local used
+    used=$(docker exec "$AWG_CONTAINER" sh -c "grep 'AllowedIPs' '$conf'" 2>/dev/null | \
+        grep -oE '10\.8\.1\.[0-9]+' | sort -t. -k4 -n)
+    local i=2
+    while echo "$used" | grep -q "10.8.1.${i}"; do ((i++)); done
+    echo "10.8.1.${i}"
+}
+
+_awg_add_peer() {
+    clear
+    echo -e "\n${CYAN}━━━ Добавить клиента AWG ━━━${NC}\n"
+
+    echo -e "${WHITE}Имя клиента (например: iPhone, MacBook):${NC}"
+    read -p "> " peer_name
+    [ -z "$peer_name" ] && return
+
+    echo -e "\n${YELLOW}Генерация ключей...${NC}"
+
+    local privkey pubkey psk client_ip
+    privkey=$(docker exec "$AWG_CONTAINER" sh -c "wg genkey" 2>/dev/null)
+    pubkey=$(echo "$privkey" | docker exec -i "$AWG_CONTAINER" sh -c "wg pubkey" 2>/dev/null)
+    psk=$(docker exec "$AWG_CONTAINER" sh -c "wg genpsk" 2>/dev/null)
+    client_ip=$(_awg_next_ip)
+
+    local conf; conf=$(_awg_conf)
+    local server_pubkey
+    server_pubkey=$(docker exec "$AWG_CONTAINER" sh -c "wg show $(_awg_iface) public-key" 2>/dev/null)
+    local server_port
+    server_port=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | \
+        grep "^${AWG_CONTAINER}" | grep -oE ':[0-9]+->.*udp' | grep -oE '^:[0-9]+' | \
+        tr -d ':' | head -1)
+
+    # Выбор endpoint из алиасов
+    echo -e "\n${WHITE}Через какой IP клиент будет подключаться?${NC}\n"
+    local -a ep_ips=() ep_labels=()
+
+    # Этот сервер — первый
+    ep_ips+=("$MY_IP")
+    ep_labels+=("Прямой  ${MY_IP}:${server_port}")
+
+    # Серверы из алиасов (кроме текущего)
+    if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+        while IFS='=' read -r ip val; do
+            [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]] || continue
+            [ "$ip" = "$MY_IP" ] && continue
+            local aname; aname=$(echo "$val" | cut -d'|' -f1)
+            local acountry; acountry=$(echo "$val" | cut -d'|' -f3)
+            ep_ips+=("$ip")
+            ep_labels+=("${aname:-$ip}  ${ip}:${server_port}  (${acountry})")
+        done < "$ALIASES_FILE"
+    fi
+
+    ep_ips+=("custom")
+    ep_labels+=("Ввести вручную")
+
+    for i in "${!ep_labels[@]}"; do
+        echo -e "  ${YELLOW}[$((i+1))]${NC} ${ep_labels[$i]}"
+    done
+    echo ""
+    read -p "Выбор [1]: " ep_choice
+    [ -z "$ep_choice" ] && ep_choice=1
+
+    local endpoint_ip="${MY_IP}"
+    local endpoint_port="${server_port}"
+
+    if [[ "$ep_choice" =~ ^[0-9]+$ ]] && (( ep_choice >= 1 && ep_choice <= ${#ep_ips[@]} )); then
+        local sel="${ep_ips[$((ep_choice-1))]}"
+        if [ "$sel" = "custom" ]; then
+            echo -e "${WHITE}Введите IP:порт (например 155.212.247.249:47684):${NC}"
+            read -p "> " custom_ep
+            endpoint_ip="${custom_ep%%:*}"
+            endpoint_port="${custom_ep##*:}"
+        else
+            endpoint_ip="$sel"
+            # Спросить порт если отличается
+            echo -e "${WHITE}Порт (Enter = ${server_port}):${NC}"
+            read -p "> " custom_port
+            [ -n "$custom_port" ] && endpoint_port="$custom_port"
+        fi
+    fi
+
+    local server_endpoint="${endpoint_ip}:${endpoint_port}"
+
+    # Параметры обфускации из серверного конфига
+    local jc jmin jmax s1 s2 h1 h2 h3 h4
+    jc=$(docker exec "$AWG_CONTAINER" sh -c "grep '^Jc' '$conf'" 2>/dev/null | awk '{print $3}')
+    jmin=$(docker exec "$AWG_CONTAINER" sh -c "grep '^Jmin' '$conf'" 2>/dev/null | awk '{print $3}')
+    jmax=$(docker exec "$AWG_CONTAINER" sh -c "grep '^Jmax' '$conf'" 2>/dev/null | awk '{print $3}')
+    s1=$(docker exec "$AWG_CONTAINER" sh -c "grep '^S1' '$conf'" 2>/dev/null | awk '{print $3}')
+    s2=$(docker exec "$AWG_CONTAINER" sh -c "grep '^S2' '$conf'" 2>/dev/null | awk '{print $3}')
+    h1=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H1' '$conf'" 2>/dev/null | awk '{print $3}')
+    h2=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H2' '$conf'" 2>/dev/null | awk '{print $3}')
+    h3=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H3' '$conf'" 2>/dev/null | awk '{print $3}')
+    h4=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H4' '$conf'" 2>/dev/null | awk '{print $3}')
+
+    # Собираем конфиг клиента
+    local client_conf
+    client_conf="[Interface]
+PrivateKey = ${privkey}
+Address = ${client_ip}/32
+DNS = ${MY_IP}
+Jc = ${jc:-4}
+Jmin = ${jmin:-40}
+Jmax = ${jmax:-70}
+S1 = ${s1:-0}
+S2 = ${s2:-0}
+H1 = ${h1:-1}
+H2 = ${h2:-2}
+H3 = ${h3:-3}
+H4 = ${h4:-4}
+
+[Peer]
+PublicKey = ${server_pubkey}
+PresharedKey = ${psk}
+AllowedIPs = 0.0.0.0/0
+Endpoint = ${server_endpoint}
+PersistentKeepalive = 25"
+
+    # Сохраняем конфиг на диск для повторной выдачи
+    local bare="${client_ip%/32}"
+    mkdir -p "${CONF_DIR}/awg_clients"
+    echo "$client_conf" > "${CONF_DIR}/awg_clients/${bare}.conf"
+    chmod 600 "${CONF_DIR}/awg_clients/${bare}.conf"
+
+    # Добавить пир в конфиг контейнера
+    docker exec "$AWG_CONTAINER" sh -c "
+printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s/32\n' \
+    '${pubkey}' '${psk}' '${client_ip%/32}' >> '$conf'
+" 2>/dev/null
+
+    # Обновить clientsTable
+    local ts; ts=$(date -u '+%a %b %d %T %Y')
+    docker exec "$AWG_CONTAINER" python3 -c "
+import json
+try:
+    with open('/opt/amnezia/awg/clientsTable') as f:
+        data = json.load(f)
+except:
+    data = []
+data.append({
+    'clientId': '${pubkey}',
+    'userData': {
+        'clientName': '${peer_name}',
+        'allowedIps': '${client_ip}/32',
+        'creationDate': '${ts}',
+        'dataReceived': '0 B',
+        'dataSent': '0 B',
+        'latestHandshake': 'never'
+    }
+})
+with open('/opt/amnezia/awg/clientsTable', 'w') as f:
+    json.dump(data, f, indent=4)
+" 2>/dev/null
+
+    # Применить без перезапуска
+    docker exec "$AWG_CONTAINER" bash -c \
+        "wg addconf $(_awg_iface) <(printf '[Peer]\nPublicKey = ${pubkey}\nPresharedKey = ${psk}\nAllowedIPs = ${client_ip}/32\n')" \
+        2>/dev/null || \
+        docker exec "$AWG_CONTAINER" sh -c \
+            "wg syncconf $(_awg_iface) <(wg-quick strip '$conf')" 2>/dev/null
+
+    echo -e "${GREEN}  ✓ Клиент создан: ${peer_name} (${client_ip})${NC}\n"
+    log_action "AWG PEER ADD: ${peer_name} ${client_ip}"
+
+    # Показываем конфиг и QR сразу
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}Конфиг:${NC}\n"
+    echo -e "${GREEN}${client_conf}${NC}"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    if command -v qrencode &>/dev/null; then
+        echo -e "\n${WHITE}QR код:${NC}\n"
+        echo "$client_conf" | qrencode -t ansiutf8
+    fi
+
+    echo -e "\n${WHITE}Конфиг сохранён: ${CYAN}${CONF_DIR}/awg_clients/${bare}.conf${NC}"
+    echo -e "${WHITE}Его можно получить повторно через п.5 → номер клиента.${NC}"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+_awg_del_peer() {
+    local -a sorted_ips=("$@")
+    clear
+    echo -e "\n${CYAN}━━━ Удалить клиента AWG ━━━${NC}\n"
+
+    local conf; conf=$(_awg_conf)
+
+    if [ ${#sorted_ips[@]} -eq 0 ]; then
+        while IFS= read -r ip; do [ -n "$ip" ] && sorted_ips+=("$ip"); done <<< "$(_awg_all_clients)"
+    fi
+
+    [ ${#sorted_ips[@]} -eq 0 ] && echo -e "${YELLOW}Нет клиентов.${NC}" && read -p "Enter..." && return
+
+    for i in "${!sorted_ips[@]}"; do
+        local ip="${sorted_ips[$i]}"
+        local name; name=$(_awg_client_name "$ip")
+        echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}${name:-${ip%/32}}${NC}  ${ip}"
+    done
+    echo -e "  ${YELLOW}[0]${NC} Назад"
+    echo ""
+    read -p "Выбор: " ch
+    [[ "$ch" == "0" || -z "$ch" ]] && return
+    [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#sorted_ips[@]} )) || return
+
+    local del_ip="${sorted_ips[$((ch-1))]}"
+    local del_name; del_name=$(_awg_client_name "$del_ip")
+    local bare="${del_ip%/32}"
+
+    read -p "$(echo -e "${RED}Удалить ${del_name:-$del_ip}? (y/n): ${NC}")" c
+    [ "$c" != "y" ] && return
+
+    # Найти pubkey клиента из конфига
+    local del_pubkey
+    del_pubkey=$(docker exec "$AWG_CONTAINER" python3 -c "
+import re
+with open('${conf}') as f:
+    content = f.read()
+# Найти блок Peer с нужным IP
+match = re.search(r'\[Peer\][^\[]*AllowedIPs\s*=\s*${bare}/32[^\[]*', content)
+if match:
+    pk = re.search(r'PublicKey\s*=\s*(\S+)', match.group())
+    if pk: print(pk.group(1))
+" 2>/dev/null)
+
+    # Удалить из активного wg
+    [ -n "$del_pubkey" ] && \
+        docker exec "$AWG_CONTAINER" sh -c "wg set $(_awg_iface) peer '${del_pubkey}' remove" 2>/dev/null
+
+    # Удалить из конфига
+    docker exec "$AWG_CONTAINER" python3 -c "
+import re
+with open('${conf}') as f:
+    content = f.read()
+content = re.sub(r'\n\[Peer\][^\[]*AllowedIPs\s*=\s*${bare}/32[^\[]*', '', content)
+with open('${conf}', 'w') as f:
+    f.write(content)
+" 2>/dev/null
+
+    # Удалить из clientsTable
+    docker exec "$AWG_CONTAINER" python3 -c "
+import json
+try:
+    with open('/opt/amnezia/awg/clientsTable') as f:
+        data = json.load(f)
+    data = [c for c in data
+            if c.get('userData',{}).get('allowedIps','').split('/')[0] != '${bare}']
+    with open('/opt/amnezia/awg/clientsTable', 'w') as f:
+        json.dump(data, f, indent=4)
+except Exception as e:
+    print(f'Error: {e}')
+" 2>/dev/null
+
+    # Удалить сохранённый конфиг
+    rm -f "${CONF_DIR}/awg_clients/${bare}.conf"
+
+    echo -e "${GREEN}  ✓ Удалён: ${del_name:-$del_ip}${NC}"
+    log_action "AWG PEER DEL: ${del_name} ${del_ip}"
+    read -p "Нажмите Enter..."
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  ГЛАВНОЕ МЕНЮ
 # ═══════════════════════════════════════════════════════════════
 
@@ -1633,6 +2569,15 @@ show_menu() {
 
         # WARP статус
         echo -e "  ${WHITE}WARP: $(warp_overall_status)${NC}"
+
+        # AdGuard статус
+        if _agh_installed; then
+            local agh_st
+            _agh_running && agh_st="${GREEN}● запущен (DNS :$(_agh_port))${NC}" || \
+                agh_st="${RED}● не запущен${NC}"
+            echo -e "  ${WHITE}AGH:  ${agh_st}"
+        fi
+
         echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
 
         # Адаптивное меню
@@ -1642,14 +2587,16 @@ show_menu() {
             echo -e "  2)  Тест WARP"
         fi
         if is_amnezia; then
-            echo -e "  3)  Клиенты Amnezia → WARP"
+            echo -e "  3)  Клиенты → WARP"
+            echo -e "  4)  DNS фильтрация (AdGuard)"
+            echo -e "  5)  Управление клиентами AWG"
         fi
         echo -e " ${CYAN}── СЕТЬ ─────────────────────────────${NC}"
-        echo -e "  4)  iptables проброс"
+        echo -e "  6)  iptables проброс"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
-        echo -e "  5)  Серверы, скорость, тесты"
+        echo -e "  7)  Серверы, скорость, тесты"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
-        echo -e "  6)  Система и управление"
+        echo -e "  8)  Система и управление"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         read -p "Выбор: " ch
@@ -1660,9 +2607,11 @@ show_menu() {
             1) ! is_bridge && warp_setup_wizard ;;
             2) ! is_bridge && warp_test ;;
             3) is_amnezia && awg_clients_menu ;;
-            4) iptables_menu ;;
-            5) tools_menu ;;
-            6) system_menu ;;
+            4) is_amnezia && adguard_menu ;;
+            5) is_amnezia && awg_peers_menu ;;
+            6) iptables_menu ;;
+            7) tools_menu ;;
+            8) system_menu ;;
             0)
                 clear
                 [ ! -x "$INSTALL_PATH" ] && {
