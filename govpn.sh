@@ -100,28 +100,35 @@ detect_mode() {
     systemctl is-active x-ui &>/dev/null 2>&1 && has_3xui=1
     [ "$has_3xui" -eq 0 ] && [ -f "/etc/x-ui/x-ui.db" ] && has_3xui=1
 
-    # Проверяем AmneziaWG — ищем контейнер с наибольшим числом пиров
+    # Проверяем AmneziaWG — ищем контейнер с наибольшим числом клиентов
     if command -v docker &>/dev/null; then
-        local best_ct="" best_peers=0
+        local best_ct="" best_count=0
         while IFS= read -r ct; do
             [ -z "$ct" ] && continue
-            # Считаем пиры в конфиге (не активные хендшейки)
-            local peers=0
-            local conf_file
-            for f in /opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf; do
-                if docker exec "$ct" sh -c "[ -f '$f' ]" 2>/dev/null; then
-                    peers=$(docker exec "$ct" sh -c "grep -c '\[Peer\]' '$f' 2>/dev/null || echo 0" 2>/dev/null)
-                    peers=$(echo "$peers" | tr -d '[:space:]')
-                    break
-                fi
-            done
-            if (( peers > best_peers )); then
-                best_peers=$peers
+            # Считаем клиентов в clientsTable (надёжнее чем конфиг)
+            local count=0
+            count=$(docker exec "$ct" sh -c \
+                "grep -c 'clientId' /opt/amnezia/awg/clientsTable 2>/dev/null || echo 0" 2>/dev/null)
+            count=$(echo "$count" | tr -d '[:space:]')
+            [[ "$count" =~ ^[0-9]+$ ]] || count=0
+            # Если clientsTable пуст — считаем пиры в конфиге
+            if [ "$count" -eq 0 ]; then
+                for f in /opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf; do
+                    if docker exec "$ct" sh -c "[ -f '$f' ]" 2>/dev/null; then
+                        count=$(docker exec "$ct" sh -c \
+                            "grep -c '\[Peer\]' '$f' 2>/dev/null || echo 0" 2>/dev/null)
+                        count=$(echo "$count" | tr -d '[:space:]')
+                        break
+                    fi
+                done
+            fi
+            if (( count > best_count )); then
+                best_count=$count
                 best_ct=$ct
             fi
         done < <(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg")
 
-        # Если нет пиров нигде — берём любой amnezia контейнер
+        # Fallback — любой amnezia контейнер
         if [ -z "$best_ct" ]; then
             best_ct=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg" | head -1)
         fi
@@ -778,6 +785,34 @@ warp_test() {
 awg_clients_menu() {
     if ! is_amnezia; then
         echo -e "${YELLOW}Amnezia не обнаружен.${NC}"; read -p "Enter..."; return
+    fi
+
+    # Дать возможность сменить контейнер если их несколько
+    local -a containers=()
+    mapfile -t containers < <(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg" | sort)
+    if [ "${#containers[@]}" -gt 1 ]; then
+        clear
+        echo -e "\n${CYAN}━━━ Выбор контейнера ━━━${NC}\n"
+        for i in "${!containers[@]}"; do
+            local ct="${containers[$i]}"
+            local cnt; cnt=$(docker exec "$ct" sh -c \
+                "grep -c 'clientId' /opt/amnezia/awg/clientsTable 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+            local active; active=$(docker exec "$ct" sh -c \
+                "wg show 2>/dev/null | grep -c 'latest handshake'" 2>/dev/null | tr -d '[:space:]')
+            local mark=""
+            [ "$ct" = "$AWG_CONTAINER" ] && mark=" ${CYAN}(текущий)${NC}"
+            echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}${ct}${NC}  клиентов: ${GREEN}${cnt:-0}${NC}  активных: ${GREEN}${active:-0}${NC}${mark}"
+        done
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выбор (Enter = ${AWG_CONTAINER}): " ct_choice
+        if [ -z "$ct_choice" ]; then
+            : # оставить текущий
+        elif [ "$ct_choice" = "0" ]; then
+            return
+        elif [[ "$ct_choice" =~ ^[0-9]+$ ]] && (( ct_choice >= 1 && ct_choice <= ${#containers[@]} )); then
+            AWG_CONTAINER="${containers[$((ct_choice-1))]}"
+        fi
     fi
 
     local -a sel_ips=()
@@ -2107,6 +2142,34 @@ awg_peers_menu() {
     fi
 
     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+
+    # Выбор контейнера если их несколько
+    local -a containers=()
+    mapfile -t containers < <(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg" | sort)
+    if [ "${#containers[@]}" -gt 1 ]; then
+        clear
+        echo -e "\n${CYAN}━━━ Выбор контейнера ━━━${NC}\n"
+        for i in "${!containers[@]}"; do
+            local ct="${containers[$i]}"
+            local cnt; cnt=$(docker exec "$ct" sh -c \
+                "grep -c 'clientId' /opt/amnezia/awg/clientsTable 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+            local active; active=$(docker exec "$ct" sh -c \
+                "wg show 2>/dev/null | grep -c 'latest handshake'" 2>/dev/null | tr -d '[:space:]')
+            local mark=""
+            [ "$ct" = "$AWG_CONTAINER" ] && mark=" ${CYAN}(текущий)${NC}"
+            echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}${ct}${NC}  клиентов: ${GREEN}${cnt:-0}${NC}  активных: ${GREEN}${active:-0}${NC}${mark}"
+        done
+        echo -e "  ${YELLOW}[0]${NC} Назад"
+        echo ""
+        read -p "Выбор (Enter = ${AWG_CONTAINER}): " ct_choice
+        if [ -z "$ct_choice" ]; then
+            :
+        elif [ "$ct_choice" = "0" ]; then
+            return
+        elif [[ "$ct_choice" =~ ^[0-9]+$ ]] && (( ct_choice >= 1 && ct_choice <= ${#containers[@]} )); then
+            AWG_CONTAINER="${containers[$((ct_choice-1))]}"
+        fi
+    fi
 
     local sort_mode="name"  # name | ip | activity
 
