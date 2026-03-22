@@ -1180,26 +1180,17 @@ _delete_rule() {
 
     clear
     echo -e "\n${CYAN}━━━ Удалить правило ━━━${NC}\n"
-    echo -e "${WHITE}Удалить можно только правила govpn. Внешние правила (Amnezia) удаляются через их приложение.${NC}\n"
 
     local -a rule_arr=()
     local i=1
     while IFS='|' read -r proto port dest comment; do
         local dest_ip="${dest%:*}" dest_port="${dest#*:}"
-        local is_govpn=0
-        echo "$comment" | grep -q "govpn:" && is_govpn=1
-
-        if [ "$is_govpn" -eq 1 ]; then
-            echo -e "  ${YELLOW}[$i]${NC} ${proto} :${port} → ${dest_ip}:${dest_port} ${CYAN}[govpn]${NC}"
-            rule_arr+=("${proto}|${port}|${dest}|${comment}")
-            ((i++))
-        else
-            echo -e "  ${WHITE}    ${proto} :${port} → ${dest_ip}:${dest_port} ${YELLOW}[внешнее — нельзя удалить]${NC}"
-        fi
+        local tag=""
+        echo "$comment" | grep -q "govpn:" && tag=" ${CYAN}[govpn]${NC}" || tag=" ${YELLOW}[внешнее]${NC}"
+        echo -e "  ${YELLOW}[$i]${NC} ${proto} :${port} → ${dest_ip}:${dest_port}${tag}"
+        rule_arr+=("${proto}|${port}|${dest}|${comment}")
+        ((i++))
     done <<< "$rules"
-
-    [ ${#rule_arr[@]} -eq 0 ] && echo -e "\n${YELLOW}Нет правил govpn для удаления.${NC}" && \
-        read -p "Enter..." && return
 
     echo -e "  ${YELLOW}[0]${NC} Назад"
     echo ""
@@ -1208,8 +1199,19 @@ _delete_rule() {
     [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#rule_arr[@]} )) || return
 
     IFS='|' read -r proto port dest comment <<< "${rule_arr[$((ch-1))]}"
-    iptables -t nat -S PREROUTING 2>/dev/null | grep "${comment}" | \
-        sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
+    local dest_ip="${dest%:*}" dest_port="${dest#*:}"
+
+    read -p "$(echo -e "${RED}Удалить ${proto} :${port} → ${dest_ip}:${dest_port}? (y/n): ${NC}")" c
+    [[ "$c" != "y" ]] && return
+
+    # Удаляем по комментарию если govpn, иначе по параметрам
+    if echo "$comment" | grep -q "govpn:"; then
+        iptables -t nat -S PREROUTING 2>/dev/null | grep "${comment}" | \
+            sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
+    else
+        iptables -t nat -D PREROUTING -p "$proto" --dport "$port" \
+            -j DNAT --to-destination "${dest_ip}:${dest_port}" 2>/dev/null
+    fi
     save_iptables
     echo -e "${GREEN}  ✓ Удалено.${NC}"
     log_action "RULE DEL: ${proto} :${port} → ${dest}"
