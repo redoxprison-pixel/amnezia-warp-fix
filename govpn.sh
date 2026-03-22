@@ -378,25 +378,18 @@ _awg_warp_ip() {
 }
 
 _awg_all_clients() {
-    # Читаем из clientsTable (основной источник)
+    # Читаем из clientsTable через awk (python3 может отсутствовать)
     local result
     result=$(docker exec "$AWG_CONTAINER" sh -c \
         "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null | \
-        python3 -c "
-import json,sys
-try:
-    data=json.load(sys.stdin)
-    for c in data:
-        ip=c.get('userData',{}).get('allowedIps','')
-        if ip: print(ip if '/' in ip else ip+'/32')
-except: pass
-" 2>/dev/null)
+        awk -F'"' '/allowedIps/{ip=$4; if(ip~/^[0-9]/) {if(ip!~/\//) ip=ip"/32"; print ip}}')
 
-    # Fallback — читаем из конфига если clientsTable пуст
+    # Fallback — конфиг, только /32 записи (клиенты, не сам сервер)
     if [ -z "$result" ]; then
         local conf; conf=$(_awg_conf)
-        result=$(docker exec "$AWG_CONTAINER" sh -c "grep 'AllowedIPs' '$conf'" 2>/dev/null | \
-            grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32' | tr -d '\r')
+        result=$(docker exec "$AWG_CONTAINER" sh -c \
+            "awk '/\[Peer\]/,/^\[/' '$conf'" 2>/dev/null | \
+            awk '/AllowedIPs/{print $3}' | grep '/32')
     fi
 
     echo "$result"
@@ -404,19 +397,12 @@ except: pass
 
 _awg_client_name() {
     local ip="${1%/32}"
-    docker exec "$AWG_CONTAINER" sh -c "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" | \
-        python3 -c "
-import json,sys
-try:
-    data=json.load(sys.stdin)
-    for c in data:
-        ud=c.get('userData',{})
-        ai=ud.get('allowedIps','')
-        if ai.startswith('${ip}') or ai == '${ip}/32':
-            print(ud.get('clientName',''))
-            break
-except: pass
-" 2>/dev/null
+    docker exec "$AWG_CONTAINER" sh -c \
+        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null | \
+        awk -F'"' -v ip="$ip" '
+            /allowedIps/ && $4 ~ ip { found=1 }
+            found && /clientName/ { print $4; found=0; exit }
+        '
 }
 
 _awg_selected_clients() {
@@ -2509,17 +2495,20 @@ _awg_add_peer() {
 
     local server_endpoint="${endpoint_ip}:${endpoint_port}"
 
-    # Параметры обфускации из серверного конфига
+    # Параметры обфускации из [Interface] секции конфига
     local jc jmin jmax s1 s2 h1 h2 h3 h4
-    jc=$(docker exec "$AWG_CONTAINER" sh -c "grep '^Jc' '$conf'" 2>/dev/null | awk '{print $3}')
-    jmin=$(docker exec "$AWG_CONTAINER" sh -c "grep '^Jmin' '$conf'" 2>/dev/null | awk '{print $3}')
-    jmax=$(docker exec "$AWG_CONTAINER" sh -c "grep '^Jmax' '$conf'" 2>/dev/null | awk '{print $3}')
-    s1=$(docker exec "$AWG_CONTAINER" sh -c "grep '^S1' '$conf'" 2>/dev/null | awk '{print $3}')
-    s2=$(docker exec "$AWG_CONTAINER" sh -c "grep '^S2' '$conf'" 2>/dev/null | awk '{print $3}')
-    h1=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H1' '$conf'" 2>/dev/null | awk '{print $3}')
-    h2=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H2' '$conf'" 2>/dev/null | awk '{print $3}')
-    h3=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H3' '$conf'" 2>/dev/null | awk '{print $3}')
-    h4=$(docker exec "$AWG_CONTAINER" sh -c "grep '^H4' '$conf'" 2>/dev/null | awk '{print $3}')
+    local iface_block
+    iface_block=$(docker exec "$AWG_CONTAINER" sh -c \
+        "awk '/^\[Interface\]/{p=1} /^\[Peer\]/{p=0} p' '$conf'" 2>/dev/null)
+    jc=$(echo "$iface_block"   | awk '/^Jc = /{print $3; exit}')
+    jmin=$(echo "$iface_block" | awk '/^Jmin = /{print $3; exit}')
+    jmax=$(echo "$iface_block" | awk '/^Jmax = /{print $3; exit}')
+    s1=$(echo "$iface_block"   | awk '/^S1 = /{print $3; exit}')
+    s2=$(echo "$iface_block"   | awk '/^S2 = /{print $3; exit}')
+    h1=$(echo "$iface_block"   | awk '/^H1 = /{print $3; exit}')
+    h2=$(echo "$iface_block"   | awk '/^H2 = /{print $3; exit}')
+    h3=$(echo "$iface_block"   | awk '/^H3 = /{print $3; exit}')
+    h4=$(echo "$iface_block"   | awk '/^H4 = /{print $3; exit}')
 
     # Собираем конфиг клиента
     local client_conf
@@ -2556,36 +2545,72 @@ printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s/32\n' \
     '${pubkey}' '${psk}' '${client_ip%/32}' >> '$conf'
 " 2>/dev/null
 
-    # Обновить clientsTable
-    local ts; ts=$(date -u '+%a %b %d %T %Y')
-    docker exec "$AWG_CONTAINER" python3 -c "
+    # Обновить clientsTable — через python3 если есть, иначе через awk append
+    local ts; ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    if docker exec "$AWG_CONTAINER" sh -c "command -v python3 >/dev/null 2>&1" 2>/dev/null; then
+        docker exec "$AWG_CONTAINER" python3 -c "
 import json
 try:
     with open('/opt/amnezia/awg/clientsTable') as f:
         data = json.load(f)
 except:
     data = []
-data.append({
-    'clientId': '${pubkey}',
-    'userData': {
-        'clientName': '${peer_name}',
-        'allowedIps': '${client_ip}/32',
-        'creationDate': '${ts}',
-        'dataReceived': '0 B',
-        'dataSent': '0 B',
-        'latestHandshake': 'never'
-    }
-})
-with open('/opt/amnezia/awg/clientsTable', 'w') as f:
-    json.dump(data, f, indent=4)
+data.append({'clientId':'${pubkey}','userData':{'clientName':'${peer_name}','allowedIps':'${client_ip}/32','creationDate':'${ts}','dataReceived':'0 B','dataSent':'0 B','latestHandshake':'never'}})
+with open('/opt/amnezia/awg/clientsTable','w') as f:
+    json.dump(data,f,indent=4)
 " 2>/dev/null
+    else
+        # Без python3 — вставляем запись перед последней ']'
+        docker exec "$AWG_CONTAINER" sh -c "
+ct='/opt/amnezia/awg/clientsTable'
+if [ -f \"\$ct\" ] && grep -q '\[' \"\$ct\"; then
+    # Убираем последнюю ] и добавляем новый элемент
+    head -n -1 \"\$ct\" > /tmp/ct_new.json
+    # Если файл не пустой массив — добавляем запятую
+    last=\$(tail -1 /tmp/ct_new.json | tr -d ' ')
+    [ \"\$last\" != '[' ] && echo '    },' >> /tmp/ct_new.json || true
+    cat >> /tmp/ct_new.json << 'JSONEOF'
+    {
+        \"clientId\": \"${pubkey}\",
+        \"userData\": {
+            \"clientName\": \"${peer_name}\",
+            \"allowedIps\": \"${client_ip}/32\",
+            \"creationDate\": \"${ts}\",
+            \"dataReceived\": \"0 B\",
+            \"dataSent\": \"0 B\",
+            \"latestHandshake\": \"never\"
+        }
+    }
+]
+JSONEOF
+    mv /tmp/ct_new.json \"\$ct\"
+else
+    cat > \"\$ct\" << 'JSONEOF'
+[
+    {
+        \"clientId\": \"${pubkey}\",
+        \"userData\": {
+            \"clientName\": \"${peer_name}\",
+            \"allowedIps\": \"${client_ip}/32\",
+            \"creationDate\": \"${ts}\",
+            \"dataReceived\": \"0 B\",
+            \"dataSent\": \"0 B\",
+            \"latestHandshake\": \"never\"
+        }
+    }
+]
+JSONEOF
+fi
+" 2>/dev/null
+    fi
 
-    # Применить без перезапуска
-    docker exec "$AWG_CONTAINER" bash -c \
-        "wg addconf $(_awg_iface) <(printf '[Peer]\nPublicKey = ${pubkey}\nPresharedKey = ${psk}\nAllowedIPs = ${client_ip}/32\n')" \
+    # Применить без перезапуска через wg set (надёжнее чем wg addconf)
+    local iface; iface=$(_awg_iface)
+    docker exec "$AWG_CONTAINER" sh -c \
+        "wg set ${iface} peer '${pubkey}' preshared-key <(echo '${psk}') allowed-ips '${client_ip}/32'" \
         2>/dev/null || \
-        docker exec "$AWG_CONTAINER" sh -c \
-            "wg syncconf $(_awg_iface) <(wg-quick strip '$conf')" 2>/dev/null
+    docker exec "$AWG_CONTAINER" sh -c \
+        "wg set ${iface} peer '${pubkey}' allowed-ips '${client_ip}/32'" 2>/dev/null
 
     echo -e "${GREEN}  ✓ Клиент создан: ${peer_name} (${client_ip})${NC}\n"
     log_action "AWG PEER ADD: ${peer_name} ${client_ip}"
