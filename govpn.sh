@@ -2546,50 +2546,121 @@ _awg_del_peer() {
     read -p "$(echo -e "${RED}Удалить ${del_name:-$del_ip}? (y/n): ${NC}")" c
     [ "$c" != "y" ] && return
 
-    # Найти pubkey клиента из конфига через awk (python3 может отсутствовать)
+    # Найти pubkey через awk (надёжно)
     local del_pubkey
     del_pubkey=$(docker exec "$AWG_CONTAINER" sh -c "
-        awk '
-            /\[Peer\]/ { in_peer=1; pk=\"\"; aip=\"\" }
-            in_peer && /PublicKey/ { pk=\$3 }
-            in_peer && /AllowedIPs/ && \$3 ~ /^${bare}\// { print pk; in_peer=0 }
-        ' '$conf'
-    " 2>/dev/null)
+        awk 'BEGIN{pk=\"\"; found=0}
+             /^\[Peer\]/{pk=\"\"; found=0}
+             /^PublicKey/{pk=\$3}
+             /^AllowedIPs/ && \$0 ~ /[ \t]${bare}\//{print pk; found=1}
+        ' '${conf}'
+    " 2>/dev/null | head -1)
+
+    echo -e "${YELLOW}  Pubkey: ${del_pubkey:0:20}...${NC}"
 
     # Удалить из активного wg
     [ -n "$del_pubkey" ] && \
-        docker exec "$AWG_CONTAINER" sh -c "wg set $(_awg_iface) peer '${del_pubkey}' remove" 2>/dev/null
+        docker exec "$AWG_CONTAINER" sh -c \
+            "wg set $(_awg_iface) peer '${del_pubkey}' remove" 2>/dev/null && \
+        echo -e "${GREEN}  ✓ Удалён из активного wg${NC}"
 
-    # Удалить блок [Peer] из конфига через awk
-    docker exec "$AWG_CONTAINER" sh -c "
-        awk '
-            /\[Peer\]/ { block=\"\[Peer\]\n\"; in_peer=1; skip=0; next }
-            in_peer {
-                block = block \$0 \"\n\"
-                if (/AllowedIPs/ && \$0 ~ /${bare}\//) skip=1
-                if (/^\[/ && !/\[Peer\]/) { in_peer=0; if (!skip) printf \"%s\", block; print; next }
-            }
-            !in_peer { print }
-            END { if (in_peer && !skip) printf \"%s\", block }
-        ' '$conf' > /tmp/wg_new.conf && mv /tmp/wg_new.conf '$conf'
-    " 2>/dev/null
+    # Копируем конфиг на хост, редактируем python3, копируем обратно
+    local tmp_conf="/tmp/awg_conf_edit.conf"
+    docker cp "${AWG_CONTAINER}:${conf}" "$tmp_conf" 2>/dev/null
 
-    # Удалить из clientsTable через awk/python (если есть)
-    docker exec "$AWG_CONTAINER" sh -c "
-        if command -v python3 >/dev/null 2>&1; then
-            python3 -c \"
-import json
+    python3 - "$tmp_conf" "$bare" << 'PYEOF'
+import sys
+
+conf_path = sys.argv[1]
+target_ip = sys.argv[2]  # например "10.8.1.13"
+
+with open(conf_path) as f:
+    lines = f.readlines()
+
+result = []
+peer_block = []
+in_peer = False
+removed = 0
+
+for line in lines:
+    stripped = line.strip()
+    if stripped == '[Peer]':
+        # Начало нового Peer блока — сохраняем предыдущий если был
+        if in_peer and peer_block:
+            result.extend(peer_block)
+        peer_block = [line]
+        in_peer = True
+    elif stripped.startswith('[') and stripped != '[Peer]':
+        # Начало другой секции ([Interface] и т.д.)
+        if in_peer and peer_block:
+            # Проверяем нужно ли удалить этот peer
+            should_remove = any(
+                l.strip().startswith('AllowedIPs') and
+                (target_ip + '/') in l or
+                l.strip().startswith('AllowedIPs') and
+                l.strip().split('=', 1)[-1].strip().split('/')[0].strip() == target_ip
+                for l in peer_block
+            )
+            if should_remove:
+                removed += 1
+            else:
+                result.extend(peer_block)
+        peer_block = []
+        in_peer = False
+        result.append(line)
+    elif in_peer:
+        peer_block.append(line)
+    else:
+        result.append(line)
+
+# Не забыть последний peer блок
+if in_peer and peer_block:
+    should_remove = any(
+        l.strip().startswith('AllowedIPs') and
+        l.strip().split('=', 1)[-1].strip().split('/')[0].strip() == target_ip
+        for l in peer_block
+    )
+    if should_remove:
+        removed += 1
+    else:
+        result.extend(peer_block)
+
+with open(conf_path, 'w') as f:
+    f.writelines(result)
+
+print(f"Removed {removed} peer(s) matching {target_ip}")
+PYEOF
+
+    docker cp "$tmp_conf" "${AWG_CONTAINER}:${conf}" 2>/dev/null
+    rm -f "$tmp_conf"
+    echo -e "${GREEN}  ✓ Конфиг обновлён${NC}"
+
+    # Удалить из clientsTable (python3 на хосте через docker cp)
+    local tmp_ct="/tmp/awg_ct_edit.json"
+    docker cp "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" "$tmp_ct" 2>/dev/null
+    if [ -f "$tmp_ct" ]; then
+        python3 - "$tmp_ct" "$bare" << 'PYEOF'
+import sys, json
+
+ct_path = sys.argv[1]
+target_ip = sys.argv[2]
+
 try:
-    with open('/opt/amnezia/awg/clientsTable') as f:
+    with open(ct_path) as f:
         data = json.load(f)
+    before = len(data)
     data = [c for c in data
-            if c.get('userData',{}).get('allowedIps','').split('/')[0] != '${bare}']
-    with open('/opt/amnezia/awg/clientsTable', 'w') as f:
+            if c.get('userData', {}).get('allowedIps', '').split('/')[0] != target_ip]
+    with open(ct_path, 'w') as f:
         json.dump(data, f, indent=4)
-except: pass
-\"
-        fi
-    " 2>/dev/null
+    print(f"Removed {before - len(data)} entry")
+except Exception as e:
+    print(f"Error: {e}")
+PYEOF
+        docker cp "$tmp_ct" "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" 2>/dev/null
+        rm -f "$tmp_ct"
+        echo -e "${GREEN}  ✓ clientsTable обновлён${NC}"
+    fi
 
     # Удалить сохранённый конфиг
     rm -f "${CONF_DIR}/awg_clients/${bare}.conf"
