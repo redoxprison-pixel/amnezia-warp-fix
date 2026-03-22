@@ -1093,16 +1093,37 @@ _add_rule() {
     echo -e "\n${CYAN}━━━ Добавить правило: ${label} ━━━${NC}\n"
     echo -e "${WHITE}Трафик на этот сервер будет перенаправлен на exit-ноду.${NC}\n"
 
-    local dest_ip; dest_ip=$(_read_ip "IP exit-ноды:") || return
+    # IP exit-ноды
+    local dest_ip=""
+    while true; do
+        echo -e "${WHITE}Введите IP адрес exit-ноды (куда перенаправить):${NC}"
+        read -p "> " dest_ip
+        [ -z "$dest_ip" ] && echo -e "${RED}Нельзя оставить пустым.${NC}" && continue
+        [[ "$dest_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && break
+        echo -e "${RED}Некорректный IP. Пример: 85.192.26.32${NC}"
+    done
+
+    # Порт
+    local port=""
     local hint=""
-    case "$label" in *WireGuard*|*Amnezia*) hint="51820" ;; *VLESS*) hint="443 или 8443" ;; *MTProto*) hint="8443" ;; esac
-    local port; port=$(_read_port "Порт (одинаковый на обоих серверах):" "$hint") || return
+    case "$label" in
+        *WireGuard*|*Amnezia*) hint=" (стандартный AWG: 47684 или 51820)" ;;
+        *VLESS*) hint=" (стандартный: 443 или 8443)" ;;
+        *MTProto*) hint=" (стандартный: 8443)" ;;
+    esac
+    while true; do
+        echo -e "${WHITE}Введите порт${hint}:${NC}"
+        read -p "> " port
+        [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) && break
+        echo -e "${RED}Некорректный порт. Введите число от 1 до 65535.${NC}"
+    done
 
-    probe_server "$dest_ip" "$port" || return
-
-    echo -e "\n${WHITE}Правило: ${proto} :${port} → ${dest_ip}:${port}${NC}"
+    echo ""
+    echo -e "${WHITE}Правило: ${CYAN}${proto} :${port} → ${dest_ip}:${port}${NC}"
     read -p "Применить? (y/n): " c
-    [[ "$c" == "y" ]] && apply_rule "$proto" "$port" "$port" "$dest_ip" "$label"
+    [[ "$c" != "y" ]] && return
+
+    apply_rule "$proto" "$port" "$port" "$dest_ip" "$label"
     read -p "Нажмите Enter..."
 }
 
@@ -1110,24 +1131,46 @@ _add_custom_rule() {
     clear
     echo -e "\n${CYAN}━━━ Кастомное правило ━━━${NC}\n"
 
-    local proto
+    local proto=""
     while true; do
-        echo -e "${WHITE}Протокол (tcp/udp):${NC}"
+        echo -e "${WHITE}Протокол (tcp или udp):${NC}"
         read -p "> " proto
         [ -z "$proto" ] && return
         [[ "$proto" == "tcp" || "$proto" == "udp" ]] && break
         echo -e "${RED}Введите tcp или udp.${NC}"
     done
 
-    local dest_ip; dest_ip=$(_read_ip "IP exit-ноды:") || return
-    local in_port; in_port=$(_read_port "ВХОДЯЩИЙ порт (на этом сервере):") || return
-    local out_port; out_port=$(_read_port "ИСХОДЯЩИЙ порт (на exit-ноде):") || return
+    local dest_ip=""
+    while true; do
+        echo -e "${WHITE}IP адрес exit-ноды:${NC}"
+        read -p "> " dest_ip
+        [ -z "$dest_ip" ] && return
+        [[ "$dest_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && break
+        echo -e "${RED}Некорректный IP. Пример: 85.192.26.32${NC}"
+    done
 
-    probe_server "$dest_ip" "$out_port" || return
+    local in_port=""
+    while true; do
+        echo -e "${WHITE}ВХОДЯЩИЙ порт (на этом сервере):${NC}"
+        read -p "> " in_port
+        [[ "$in_port" =~ ^[0-9]+$ ]] && (( in_port >= 1 && in_port <= 65535 )) && break
+        echo -e "${RED}Некорректный порт.${NC}"
+    done
 
-    echo -e "\n${WHITE}Правило: ${proto} :${in_port} → ${dest_ip}:${out_port}${NC}"
+    local out_port=""
+    while true; do
+        echo -e "${WHITE}ИСХОДЯЩИЙ порт (на exit-ноде):${NC}"
+        read -p "> " out_port
+        [[ "$out_port" =~ ^[0-9]+$ ]] && (( out_port >= 1 && out_port <= 65535 )) && break
+        echo -e "${RED}Некорректный порт.${NC}"
+    done
+
+    echo ""
+    echo -e "${WHITE}Правило: ${CYAN}${proto} :${in_port} → ${dest_ip}:${out_port}${NC}"
     read -p "Применить? (y/n): " c
-    [[ "$c" == "y" ]] && apply_rule "$proto" "$in_port" "$out_port" "$dest_ip" "Custom"
+    [[ "$c" != "y" ]] && return
+
+    apply_rule "$proto" "$in_port" "$out_port" "$dest_ip" "Custom"
     read -p "Нажмите Enter..."
 }
 
@@ -2433,9 +2476,9 @@ _awg_add_peer() {
     # Порт — из ListenPort в конфиге (надёжнее чем docker ps)
     local server_port
     server_port=$(docker exec "$AWG_CONTAINER" sh -c \
-        "awk '/^ListenPort/{print \$3; exit}' '$conf'" 2>/dev/null)
+        "grep '^ListenPort' '$conf' | awk '{print \$3}'" 2>/dev/null | tr -d '[:space:]')
     [ -z "$server_port" ] && server_port=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | \
-        grep "^${AWG_CONTAINER}" | grep -oE '0\.0\.0\.0:[0-9]+->' | grep -oE '[0-9]+' | head -1)
+        grep "^${AWG_CONTAINER}" | grep -oE '[0-9]+->.*udp' | grep -oE '^[0-9]+' | head -1)
     [ -z "$server_port" ] && server_port="47684"
 
     # Выбор endpoint
@@ -2501,12 +2544,21 @@ _awg_add_peer() {
     i4=$(echo "$iface_block"   | awk '/^# I4 = /{sub(/^# I4 = /,""); print; exit}')
     i5=$(echo "$iface_block"   | awk '/^# I5 = /{sub(/^# I5 = /,""); print; exit}')
 
-    # DNS — Amnezia использует .254 адрес своей подсети как DNS
-    local server_subnet
-    server_subnet=$(echo "$iface_block" | awk '/^Address = /{print $3; exit}' | cut -d'/' -f1)
-    local dns_prefix="${server_subnet%.*}"
-    local server_dns="${dns_prefix}.254, 1.0.0.1"
-    [ -z "$dns_prefix" ] && server_dns="1.1.1.1, 1.0.0.1"
+    # DNS — берём из Docker сети контейнера (Amnezia использует свой DNS резолвер)
+    local server_dns
+    server_dns=$(docker inspect "$AWG_CONTAINER" 2>/dev/null | \
+        python3 -c "import json,sys; d=json.load(sys.stdin); \
+        nets=d[0].get('NetworkSettings',{}).get('Networks',{}); \
+        gw=[v.get('Gateway','') for v in nets.values() if v.get('Gateway')]; \
+        print(gw[0] if gw else '')" 2>/dev/null | tr -d '[:space:]')
+    # Если нашли gateway — используем как DNS (Amnezia ставит DNS на gateway контейнера)
+    if [ -n "$server_dns" ]; then
+        # Заменяем последний октет на 254
+        local dns_base="${server_dns%.*}"
+        server_dns="${dns_base}.254, 1.0.0.1"
+    else
+        server_dns="172.29.172.254, 1.0.0.1"
+    fi
 
     # Конфиг клиента — формат точно как Amnezia
     local bare="${client_ip%/32}"
