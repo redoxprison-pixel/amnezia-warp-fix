@@ -2436,23 +2436,25 @@ _awg_add_peer() {
     psk=$(docker exec "$AWG_CONTAINER" sh -c "wg genpsk" 2>/dev/null)
     client_ip=$(_awg_next_ip)
 
+    if [ -z "$privkey" ] || [ -z "$pubkey" ] || [ -z "$psk" ] || [ -z "$client_ip" ]; then
+        echo -e "${RED}Ошибка генерации ключей.${NC}"; read -p "Enter..."; return
+    fi
+
     local conf; conf=$(_awg_conf)
+    local iface; iface=$(_awg_iface)
     local server_pubkey
-    server_pubkey=$(docker exec "$AWG_CONTAINER" sh -c "wg show $(_awg_iface) public-key" 2>/dev/null)
+    server_pubkey=$(docker exec "$AWG_CONTAINER" sh -c "wg show ${iface} public-key" 2>/dev/null)
     local server_port
     server_port=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | \
-        grep "^${AWG_CONTAINER}" | grep -oE ':[0-9]+->.*udp' | grep -oE '^:[0-9]+' | \
-        tr -d ':' | head -1)
+        grep "^${AWG_CONTAINER}" | grep -oE '0\.0\.0\.0:[0-9]+->' | grep -oE '[0-9]+' | head -1)
+    [ -z "$server_port" ] && server_port="47684"
 
-    # Выбор endpoint из алиасов
-    echo -e "\n${WHITE}Через какой IP клиент будет подключаться?${NC}\n"
+    # Выбор endpoint
+    echo -e "\n${WHITE}Через какой IP клиент подключается?${NC}\n"
     local -a ep_ips=() ep_labels=()
-
-    # Этот сервер — первый
     ep_ips+=("$MY_IP")
     ep_labels+=("Прямой  ${MY_IP}:${server_port}")
 
-    # Серверы из алиасов (кроме текущего)
     if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
         while IFS='=' read -r ip val; do
             [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]] || continue
@@ -2463,7 +2465,6 @@ _awg_add_peer() {
             ep_labels+=("${aname:-$ip}  ${ip}:${server_port}  (${acountry})")
         done < "$ALIASES_FILE"
     fi
-
     ep_ips+=("custom")
     ep_labels+=("Ввести вручную")
 
@@ -2474,32 +2475,25 @@ _awg_add_peer() {
     read -p "Выбор [1]: " ep_choice
     [ -z "$ep_choice" ] && ep_choice=1
 
-    local endpoint_ip="${MY_IP}"
-    local endpoint_port="${server_port}"
-
+    local endpoint_ip="$MY_IP" endpoint_port="$server_port"
     if [[ "$ep_choice" =~ ^[0-9]+$ ]] && (( ep_choice >= 1 && ep_choice <= ${#ep_ips[@]} )); then
         local sel="${ep_ips[$((ep_choice-1))]}"
         if [ "$sel" = "custom" ]; then
-            echo -e "${WHITE}Введите IP:порт (например 155.212.247.249:47684):${NC}"
-            read -p "> " custom_ep
-            endpoint_ip="${custom_ep%%:*}"
-            endpoint_port="${custom_ep##*:}"
+            read -p "IP:порт > " custom_ep
+            endpoint_ip="${custom_ep%%:*}"; endpoint_port="${custom_ep##*:}"
         else
             endpoint_ip="$sel"
-            # Спросить порт если отличается
             echo -e "${WHITE}Порт (Enter = ${server_port}):${NC}"
             read -p "> " custom_port
             [ -n "$custom_port" ] && endpoint_port="$custom_port"
         fi
     fi
 
-    local server_endpoint="${endpoint_ip}:${endpoint_port}"
-
-    # Параметры обфускации из [Interface] секции конфига
-    local jc jmin jmax s1 s2 h1 h2 h3 h4
+    # Параметры обфускации только из [Interface]
     local iface_block
     iface_block=$(docker exec "$AWG_CONTAINER" sh -c \
         "awk '/^\[Interface\]/{p=1} /^\[Peer\]/{p=0} p' '$conf'" 2>/dev/null)
+    local jc jmin jmax s1 s2 h1 h2 h3 h4
     jc=$(echo "$iface_block"   | awk '/^Jc = /{print $3; exit}')
     jmin=$(echo "$iface_block" | awk '/^Jmin = /{print $3; exit}')
     jmax=$(echo "$iface_block" | awk '/^Jmax = /{print $3; exit}')
@@ -2510,7 +2504,8 @@ _awg_add_peer() {
     h3=$(echo "$iface_block"   | awk '/^H3 = /{print $3; exit}')
     h4=$(echo "$iface_block"   | awk '/^H4 = /{print $3; exit}')
 
-    # Собираем конфиг клиента
+    # Конфиг клиента
+    local bare="${client_ip%/32}"
     local client_conf
     client_conf="[Interface]
 PrivateKey = ${privkey}
@@ -2530,24 +2525,34 @@ H4 = ${h4:-4}
 PublicKey = ${server_pubkey}
 PresharedKey = ${psk}
 AllowedIPs = 0.0.0.0/0
-Endpoint = ${server_endpoint}
+Endpoint = ${endpoint_ip}:${endpoint_port}
 PersistentKeepalive = 25"
 
-    # Сохраняем конфиг на диск для повторной выдачи
-    local bare="${client_ip%/32}"
+    # Сохранить конфиг на хосте
     mkdir -p "${CONF_DIR}/awg_clients"
     echo "$client_conf" > "${CONF_DIR}/awg_clients/${bare}.conf"
     chmod 600 "${CONF_DIR}/awg_clients/${bare}.conf"
 
-    # Добавить пир в конфиг контейнера
-    docker exec "$AWG_CONTAINER" sh -c "
-printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s/32\n' \
-    '${pubkey}' '${psk}' '${client_ip%/32}' >> '$conf'
-" 2>/dev/null
+    # Бэкап clientsTable ПЕРЕД изменением
+    docker exec "$AWG_CONTAINER" sh -c \
+        "cp /opt/amnezia/awg/clientsTable /opt/amnezia/awg/clientsTable.bak.\$(date +%s) 2>/dev/null || true"
 
-    # Обновить clientsTable — через python3 если есть, иначе через awk append
-    local ts; ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    # Добавить пир в awg0.conf (безопасно — только append)
+    docker exec "$AWG_CONTAINER" sh -c \
+        "printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s/32\n' \
+        '${pubkey}' '${psk}' '${bare}' >> '${conf}'" 2>/dev/null
+
+    # Применить в активный wg через temp файл (без bash process substitution)
+    docker exec "$AWG_CONTAINER" sh -c \
+        "echo '${psk}' > /tmp/govpn_psk.tmp && \
+         wg set ${iface} peer '${pubkey}' preshared-key /tmp/govpn_psk.tmp \
+         allowed-ips '${bare}/32' && rm -f /tmp/govpn_psk.tmp" 2>/dev/null || \
+    docker exec "$AWG_CONTAINER" sh -c \
+        "wg set ${iface} peer '${pubkey}' allowed-ips '${bare}/32'" 2>/dev/null
+
+    # Обновить clientsTable — ТОЛЬКО через python3, иначе пропустить
     if docker exec "$AWG_CONTAINER" sh -c "command -v python3 >/dev/null 2>&1" 2>/dev/null; then
+        local ts; ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
         docker exec "$AWG_CONTAINER" python3 -c "
 import json
 try:
@@ -2555,79 +2560,51 @@ try:
         data = json.load(f)
 except:
     data = []
-data.append({'clientId':'${pubkey}','userData':{'clientName':'${peer_name}','allowedIps':'${client_ip}/32','creationDate':'${ts}','dataReceived':'0 B','dataSent':'0 B','latestHandshake':'never'}})
+data.append({'clientId':'${pubkey}','userData':{'clientName':'${peer_name}','allowedIps':'${bare}/32','creationDate':'${ts}','dataReceived':'0 B','dataSent':'0 B','latestHandshake':'never'}})
 with open('/opt/amnezia/awg/clientsTable','w') as f:
     json.dump(data,f,indent=4)
 " 2>/dev/null
+        echo -e "${GREEN}  ✓ Клиент добавлен в clientsTable${NC}"
     else
-        # Без python3 — вставляем запись перед последней ']'
-        docker exec "$AWG_CONTAINER" sh -c "
-ct='/opt/amnezia/awg/clientsTable'
-if [ -f \"\$ct\" ] && grep -q '\[' \"\$ct\"; then
-    # Убираем последнюю ] и добавляем новый элемент
-    head -n -1 \"\$ct\" > /tmp/ct_new.json
-    # Если файл не пустой массив — добавляем запятую
-    last=\$(tail -1 /tmp/ct_new.json | tr -d ' ')
-    [ \"\$last\" != '[' ] && echo '    },' >> /tmp/ct_new.json || true
-    cat >> /tmp/ct_new.json << 'JSONEOF'
-    {
-        \"clientId\": \"${pubkey}\",
-        \"userData\": {
-            \"clientName\": \"${peer_name}\",
-            \"allowedIps\": \"${client_ip}/32\",
-            \"creationDate\": \"${ts}\",
-            \"dataReceived\": \"0 B\",
-            \"dataSent\": \"0 B\",
-            \"latestHandshake\": \"never\"
-        }
-    }
-]
-JSONEOF
-    mv /tmp/ct_new.json \"\$ct\"
-else
-    cat > \"\$ct\" << 'JSONEOF'
-[
-    {
-        \"clientId\": \"${pubkey}\",
-        \"userData\": {
-            \"clientName\": \"${peer_name}\",
-            \"allowedIps\": \"${client_ip}/32\",
-            \"creationDate\": \"${ts}\",
-            \"dataReceived\": \"0 B\",
-            \"dataSent\": \"0 B\",
-            \"latestHandshake\": \"never\"
-        }
-    }
-]
-JSONEOF
-fi
-" 2>/dev/null
+        echo -e "${YELLOW}  ⚠ python3 нет — clientsTable не обновлён${NC}"
+        echo -e "${WHITE}  Клиент работает, но в Amnezia приложении будет без имени.${NC}"
+        # Добавляем в clientsTable вручную через govpn (на хосте)
+        local ts; ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+        # Читаем файл на хост, модифицируем, записываем обратно
+        local ct_content
+        ct_content=$(docker exec "$AWG_CONTAINER" sh -c \
+            "cat /opt/amnezia/awg/clientsTable 2>/dev/null || echo '[]'")
+        local new_entry="{\"clientId\":\"${pubkey}\",\"userData\":{\"clientName\":\"${peer_name}\",\"allowedIps\":\"${bare}/32\",\"creationDate\":\"${ts}\",\"dataReceived\":\"0 B\",\"dataSent\":\"0 B\",\"latestHandshake\":\"never\"}}"
+        # Используем python3 на ХОСТЕ (не в контейнере)
+        local new_ct
+        new_ct=$(echo "$ct_content" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+import json as j
+entry=j.loads('${new_entry}')
+data.append(entry)
+print(j.dumps(data,indent=4))
+" 2>/dev/null)
+        if [ -n "$new_ct" ]; then
+            echo "$new_ct" | docker exec -i "$AWG_CONTAINER" sh -c \
+                "cat > /opt/amnezia/awg/clientsTable" 2>/dev/null
+            echo -e "${GREEN}  ✓ clientsTable обновлён через хост${NC}"
+        fi
     fi
-
-    # Применить без перезапуска через wg set (надёжнее чем wg addconf)
-    local iface; iface=$(_awg_iface)
-    docker exec "$AWG_CONTAINER" sh -c \
-        "wg set ${iface} peer '${pubkey}' preshared-key <(echo '${psk}') allowed-ips '${client_ip}/32'" \
-        2>/dev/null || \
-    docker exec "$AWG_CONTAINER" sh -c \
-        "wg set ${iface} peer '${pubkey}' allowed-ips '${client_ip}/32'" 2>/dev/null
 
     echo -e "${GREEN}  ✓ Клиент создан: ${peer_name} (${client_ip})${NC}\n"
     log_action "AWG PEER ADD: ${peer_name} ${client_ip}"
 
-    # Показываем конфиг и QR сразу
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${WHITE}Конфиг:${NC}\n"
-    echo -e "${GREEN}${client_conf}${NC}"
+    echo -e "${WHITE}Конфиг:${NC}\n${GREEN}${client_conf}${NC}"
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
     if command -v qrencode &>/dev/null; then
-        echo -e "\n${WHITE}QR код:${NC}\n"
+        echo -e "\n${WHITE}QR (WireGuard):${NC}\n"
         echo "$client_conf" | qrencode -t ansiutf8
     fi
 
     echo -e "\n${WHITE}Конфиг сохранён: ${CYAN}${CONF_DIR}/awg_clients/${bare}.conf${NC}"
-    echo -e "${WHITE}Его можно получить повторно через п.5 → номер клиента.${NC}"
     echo ""
     read -p "Нажмите Enter..."
 }
