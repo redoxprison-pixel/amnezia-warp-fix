@@ -2382,31 +2382,45 @@ _awg_show_qr() {
                 echo -e "${RED}Ошибка qrencode${NC}"
             ;;
         2)
-            # Парсим конфиг в Amnezia JSON формат
-            local privkey addr dns endpoint pubkey psk
-            local jc jmin jmax s1 s2 h1 h2 h3 h4
-            privkey=$(echo "$cfg" | awk '/PrivateKey/{print $3}')
-            addr=$(echo "$cfg"    | awk '/^Address/{print $3}')
+            local dns endpoint
             dns=$(echo "$cfg"     | awk '/^DNS/{print $3}')
-            endpoint=$(echo "$cfg"| awk '/Endpoint/{print $3}')
-            pubkey=$(echo "$cfg"  | awk '/PublicKey/{print $3}')
-            psk=$(echo "$cfg"     | awk '/PresharedKey/{print $3}')
-            jc=$(echo "$cfg"      | awk '/^Jc /{print $3}')
-            jmin=$(echo "$cfg"    | awk '/^Jmin /{print $3}')
-            jmax=$(echo "$cfg"    | awk '/^Jmax /{print $3}')
-            s1=$(echo "$cfg"      | awk '/^S1 /{print $3}')
-            s2=$(echo "$cfg"      | awk '/^S2 /{print $3}')
-            h1=$(echo "$cfg"      | awk '/^H1 /{print $3}')
-            h2=$(echo "$cfg"      | awk '/^H2 /{print $3}')
-            h3=$(echo "$cfg"      | awk '/^H3 /{print $3}')
-            h4=$(echo "$cfg"      | awk '/^H4 /{print $3}')
+            endpoint=$(echo "$cfg"| awk '/^Endpoint/{print $3}')
+            local host="${endpoint%%:*}"
+            local port="${endpoint##*:}"
 
+            # Правильный формат Amnezia — containers с last_config
             local amn_json
-            amn_json="{\"protocol\":\"awg\",\"description\":\"${name:-${client_ip%/32}}\",\"dns1\":\"${dns:-1.1.1.1}\",\"dns2\":\"8.8.8.8\",\"hostName\":\"${endpoint%%:*}\",\"port\":\"${endpoint##*:}\",\"privateKey\":\"${privkey}\",\"publicKey\":\"${pubkey}\",\"presharedKey\":\"${psk}\",\"allowedIPs\":\"0.0.0.0/0\",\"persistentKeepalive\":\"25\",\"Jc\":\"${jc:-4}\",\"Jmin\":\"${jmin:-40}\",\"Jmax\":\"${jmax:-70}\",\"S1\":\"${s1:-0}\",\"S2\":\"${s2:-0}\",\"H1\":\"${h1:-1}\",\"H2\":\"${h2:-2}\",\"H3\":\"${h3:-3}\",\"H4\":\"${h4:-4}\"}"
+            amn_json=$(python3 - << PYEOF
+import json, sys
 
-            echo -e "\n${WHITE}QR для Amnezia:${NC}\n"
-            echo "$amn_json" | qrencode -t ansiutf8 2>/dev/null || \
-                echo -e "${RED}Ошибка qrencode${NC}"
+cfg = """${cfg}"""
+
+data = {
+    "containers": [{
+        "container": "amnezia-awg",
+        "awg": {
+            "last_config": cfg
+        }
+    }],
+    "defaultContainer": "amnezia-awg",
+    "description": "${name:-VPN}",
+    "dns1": "${dns:-1.1.1.1}",
+    "dns2": "8.8.8.8",
+    "hostName": "${host}",
+    "port": "${port}",
+    "splitTunnelSites": [],
+    "splitTunnelType": 0
+}
+print(json.dumps(data, ensure_ascii=False, separators=(',', ':')))
+PYEOF
+)
+            if [ -n "$amn_json" ]; then
+                echo -e "\n${WHITE}QR для Amnezia:${NC}\n"
+                echo "$amn_json" | qrencode -t ansiutf8 2>/dev/null || \
+                    echo -e "${RED}Ошибка qrencode${NC}"
+            else
+                echo -e "${RED}Ошибка генерации JSON — проверьте python3${NC}"
+            fi
             ;;
         0|"") return ;;
     esac
