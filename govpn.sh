@@ -1206,8 +1206,12 @@ _delete_rule() {
 
     # Удаляем по комментарию если govpn, иначе по параметрам
     if echo "$comment" | grep -q "govpn:"; then
-        iptables -t nat -S PREROUTING 2>/dev/null | grep "${comment}" | \
-            sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
+        # Точное удаление по всем параметрам
+        iptables -t nat -D PREROUTING -p "$proto" --dport "$port" \
+            -m comment --comment "$comment" \
+            -j DNAT --to-destination "${dest_ip}:${dest_port}" 2>/dev/null || \
+        iptables -t nat -D PREROUTING -p "$proto" --dport "$port" \
+            -j DNAT --to-destination "${dest_ip}:${dest_port}" 2>/dev/null
     else
         iptables -t nat -D PREROUTING -p "$proto" --dport "$port" \
             -j DNAT --to-destination "${dest_ip}:${dest_port}" 2>/dev/null
