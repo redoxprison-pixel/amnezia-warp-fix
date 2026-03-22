@@ -7,7 +7,7 @@ set -o pipefail
 #  Безопасный патч xray: бэкап → патч xrayTemplateConfig в БД → валидация → rollback
 # ══════════════════════════════════════════════════════════════
 
-VERSION="3.6"
+VERSION="3.7"
 GOVPN_REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
@@ -2664,125 +2664,6 @@ _awg_wgcf_installed() {
 }
 
 # Полная установка WARP внутри Amnezia контейнера
-_awg_install_warp() {
-    local ct="$1"
-    clear
-    echo -e "\n${CYAN}━━━ Установка WARP в контейнер ${ct} ━━━${NC}\n"
-    echo -e "${WHITE}Процесс:${NC}"
-    echo -e "  1. Скачать wgcf на хост"
-    echo -e "  2. Зарегистрировать WARP аккаунт"
-    echo -e "  3. Сгенерировать WireGuard профиль"
-    echo -e "  4. Установить wg-quick внутри контейнера"
-    echo -e "  5. Скопировать профиль в контейнер"
-    echo -e "  6. Поднять warp туннель"
-    echo ""
-
-    # Шаг 1: wgcf на хост
-    echo -e "${YELLOW}[1/6]${NC} Скачиваю wgcf..."
-    local wgcf_bin="/usr/local/bin/wgcf"
-    if [ ! -x "$wgcf_bin" ]; then
-        local arch
-        case "$(uname -m)" in
-            x86_64)  arch="amd64" ;;
-            aarch64) arch="arm64" ;;
-            armv7l)  arch="armv7" ;;
-            *) echo -e "${RED}Архитектура не поддерживается: $(uname -m)${NC}"; read -p "Enter..."; return 1 ;;
-        esac
-        local url="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${arch}"
-        curl -fsSL "$url" -o "$wgcf_bin" 2>/dev/null && chmod +x "$wgcf_bin" || {
-            echo -e "${RED}Не удалось скачать wgcf.${NC}"; read -p "Enter..."; return 1
-        }
-    fi
-    echo -e "${GREEN}  ✓ wgcf готов${NC}"
-
-    # Шаг 2: регистрация
-    echo -e "${YELLOW}[2/6]${NC} Регистрация WARP аккаунта..."
-    local wgcf_dir="/etc/govpn/wgcf"
-    mkdir -p "$wgcf_dir"
-    if [ ! -f "$wgcf_dir/wgcf-account.toml" ]; then
-        (cd "$wgcf_dir" && wgcf register --accept-tos 2>/dev/null) || {
-            echo -e "${RED}Регистрация не удалась.${NC}"; read -p "Enter..."; return 1
-        }
-    fi
-    echo -e "${GREEN}  ✓ Аккаунт зарегистрирован${NC}"
-
-    # Шаг 3: генерация профиля
-    echo -e "${YELLOW}[3/6]${NC} Генерация WireGuard профиля..."
-    (cd "$wgcf_dir" && wgcf generate 2>/dev/null)
-    [ -f "$wgcf_dir/wgcf-profile.conf" ] || {
-        echo -e "${RED}Профиль не создан.${NC}"; read -p "Enter..."; return 1
-    }
-
-    # Адаптируем профиль для использования внутри контейнера
-    # IPv6 может быть недоступен, убираем его
-    local ipv6_disabled=0
-    cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null | grep -q "^1" && ipv6_disabled=1
-
-    python3 - <<EOF
-import re
-with open('${wgcf_dir}/wgcf-profile.conf') as f:
-    c = f.read()
-
-# Убрать DNS
-c = re.sub(r'^DNS\s*=.*', '# DNS = disabled', c, flags=re.MULTILINE)
-
-# Table=off — не перехватывать весь трафик
-c = re.sub(r'(\[Interface\])', r'\1\nTable = off', c)
-
-# IPv6
-if ${ipv6_disabled}:
-    def fix_addr(m):
-        addrs = [a.strip() for a in m.group(1).split(',')]
-        return 'Address = ' + ', '.join(a for a in addrs if ':' not in a)
-    c = re.sub(r'Address\s*=\s*(.+)', fix_addr, c)
-    c = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0', c)
-else:
-    c = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0, ::/0', c)
-
-with open('${wgcf_dir}/wgcf-profile.conf', 'w') as f:
-    f.write(c)
-print("OK")
-EOF
-    echo -e "${GREEN}  ✓ Профиль готов${NC}"
-
-    # Шаг 4: установить wireguard-tools внутри контейнера
-    echo -e "${YELLOW}[4/6]${NC} Установка wireguard-tools в контейнер..."
-    docker exec "$ct" sh -c "command -v wg-quick >/dev/null 2>&1" 2>/dev/null || {
-        docker exec "$ct" sh -c "apt-get update -qq && apt-get install -y -qq wireguard-tools 2>/dev/null" >/dev/null 2>&1 || {
-            echo -e "${YELLOW}  ⚠ Не удалось установить — пробуем продолжить${NC}"
-        }
-    }
-    echo -e "${GREEN}  ✓${NC}"
-
-    # Шаг 5: копируем профиль в контейнер
-    echo -e "${YELLOW}[5/6]${NC} Копирую профиль в контейнер..."
-    docker exec "$ct" sh -c "mkdir -p '${AWG_WARP_DIR}'"
-    docker cp "$wgcf_dir/wgcf-profile.conf" "${ct}:${AWG_WARP_CONF}" 2>/dev/null || {
-        echo -e "${RED}Не удалось скопировать профиль.${NC}"; read -p "Enter..."; return 1
-    }
-    echo -e "${GREEN}  ✓ Профиль: ${AWG_WARP_CONF}${NC}"
-
-    # Шаг 6: поднять туннель
-    echo -e "${YELLOW}[6/6]${NC} Поднимаю warp туннель..."
-    docker exec "$ct" sh -c "wg-quick down '${AWG_WARP_CONF}' 2>/dev/null; wg-quick up '${AWG_WARP_CONF}'" 2>&1 | \
-        while IFS= read -r l; do echo -e "  ${WHITE}${l}${NC}"; done
-
-    sleep 2
-    if docker exec "$ct" sh -c "ip addr show warp >/dev/null 2>&1" 2>/dev/null; then
-        local wip
-        wip=$(docker exec "$ct" sh -c \
-            "curl -s --interface warp --connect-timeout 8 https://api4.ipify.org 2>/dev/null || true")
-        echo -e "${GREEN}  ✓ WARP поднят!${NC}"
-        [ -n "$wip" ] && echo -e "  ${WHITE}WARP IP: ${GREEN}${wip}${NC}"
-        log_action "AWG WARP INSTALL: container=${ct}, warp_ip=${wip}"
-    else
-        echo -e "${RED}  ✗ Туннель не поднялся${NC}"
-        echo -e "${WHITE}  Проверьте: docker exec ${ct} wg show${NC}"
-    fi
-
-    echo ""
-    read -p "Нажмите Enter..."
-}
 
 # Загрузить выбранных клиентов из файла
 _awg_load_selected() {
@@ -2992,27 +2873,25 @@ _awg_install_warp() {
 
     # Подготавливаем конфиг (убираем IPv6, Table=off)
     docker exec "$ct" sh -c "
-        python3 -c \"
-import re
-with open('/tmp/wgcf-profile.conf') as f:
-    c = f.read()
-# Убрать IPv6 из Address
-def fix_addr(m):
-    addrs = [a.strip() for a in m.group(1).split(',')]
-    return 'Address = ' + ', '.join(a for a in addrs if ':' not in a)
-c = re.sub(r'Address\s*=\s*(.+)', fix_addr, c)
-# Убрать IPv6 из AllowedIPs
-c = re.sub(r'AllowedIPs\s*=.*', 'AllowedIPs = 0.0.0.0/0', c)
-# Table=off
-c = re.sub(r'\[Interface\]', '[Interface]\nTable = off', c)
-# Убрать DNS
-c = re.sub(r'^DNS\s*=.*\$', '', c, flags=re.MULTILINE)
-with open('${AWG_WARP_CONF}', 'w') as f:
-    f.write(c)
-\" 2>/dev/null || cp /tmp/wgcf-profile.conf '${AWG_WARP_CONF}'
         mkdir -p '${AWG_WARP_DIR}'
-        mv /tmp/wgcf-account.toml '${AWG_WARP_DIR}/'
+        cp /tmp/wgcf-profile.conf '${AWG_WARP_CONF}'
+
+        # Убрать IPv6 адрес из Address (оставить только первый IPv4)
+        sed -i 's|^Address = \(.*\),.*2606.*|Address = \1|g' '${AWG_WARP_CONF}'
+        sed -i 's|^Address = \(.*\), *2606.*|Address = \1|g' '${AWG_WARP_CONF}'
+
+        # Убрать IPv6 из AllowedIPs
+        sed -i 's|AllowedIPs = 0.0.0.0/0, ::/0|AllowedIPs = 0.0.0.0/0|g' '${AWG_WARP_CONF}'
+        sed -i 's|AllowedIPs = ::/0, 0.0.0.0/0|AllowedIPs = 0.0.0.0/0|g' '${AWG_WARP_CONF}'
+
+        # Убрать DNS
+        sed -i 's|^DNS = .*|# DNS disabled|g' '${AWG_WARP_CONF}'
+
+        # Добавить Table = off после [Interface]
+        sed -i '/^\[Interface\]/a Table = off' '${AWG_WARP_CONF}'
+
         chmod 600 '${AWG_WARP_CONF}'
+        mv /tmp/wgcf-account.toml '${AWG_WARP_DIR}/' 2>/dev/null || true
     " 2>/dev/null
 
     # Поднимаем туннель
