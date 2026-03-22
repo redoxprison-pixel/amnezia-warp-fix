@@ -378,18 +378,23 @@ _awg_warp_ip() {
 }
 
 _awg_all_clients() {
-    # Читаем из clientsTable через awk (python3 может отсутствовать)
-    local result
-    result=$(docker exec "$AWG_CONTAINER" sh -c \
-        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null | \
-        awk -F'"' '/allowedIps/{ip=$4; if(ip~/^[0-9]/) {if(ip!~/\//) ip=ip"/32"; print ip}}')
+    local raw
+    raw=$(docker exec "$AWG_CONTAINER" sh -c \
+        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
 
-    # Fallback — конфиг, только /32 записи (клиенты, не сам сервер)
+    # Извлекаем allowedIps — работает и с однострочным и с многострочным JSON
+    local result
+    result=$(echo "$raw" | grep -o '"allowedIps"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        sed 's/.*"allowedIps"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
+        grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | \
+        awk '{if($0 !~ /\//) print $0"/32"; else print $0}')
+
+    # Fallback — конфиг
     if [ -z "$result" ]; then
         local conf; conf=$(_awg_conf)
         result=$(docker exec "$AWG_CONTAINER" sh -c \
-            "awk '/\[Peer\]/,/^\[/' '$conf'" 2>/dev/null | \
-            awk '/AllowedIPs/{print $3}' | grep '/32')
+            "grep 'AllowedIPs' '$conf' 2>/dev/null" 2>/dev/null | \
+            grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32')
     fi
 
     echo "$result"
@@ -397,12 +402,14 @@ _awg_all_clients() {
 
 _awg_client_name() {
     local ip="${1%/32}"
-    docker exec "$AWG_CONTAINER" sh -c \
-        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null | \
-        awk -F'"' -v ip="$ip" '
-            /allowedIps/ && $4 ~ ip { found=1 }
-            found && /clientName/ { print $4; found=0; exit }
-        '
+    local raw
+    raw=$(docker exec "$AWG_CONTAINER" sh -c \
+        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
+    # Ищем clientName в той же строке или блоке где есть нужный IP
+    echo "$raw" | grep -B5 "\"allowedIps\".*${ip}" | \
+        grep -o '"clientName"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        sed 's/.*"clientName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
+        head -1
 }
 
 _awg_selected_clients() {
