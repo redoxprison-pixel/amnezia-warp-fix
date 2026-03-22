@@ -2429,8 +2429,12 @@ _awg_add_peer() {
     local iface; iface=$(_awg_iface)
     local server_pubkey
     server_pubkey=$(docker exec "$AWG_CONTAINER" sh -c "wg show ${iface} public-key" 2>/dev/null)
+
+    # Порт — из ListenPort в конфиге (надёжнее чем docker ps)
     local server_port
-    server_port=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | \
+    server_port=$(docker exec "$AWG_CONTAINER" sh -c \
+        "awk '/^ListenPort/{print \$3; exit}' '$conf'" 2>/dev/null)
+    [ -z "$server_port" ] && server_port=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null | \
         grep "^${AWG_CONTAINER}" | grep -oE '0\.0\.0\.0:[0-9]+->' | grep -oE '[0-9]+' | head -1)
     [ -z "$server_port" ] && server_port="47684"
 
@@ -2490,16 +2494,19 @@ _awg_add_peer() {
     h2=$(echo "$iface_block"   | awk '/^H2 = /{print $3; exit}')
     h3=$(echo "$iface_block"   | awk '/^H3 = /{print $3; exit}')
     h4=$(echo "$iface_block"   | awk '/^H4 = /{print $3; exit}')
-    i1=$(echo "$iface_block"   | awk '/^I1 = /{sub(/^I1 = /,""); print; exit}')
-    i2=$(echo "$iface_block"   | awk '/^I2 = /{sub(/^I2 = /,""); print; exit}')
-    i3=$(echo "$iface_block"   | awk '/^I3 = /{sub(/^I3 = /,""); print; exit}')
-    i4=$(echo "$iface_block"   | awk '/^I4 = /{sub(/^I4 = /,""); print; exit}')
-    i5=$(echo "$iface_block"   | awk '/^I5 = /{sub(/^I5 = /,""); print; exit}')
+    # I1-I5 закомментированы в серверном конфиге — читаем со знаком #
+    i1=$(echo "$iface_block"   | awk '/^# I1 = /{sub(/^# I1 = /,""); print; exit}')
+    i2=$(echo "$iface_block"   | awk '/^# I2 = /{sub(/^# I2 = /,""); print; exit}')
+    i3=$(echo "$iface_block"   | awk '/^# I3 = /{sub(/^# I3 = /,""); print; exit}')
+    i4=$(echo "$iface_block"   | awk '/^# I4 = /{sub(/^# I4 = /,""); print; exit}')
+    i5=$(echo "$iface_block"   | awk '/^# I5 = /{sub(/^# I5 = /,""); print; exit}')
 
-    # DNS берём из контейнера (Amnezia использует свой DNS)
-    local server_dns
-    server_dns=$(echo "$iface_block" | awk '/^DNS = /{sub(/^DNS = /,""); print; exit}')
-    [ -z "$server_dns" ] && server_dns="1.1.1.1, 1.0.0.1"
+    # DNS — Amnezia использует .254 адрес своей подсети как DNS
+    local server_subnet
+    server_subnet=$(echo "$iface_block" | awk '/^Address = /{print $3; exit}' | cut -d'/' -f1)
+    local dns_prefix="${server_subnet%.*}"
+    local server_dns="${dns_prefix}.254, 1.0.0.1"
+    [ -z "$dns_prefix" ] && server_dns="1.1.1.1, 1.0.0.1"
 
     # Конфиг клиента — формат точно как Amnezia
     local bare="${client_ip%/32}"
