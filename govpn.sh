@@ -1600,19 +1600,24 @@ _self_update() {
     }
 
     local new_ver; new_ver=$(grep '^VERSION=' "$tmp" 2>/dev/null | head -1 | cut -d'"' -f2)
-    echo -e "${WHITE}Доступна: ${GREEN}v${new_ver:-?}${NC}"
+    echo -e "${WHITE}В репо: ${GREEN}v${new_ver:-?}${NC}\n"
 
-    [ "$new_ver" = "$VERSION" ] && {
-        echo -e "${GREEN}Уже актуальная версия.${NC}"; rm -f "$tmp"; read -p "Enter..."; return
-    }
+    if [ "$new_ver" = "$VERSION" ]; then
+        echo -e "${YELLOW}Версия совпадает (v${VERSION}).${NC}"
+        echo -e "${WHITE}Принудительно обновить (переустановить)? (y/n):${NC}"
+        read -p "> " force
+        if [[ "$force" != "y" ]]; then
+            rm -f "$tmp"; read -p "Enter..."; return
+        fi
+    fi
 
     cp "$INSTALL_PATH" "${BACKUP_DIR}/govpn.bak.$(date +%s)" 2>/dev/null
-    cp -f "$tmp" "$INSTALL_PATH"; chmod +x "$INSTALL_PATH"; rm -f "$tmp"
-
-    # Symlink
+    cp -f "$tmp" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    rm -f "$tmp"
     ln -sf "$INSTALL_PATH" /usr/bin/govpn 2>/dev/null
 
-    echo -e "${GREEN}[OK] Обновлён до v${new_ver}${NC}"
+    echo -e "${GREEN}[OK] Установлена v${new_ver}${NC}"
     log_action "UPDATE: v${VERSION} → v${new_ver}"
     read -p "Нажмите Enter..."
     exec "$INSTALL_PATH"
@@ -2270,20 +2275,59 @@ _awg_show_qr() {
     if [ -z "$cfg" ]; then
         echo -e "${YELLOW}Конфиг не найден.${NC}"
         echo -e "${WHITE}Клиент добавлен через Amnezia — ключ только на устройстве.${NC}"
-        echo -e "${WHITE}Для повторной выдачи: удалите и создайте клиента заново.${NC}"
-        echo ""
-        read -p "Нажмите Enter..."; return
+        echo -e "${WHITE}Удалите и создайте клиента заново через п.5.${NC}"
+        echo ""; read -p "Нажмите Enter..."; return
     fi
 
-    if command -v qrencode &>/dev/null; then
-        echo "$cfg" | qrencode -t ansiutf8
-    else
-        echo -e "${RED}qrencode не установлен.${NC}"
-        echo -e "${WHITE}Установите: apt-get install qrencode${NC}"
+    echo -e "${WHITE}Формат QR:${NC}"
+    echo -e "  ${YELLOW}[1]${NC} WireGuard (.conf — для WireGuard приложения)"
+    echo -e "  ${YELLOW}[2]${NC} AmneziaWG (JSON — для Amnezia приложения)"
+    echo -e "  ${YELLOW}[0]${NC} Назад"
+    echo ""; read -p "Выбор: " fmt
+
+    if ! command -v qrencode &>/dev/null; then
+        echo -e "${YELLOW}Устанавливаю qrencode...${NC}"
+        apt-get install -y qrencode > /dev/null 2>&1
     fi
+
+    case "$fmt" in
+        1)
+            echo -e "\n${WHITE}QR для WireGuard:${NC}\n"
+            echo "$cfg" | qrencode -t ansiutf8 2>/dev/null || \
+                echo -e "${RED}Ошибка qrencode${NC}"
+            ;;
+        2)
+            # Парсим конфиг в Amnezia JSON формат
+            local privkey addr dns endpoint pubkey psk
+            local jc jmin jmax s1 s2 h1 h2 h3 h4
+            privkey=$(echo "$cfg" | awk '/PrivateKey/{print $3}')
+            addr=$(echo "$cfg"    | awk '/^Address/{print $3}')
+            dns=$(echo "$cfg"     | awk '/^DNS/{print $3}')
+            endpoint=$(echo "$cfg"| awk '/Endpoint/{print $3}')
+            pubkey=$(echo "$cfg"  | awk '/PublicKey/{print $3}')
+            psk=$(echo "$cfg"     | awk '/PresharedKey/{print $3}')
+            jc=$(echo "$cfg"      | awk '/^Jc /{print $3}')
+            jmin=$(echo "$cfg"    | awk '/^Jmin /{print $3}')
+            jmax=$(echo "$cfg"    | awk '/^Jmax /{print $3}')
+            s1=$(echo "$cfg"      | awk '/^S1 /{print $3}')
+            s2=$(echo "$cfg"      | awk '/^S2 /{print $3}')
+            h1=$(echo "$cfg"      | awk '/^H1 /{print $3}')
+            h2=$(echo "$cfg"      | awk '/^H2 /{print $3}')
+            h3=$(echo "$cfg"      | awk '/^H3 /{print $3}')
+            h4=$(echo "$cfg"      | awk '/^H4 /{print $3}')
+
+            local amn_json
+            amn_json="{\"protocol\":\"awg\",\"description\":\"${name:-${client_ip%/32}}\",\"dns1\":\"${dns:-1.1.1.1}\",\"dns2\":\"8.8.8.8\",\"hostName\":\"${endpoint%%:*}\",\"port\":\"${endpoint##*:}\",\"privateKey\":\"${privkey}\",\"publicKey\":\"${pubkey}\",\"presharedKey\":\"${psk}\",\"allowedIPs\":\"0.0.0.0/0\",\"persistentKeepalive\":\"25\",\"Jc\":\"${jc:-4}\",\"Jmin\":\"${jmin:-40}\",\"Jmax\":\"${jmax:-70}\",\"S1\":\"${s1:-0}\",\"S2\":\"${s2:-0}\",\"H1\":\"${h1:-1}\",\"H2\":\"${h2:-2}\",\"H3\":\"${h3:-3}\",\"H4\":\"${h4:-4}\"}"
+
+            echo -e "\n${WHITE}QR для Amnezia:${NC}\n"
+            echo "$amn_json" | qrencode -t ansiutf8 2>/dev/null || \
+                echo -e "${RED}Ошибка qrencode${NC}"
+            ;;
+        0|"") return ;;
+    esac
 
     echo ""
-    echo -e "${WHITE}Отсканируйте QR в WireGuard/Amnezia приложении.${NC}"
+    echo -e "${WHITE}Отсканируйте QR в приложении.${NC}"
     read -p "Нажмите Enter..."
 }
 
@@ -2502,35 +2546,38 @@ _awg_del_peer() {
     read -p "$(echo -e "${RED}Удалить ${del_name:-$del_ip}? (y/n): ${NC}")" c
     [ "$c" != "y" ] && return
 
-    # Найти pubkey клиента из конфига
+    # Найти pubkey клиента из конфига через awk (python3 может отсутствовать)
     local del_pubkey
-    del_pubkey=$(docker exec "$AWG_CONTAINER" python3 -c "
-import re
-with open('${conf}') as f:
-    content = f.read()
-# Найти блок Peer с нужным IP
-match = re.search(r'\[Peer\][^\[]*AllowedIPs\s*=\s*${bare}/32[^\[]*', content)
-if match:
-    pk = re.search(r'PublicKey\s*=\s*(\S+)', match.group())
-    if pk: print(pk.group(1))
-" 2>/dev/null)
+    del_pubkey=$(docker exec "$AWG_CONTAINER" sh -c "
+        awk '
+            /\[Peer\]/ { in_peer=1; pk=\"\"; aip=\"\" }
+            in_peer && /PublicKey/ { pk=\$3 }
+            in_peer && /AllowedIPs/ && \$3 ~ /^${bare}\// { print pk; in_peer=0 }
+        ' '$conf'
+    " 2>/dev/null)
 
     # Удалить из активного wg
     [ -n "$del_pubkey" ] && \
         docker exec "$AWG_CONTAINER" sh -c "wg set $(_awg_iface) peer '${del_pubkey}' remove" 2>/dev/null
 
-    # Удалить из конфига
-    docker exec "$AWG_CONTAINER" python3 -c "
-import re
-with open('${conf}') as f:
-    content = f.read()
-content = re.sub(r'\n\[Peer\][^\[]*AllowedIPs\s*=\s*${bare}/32[^\[]*', '', content)
-with open('${conf}', 'w') as f:
-    f.write(content)
-" 2>/dev/null
+    # Удалить блок [Peer] из конфига через awk
+    docker exec "$AWG_CONTAINER" sh -c "
+        awk '
+            /\[Peer\]/ { block=\"\[Peer\]\n\"; in_peer=1; skip=0; next }
+            in_peer {
+                block = block \$0 \"\n\"
+                if (/AllowedIPs/ && \$0 ~ /${bare}\//) skip=1
+                if (/^\[/ && !/\[Peer\]/) { in_peer=0; if (!skip) printf \"%s\", block; print; next }
+            }
+            !in_peer { print }
+            END { if (in_peer && !skip) printf \"%s\", block }
+        ' '$conf' > /tmp/wg_new.conf && mv /tmp/wg_new.conf '$conf'
+    " 2>/dev/null
 
-    # Удалить из clientsTable
-    docker exec "$AWG_CONTAINER" python3 -c "
+    # Удалить из clientsTable через awk/python (если есть)
+    docker exec "$AWG_CONTAINER" sh -c "
+        if command -v python3 >/dev/null 2>&1; then
+            python3 -c \"
 import json
 try:
     with open('/opt/amnezia/awg/clientsTable') as f:
@@ -2539,9 +2586,10 @@ try:
             if c.get('userData',{}).get('allowedIps','').split('/')[0] != '${bare}']
     with open('/opt/amnezia/awg/clientsTable', 'w') as f:
         json.dump(data, f, indent=4)
-except Exception as e:
-    print(f'Error: {e}')
-" 2>/dev/null
+except: pass
+\"
+        fi
+    " 2>/dev/null
 
     # Удалить сохранённый конфиг
     rm -f "${CONF_DIR}/awg_clients/${bare}.conf"
