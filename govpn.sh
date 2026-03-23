@@ -1757,108 +1757,35 @@ _full_uninstall() {
 # ═══════════════════════════════════════════════════════════════
 #  ADGUARD HOME
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  ADGUARD HOME
+# ═══════════════════════════════════════════════════════════════
 
 AGH_DIR="/opt/AdGuardHome"
+AGH_BIN="${AGH_DIR}/AdGuardHome"
 AGH_CONF="${AGH_DIR}/AdGuardHome.yaml"
 AGH_CLIENTS_FILE="${CONF_DIR}/adguard_clients.list"
+AGH_WEB_PORT="3000"
 AGH_MARKER_B="# --- GOVPN AGH BEGIN ---"
 AGH_MARKER_E="# --- GOVPN AGH END ---"
 
-_agh_running() { systemctl is-active AdGuardHome &>/dev/null 2>&1; }
+_agh_installed() { [ -f "$AGH_BIN" ]; }
+_agh_running()   { systemctl is-active AdGuardHome &>/dev/null; }
 
-_agh_installed() { [ -f "${AGH_DIR}/AdGuardHome" ]; }
-
-_agh_port() {
-    grep "^  port:" "$AGH_CONF" 2>/dev/null | head -1 | awk '{print $2}' || echo "5335"
+_agh_dns_port() {
+    grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2 || echo "5335"
 }
 
-_agh_check_port() {
-    local port="$1"
-    ss -tlnup 2>/dev/null | grep -q ":${port} " && return 1 || return 0
-}
-
-_agh_ask_port() {
-    local default_port="5335"
-    # Проверяем 53
-    if _agh_check_port 53; then
-        default_port="53"
-        echo -e "  ${GREEN}✓ Порт 53 свободен${NC}"
-    else
-        local occupant; occupant=$(ss -tlnup 2>/dev/null | grep ":53 " | \
-            sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
-        echo -e "  ${YELLOW}⚠ Порт 53 занят: ${occupant}${NC}"
-        echo -e "  ${WHITE}Рекомендуется: ${GREEN}5335${NC}"
-    fi
-
-    # Проверяем предложенный порт
-    if ! _agh_check_port "$default_port" 2>/dev/null; then
-        echo -e "  ${YELLOW}⚠ Порт ${default_port} тоже занят!${NC}"
-        default_port="5353"
-    fi
-
-    echo -e "\n  ${WHITE}DNS порт для AdGuard Home:${NC}"
-    echo -e "  ${CYAN}Enter${NC} — использовать ${GREEN}${default_port}${NC}, или введите свой:"
-    read -p "  > " user_port
-    if [ -z "$user_port" ]; then
-        echo "$default_port"
-    else
-        validate_port "$user_port" && echo "$user_port" || echo "$default_port"
-    fi
-}
-
-_agh_install() {
-    clear
-    echo -e "\n${CYAN}━━━ Установка AdGuard Home ━━━${NC}\n"
-
-    echo -e "${YELLOW}[1/5]${NC} Скачивание AdGuard Home..."
-    local arch
-    case "$(uname -m)" in
-        x86_64)  arch="amd64" ;;
-        aarch64) arch="arm64" ;;
-        armv7l)  arch="armv7" ;;
-        *) echo -e "${RED}  ✗ Архитектура не поддерживается${NC}"; return 1 ;;
-    esac
-
-    local url="https://static.adguard.com/adguardhome/release/AdGuardHome_linux_${arch}.tar.gz"
-    mkdir -p /tmp/agh_install
-    curl -fsSL "$url" -o /tmp/agh_install/agh.tar.gz 2>/dev/null || {
-        echo -e "${RED}  ✗ Не удалось скачать${NC}"; return 1
-    }
-    tar -xzf /tmp/agh_install/agh.tar.gz -C /tmp/agh_install/ 2>/dev/null
-    mkdir -p "$AGH_DIR"
-    cp /tmp/agh_install/AdGuardHome/AdGuardHome "$AGH_DIR/"
-    chmod +x "${AGH_DIR}/AdGuardHome"
-    rm -rf /tmp/agh_install
-    echo -e "${GREEN}  ✓${NC}"
-
-    echo -e "${YELLOW}[2/5]${NC} Выбор DNS порта..."
-    local dns_port; dns_port=$(_agh_ask_port)
-    echo -e "${GREEN}  ✓ Порт: ${dns_port}${NC}"
-
-    echo -e "${YELLOW}[3/5]${NC} Отключение systemd-resolved stub listener..."
-    if systemctl is-active systemd-resolved &>/dev/null && [ "$dns_port" = "53" ]; then
-        mkdir -p /etc/systemd/resolved.conf.d
-        cat > /etc/systemd/resolved.conf.d/govpn.conf << 'EOF'
-[Resolve]
-DNSStubListener=no
-EOF
-        systemctl restart systemd-resolved > /dev/null 2>&1
-        echo -e "${GREEN}  ✓ stub listener отключён${NC}"
-    else
-        echo -e "${GREEN}  ✓ не нужно (порт ${dns_port})${NC}"
-    fi
-
-    echo -e "${YELLOW}[4/5]${NC} Создание конфигурации..."
-    cat > "$AGH_CONF" << EOF
+_agh_write_config() {
+    local dns_port="$1"
+    cat > "$AGH_CONF" << YAML
 bind_host: 0.0.0.0
-bind_port: 3000
-users:
-  - name: admin
-    password: \$2a\$10\$NOTSET
+bind_port: ${AGH_WEB_PORT}
+users: []
 auth_attempts: 5
 block_auth_min: 15
 http_proxy: ""
-language: ""
+language: ru
 theme: auto
 debug_pprof: false
 web_session_ttl: 720
@@ -1868,100 +1795,51 @@ dns:
   port: ${dns_port}
   anonymize_client_ip: false
   ratelimit: 20
-  ratelimit_subnet_len_ipv4: 24
-  ratelimit_subnet_len_ipv6: 56
-  ratelimit_whitelist: []
   refuse_any: true
   upstreams:
     - https://dns.cloudflare.com/dns-query
+    - https://dns.adguard-dns.com/dns-query
     - https://dns.google/dns-query
   bootstrap_dns:
     - 1.1.1.1
     - 8.8.8.8
-  fallback_dns: []
+  fallback_dns:
+    - 1.1.1.1
   upstream_mode: parallel
   fastest_timeout: 1s
-  allowed_clients: []
-  disallowed_clients: []
-  blocked_hosts:
-    - version.bind
-    - id.server
-    - hostname.bind
-  trusted_proxies:
-    - 127.0.0.0/8
-    - ::1/128
   cache_size: 4194304
-  cache_ttl_min: 0
-  cache_ttl_max: 0
   cache_optimistic: true
-  bogus_nxdomain: []
-  aaaa_disabled: false
-  enable_dnssec: false
-  edns_client_subnet:
-    custom_ip: ""
-    enabled: false
-    use_custom: false
-  max_goroutines: 300
-  handle_ddr: true
-  ipset: []
-  ipset_file: ""
-  bootstrap_prefer_ipv6: false
-  upstream_timeout: 10s
-  private_networks: []
-  use_private_ptr_resolvers: true
-  local_ptr_upstreams: []
-  use_dns64: false
-  dns64_prefixes: []
-  serve_http3: false
-  use_http3_upstreams: false
-  serve_plain_dns: true
+  enable_dnssec: true
   hostsfile_enabled: true
 filtering:
-  blocking_ipv4: ""
-  blocking_ipv6: ""
-  blocked_response_ttl: 10
-  protection_disabled_until: null
-  safe_search:
-    enabled: false
-    bing: true
-    duckduckgo: true
-    ecosia: true
-    google: true
-    pixabay: true
-    yandex: true
-    youtube: true
-  blocking_mode: default
-  parental_block_host: family-block.dns.adguard.com
-  safebrowsing_block_host: standard-block.dns.adguard.com
-  rewrites: []
-  safe_browsing_cache_size: 1048576
-  safe_search_cache_size: 1048576
-  parental_cache_size: 1048576
-  cache_time: 30
-  filters_update_interval: 24
-  blocked_services:
-    schedule:
-      time_zone: Local
-    ids: []
-  custom_blocked_response: ""
   filtering_enabled: true
+  safebrowsing_enabled: true
   filters:
     - enabled: true
       url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
       name: AdGuard DNS filter
       id: 1
     - enabled: true
-      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
-      name: AdGuard DNS Popup Hosts filter
-      id: 2
-    - enabled: true
       url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
       name: StevenBlack unified hosts
-      id: 3
+      id: 2
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_4.txt
+      name: AdGuard Mobile Ads filter
+      id: 4
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_9.txt
+      name: NoCoin filter list
+      id: 9
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_11.txt
+      name: Malicious URL Blocklist
+      id: 11
   whitelist_filters: []
   user_rules: []
   parental_enabled: false
-  safebrowsing_enabled: false
+  safe_search:
+    enabled: false
 log:
   enabled: true
   file: ""
@@ -1976,139 +1854,186 @@ os:
   user: ""
   rlimit_nofile: 0
 schema_version: 28
-EOF
-
-    save_config "AGH_DNS_PORT" "$dns_port"
-    echo -e "${GREEN}  ✓ Конфиг создан${NC}"
-
-    echo -e "${YELLOW}[5/5]${NC} Запуск сервиса..."
-    "${AGH_DIR}/AdGuardHome" -s install > /dev/null 2>&1
-    systemctl enable AdGuardHome > /dev/null 2>&1
-    systemctl start AdGuardHome > /dev/null 2>&1
-    sleep 2
-
-    _agh_running && echo -e "${GREEN}  ✓ AdGuard Home запущен${NC}" || {
-        echo -e "${RED}  ✗ Не запустился${NC}"
-        return 1
-    }
-
-    log_action "AGH INSTALL: port=${dns_port}"
-    echo -e "\n${GREEN}AdGuard Home установлен!${NC}"
-    echo -e "${WHITE}Веб-панель: ${CYAN}http://${MY_IP}:3000${NC}"
-    echo -e "${WHITE}DNS порт: ${CYAN}${dns_port}${NC}"
-    return 0
+YAML
 }
 
-_agh_apply_clients() {
+_agh_install() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка AdGuard Home ━━━${NC}\n"
+
+    echo -e "${YELLOW}[1/4]${NC} Скачивание..."
+    if ! _agh_installed; then
+        local arch
+        case "$(uname -m)" in
+            x86_64)  arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+            armv7l)  arch="armv7" ;;
+            *) echo -e "${RED}  ✗ Архитектура не поддерживается${NC}"; read -p "Enter..."; return 1 ;;
+        esac
+        local url="https://static.adguard.com/adguardhome/release/AdGuardHome_linux_${arch}.tar.gz"
+        mkdir -p /tmp/agh_install
+        curl -fsSL "$url" -o /tmp/agh_install/agh.tar.gz 2>/dev/null || {
+            echo -e "${RED}  ✗ Не удалось скачать${NC}"; rm -rf /tmp/agh_install; read -p "Enter..."; return 1
+        }
+        tar -xzf /tmp/agh_install/agh.tar.gz -C /tmp/agh_install/ 2>/dev/null
+        mkdir -p "$AGH_DIR"
+        cp /tmp/agh_install/AdGuardHome/AdGuardHome "$AGH_BIN"
+        chmod +x "$AGH_BIN"
+        rm -rf /tmp/agh_install
+        echo -e "${GREEN}  ✓ Скачан${NC}"
+    else
+        echo -e "${GREEN}  ✓ Уже установлен${NC}"
+    fi
+
+    echo -e "${YELLOW}[2/4]${NC} Выбор DNS порта..."
+    local dns_port="5335"
+    # 53 занят только на loopback - для 0.0.0.0 свободен, но оставим 5335 для безопасности
+    echo -e "  ${WHITE}Рекомендуется: ${GREEN}5335${NC} (systemd-resolved использует 53)"
+    echo -e "  ${WHITE}DNS порт (Enter = 5335):${NC}"
+    read -p "  > " user_port
+    [ -n "$user_port" ] && [[ "$user_port" =~ ^[0-9]+$ ]] && dns_port="$user_port"
+    save_config "AGH_DNS_PORT" "$dns_port"
+    echo -e "${GREEN}  ✓ Порт: ${dns_port}${NC}"
+
+    echo -e "${YELLOW}[3/4]${NC} Создание конфигурации..."
+    _agh_write_config "$dns_port"
+    echo -e "${GREEN}  ✓ Конфиг создан${NC}"
+
+    echo -e "${YELLOW}[4/4]${NC} Запуск сервиса..."
+    "$AGH_BIN" -s install > /dev/null 2>&1
+    systemctl enable AdGuardHome > /dev/null 2>&1
+    systemctl start AdGuardHome > /dev/null 2>&1
+    sleep 3
+
+    if _agh_running; then
+        echo -e "${GREEN}  ✓ AdGuard Home запущен!${NC}"
+        echo ""
+        echo -e "  ${WHITE}Веб-панель: ${CYAN}http://${MY_IP}:${AGH_WEB_PORT}${NC}"
+        echo -e "  ${WHITE}DNS порт:   ${CYAN}${dns_port}${NC}"
+        echo -e "  ${WHITE}Upstream:   ${CYAN}Cloudflare DoH + AdGuard DoH + Google DoH${NC}"
+        log_action "AGH INSTALL: dns_port=${dns_port}"
+    else
+        echo -e "${RED}  ✗ Не запустился${NC}"
+        echo -e "${YELLOW}  Диагностика: journalctl -u AdGuardHome -n 20${NC}"
+        read -p "Enter..."; return 1
+    fi
+    echo ""; read -p "Нажмите Enter..."; return 0
+}
+
+_agh_selected_clients() {
+    [ -f "$AGH_CLIENTS_FILE" ] && grep -v '^$' "$AGH_CLIENTS_FILE" || true
+}
+
+_agh_apply_rules() {
     local iface; iface=$(_awg_iface)
+    local dns_port; dns_port=$(_agh_dns_port)
     local -a selected=("$@")
-    local dns_port; dns_port=$(grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2)
-    dns_port="${dns_port:-5335}"
 
     # Очистить старые правила
-    iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:agh" | \
-        sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
+    docker exec "$AWG_CONTAINER" sh -c "
+        iptables -t nat -S PREROUTING 2>/dev/null | grep 'govpn:agh' | \
+            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
+    " > /dev/null 2>&1
 
     [ "${#selected[@]}" -eq 0 ] && return 0
 
     for ip in "${selected[@]}"; do
-        # Редирект DNS трафика клиента на AdGuard
-        iptables -t nat -A PREROUTING -i "$iface" -s "$ip" \
-            -p udp --dport 53 -j REDIRECT --to-port "$dns_port" \
-            -m comment --comment "govpn:agh:${ip}" > /dev/null 2>&1
-        iptables -t nat -A PREROUTING -i "$iface" -s "$ip" \
-            -p tcp --dport 53 -j REDIRECT --to-port "$dns_port" \
-            -m comment --comment "govpn:agh:${ip}" > /dev/null 2>&1
+        local bare="${ip%/32}"
+        docker exec "$AWG_CONTAINER" sh -c "
+            iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p udp --dport 53 \
+                -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true
+            iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p tcp --dport 53 \
+                -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true
+        " > /dev/null 2>&1
     done
-    save_iptables
 }
 
 _agh_patch_start_sh() {
-    # Аналогично WARP — для контейнера Amnezia
     local start_sh="/opt/amnezia/start.sh"
     local iface; iface=$(_awg_iface)
-    local dns_port; dns_port=$(grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2)
-    dns_port="${dns_port:-5335}"
+    local dns_port; dns_port=$(_agh_dns_port)
     local -a selected=("$@")
 
     docker exec "$AWG_CONTAINER" sh -c \
         "[ -f /opt/amnezia/start.sh.govpn-backup ] || cp '${start_sh}' /opt/amnezia/start.sh.govpn-backup" 2>/dev/null
 
+    docker exec "$AWG_CONTAINER" sh -c \
+        "sed -i '/# --- GOVPN AGH BEGIN ---/,/# --- GOVPN AGH END ---/d' '${start_sh}' 2>/dev/null || true"
+
+    [ "${#selected[@]}" -eq 0 ] && return 0
+
     local block="${AGH_MARKER_B}"$'\n'
     for ip in "${selected[@]}"; do
-        block+="iptables -t nat -C PREROUTING -i ${iface} -s ${ip} -p udp --dport 53 -j REDIRECT --to-port ${dns_port} 2>/dev/null || \\"$'\n'
-        block+="    iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p udp --dport 53 -j REDIRECT --to-port ${dns_port}"$'\n'
-        block+="iptables -t nat -C PREROUTING -i ${iface} -s ${ip} -p tcp --dport 53 -j REDIRECT --to-port ${dns_port} 2>/dev/null || \\"$'\n'
-        block+="    iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p tcp --dport 53 -j REDIRECT --to-port ${dns_port}"$'\n'
+        local bare="${ip%/32}"
+        block+="iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p udp --dport 53 -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true"$'\n'
+        block+="iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p tcp --dport 53 -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true"$'\n'
     done
     block+="${AGH_MARKER_E}"
 
-    docker exec "$AWG_CONTAINER" sh -c \
-        "sed -i '/# --- GOVPN AGH BEGIN ---/,/# --- GOVPN AGH END ---/d' '${start_sh}' 2>/dev/null || true"
-    docker exec "$AWG_CONTAINER" bash -c "printf '\n%s\n' '${block}' >> '${start_sh}'; chmod +x '${start_sh}'" 2>/dev/null
+    docker exec "$AWG_CONTAINER" bash -c "
+if grep -qF 'tail -f /dev/null' '${start_sh}'; then
+    tmpf=\$(mktemp)
+    while IFS= read -r line; do
+        if echo \"\$line\" | grep -qF 'tail -f /dev/null'; then
+            printf '%s\n' '${block}'
+        fi
+        echo \"\$line\"
+    done < '${start_sh}' > \"\$tmpf\"
+    mv \"\$tmpf\" '${start_sh}'; chmod +x '${start_sh}'
+else
+    printf '\n%s\n' '${block}' >> '${start_sh}'; chmod +x '${start_sh}'
+fi
+" 2>/dev/null
 }
 
 adguard_menu() {
     if ! _agh_installed; then
         clear
         echo -e "\n${CYAN}━━━ AdGuard Home ━━━${NC}\n"
-        echo -e "${WHITE}AdGuard Home не установлен.${NC}"
-        echo -e "${WHITE}Установить DNS фильтрацию рекламы для клиентов?${NC}\n"
-        echo -e "  ${YELLOW}[1]${NC} Установить AdGuard Home"
+        echo -e "${WHITE}AdGuard Home не установлен.${NC}\n"
+        echo -e "  ${YELLOW}[1]${NC} Установить"
         echo -e "  ${YELLOW}[0]${NC} Назад"
         read -p "Выбор: " ch
-        [ "$ch" = "1" ] && _agh_install || return
-        _agh_running || { read -p "Enter..."; return; }
+        [ "$ch" = "1" ] || return
+        _agh_install || return
     fi
 
-    # Загружаем список клиентов с AGH
+    if ! _agh_running; then
+        echo -e "${YELLOW}Запускаем AdGuard...${NC}"
+        systemctl start AdGuardHome > /dev/null 2>&1; sleep 2
+    fi
+
     local -a agh_sel=()
-    local agh_loaded=0
+    while IFS= read -r ip; do [ -n "$ip" ] && agh_sel+=("$ip"); done <<< "$(_agh_selected_clients)"
 
     while true; do
         clear
         echo -e "\n${CYAN}━━━ AdGuard Home — DNS фильтрация ━━━${NC}\n"
 
-        local dns_port; dns_port=$(grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2)
-        dns_port="${dns_port:-5335}"
-
+        local dns_port; dns_port=$(_agh_dns_port)
         if _agh_running; then
             echo -e "  ${WHITE}Статус:   ${GREEN}● запущен${NC}"
-            echo -e "  ${WHITE}DNS порт: ${CYAN}${dns_port}${NC}"
-            echo -e "  ${WHITE}Веб:      ${CYAN}http://${MY_IP}:3000${NC}"
         else
             echo -e "  ${WHITE}Статус:   ${RED}● не запущен${NC}"
         fi
+        echo -e "  ${WHITE}DNS порт: ${CYAN}${dns_port}${NC}"
+        echo -e "  ${WHITE}Веб:      ${CYAN}http://${MY_IP}:${AGH_WEB_PORT}${NC}"
         echo ""
 
-        # Клиенты AWG
         local -a all_ips=()
-        if is_amnezia; then
-            while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
-        fi
+        is_amnezia && while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
 
-        # Также клиенты из iptables правил (для non-Amnezia)
-        if [ ${#all_ips[@]} -eq 0 ]; then
-            echo -e "${YELLOW}Нет клиентов AWG.${NC}\n"
-        else
-            if [ "$agh_loaded" -eq 0 ]; then
-                while IFS= read -r ip; do [ -n "$ip" ] && agh_sel+=("$ip"); done < \
-                    <([ -f "$AGH_CLIENTS_FILE" ] && cat "$AGH_CLIENTS_FILE" || true)
-                agh_loaded=1
-            fi
-
-            echo -e "${WHITE}Клиенты (DNS фильтрация):${NC}"
+        if [ "${#all_ips[@]}" -gt 0 ]; then
+            echo -e "${WHITE}Клиенты AWG:${NC}"
             for i in "${!all_ips[@]}"; do
                 local ip="${all_ips[$i]}"
                 local name; name=$(_awg_client_name "$ip")
                 local label="${name:-${ip%/32}}"
                 local in_agh=0
                 for s in "${agh_sel[@]}"; do [ "$s" = "$ip" ] && in_agh=1; done
-                if [ "$in_agh" -eq 1 ]; then
-                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}"
-                else
+                [ "$in_agh" -eq 1 ] && \
+                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}" || \
                     echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
-                fi
             done
             echo ""
         fi
@@ -2117,13 +2042,15 @@ adguard_menu() {
         echo -e "  ${YELLOW}[n]${NC}  Выключить всем"
         echo -e "  ${YELLOW}[s]${NC}  Применить"
         echo -e "  ${YELLOW}[r]${NC}  Перезапустить AdGuard"
+        echo -e "  ${YELLOW}[u]${NC}  Обновить фильтры"
         echo -e "  ${RED}[x]${NC}  Удалить AdGuard Home"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        read -p "Выбор (Enter = обновить): " ch
+        [ -z "$ch" ] && continue
 
         case "$ch" in
-            [1-9])
+            [1-9]|1[0-9]|2[0-9])
                 local idx=$((ch-1))
                 [ -z "${all_ips[$idx]:-}" ] && continue
                 local tip="${all_ips[$idx]}"
@@ -2143,55 +2070,44 @@ adguard_menu() {
                 echo -e "${YELLOW}[1/3]${NC} Сохраняем список..."
                 printf '%s\n' "${agh_sel[@]}" > "$AGH_CLIENTS_FILE"
                 echo -e "${GREEN}  ✓${NC}"
-
-                echo -e "${YELLOW}[2/3]${NC} Применяем iptables правила..."
-                if is_amnezia; then
-                    # Внутри контейнера
-                    docker exec "$AWG_CONTAINER" sh -c "
-                        iptables -t nat -S PREROUTING | grep 'govpn:agh' | \
-                            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null; done
-                    " > /dev/null 2>&1
-                    local iface; iface=$(_awg_iface)
-                    for ip in "${agh_sel[@]}"; do
-                        docker exec "$AWG_CONTAINER" sh -c "
-                            iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p udp --dport 53 \
-                                -j REDIRECT --to-port ${dns_port} 2>/dev/null || true
-                            iptables -t nat -A PREROUTING -i ${iface} -s ${ip} -p tcp --dport 53 \
-                                -j REDIRECT --to-port ${dns_port} 2>/dev/null || true
-                        " > /dev/null 2>&1
-                    done
-                else
-                    _agh_apply_clients "${agh_sel[@]}"
-                fi
+                echo -e "${YELLOW}[2/3]${NC} Применяем правила..."
+                is_amnezia && _agh_apply_rules "${agh_sel[@]}"
                 echo -e "${GREEN}  ✓${NC}"
-
-                echo -e "${YELLOW}[3/3]${NC} Персистентность (start.sh)..."
+                echo -e "${YELLOW}[3/3]${NC} Персистентность..."
                 is_amnezia && _agh_patch_start_sh "${agh_sel[@]}"
                 echo -e "${GREEN}  ✓${NC}"
-
-                log_action "AGH CLIENTS: ${#agh_sel[@]} с DNS фильтрацией"
-                echo -e "\n${GREEN}Применено. DNS трафик выбранных клиентов → AdGuard Home${NC}"
+                echo -e "\n${GREEN}Применено для ${#agh_sel[@]} клиентов.${NC}"
+                log_action "AGH CLIENTS: ${#agh_sel[@]}"
                 read -p "Нажмите Enter..." ;;
             r|R)
-                systemctl restart AdGuardHome && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Ошибка${NC}"
+                systemctl restart AdGuardHome > /dev/null 2>&1 && sleep 2
+                _agh_running && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Ошибка${NC}"
                 sleep 1 ;;
+            u|U)
+                echo -e "${YELLOW}Обновление фильтров...${NC}"
+                curl -s "http://localhost:${AGH_WEB_PORT}/control/filtering/refresh" \
+                    -X POST > /dev/null 2>&1 && \
+                    echo -e "${GREEN}OK${NC}" || echo -e "${YELLOW}Используйте веб-панель${NC}"
+                sleep 2 ;;
             x|X)
                 read -p "$(echo -e "${RED}Удалить AdGuard Home? (y/n): ${NC}")" c
-                [ "$c" = "y" ] && {
-                    systemctl stop AdGuardHome > /dev/null 2>&1
-                    "${AGH_DIR}/AdGuardHome" -s uninstall > /dev/null 2>&1
-                    rm -rf "$AGH_DIR"
-                    iptables -t nat -S PREROUTING 2>/dev/null | grep "govpn:agh" | \
-                        sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r 2>/dev/null; done
-                    save_iptables
-                    echo -e "${GREEN}Удалён.${NC}"
-                    log_action "AGH UNINSTALL"
-                    read -p "Enter..."; return
-                } ;;
-            0|"") return ;;
+                [ "$c" = "y" ] || continue
+                systemctl stop AdGuardHome > /dev/null 2>&1
+                "$AGH_BIN" -s uninstall > /dev/null 2>&1
+                rm -rf "$AGH_DIR" "$AGH_CLIENTS_FILE"
+                is_amnezia && docker exec "$AWG_CONTAINER" sh -c "
+                    iptables -t nat -S PREROUTING 2>/dev/null | grep 'govpn:agh' | \
+                        sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
+                    sed -i '/# --- GOVPN AGH BEGIN ---/,/# --- GOVPN AGH END ---/d' /opt/amnezia/start.sh 2>/dev/null || true
+                " > /dev/null 2>&1
+                echo -e "${GREEN}AdGuard Home удалён.${NC}"
+                log_action "AGH UNINSTALL"
+                read -p "Enter..."; return ;;
+            0) return ;;
         esac
     done
 }
+
 
 # ═══════════════════════════════════════════════════════════════
 #  УПРАВЛЕНИЕ ПИРАМИ AWG (создание/удаление клиентов)
