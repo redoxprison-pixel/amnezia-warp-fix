@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.0"
+VERSION="4.1"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -875,20 +875,20 @@ awg_clients_menu() {
         echo ""
         read -p "Выбор: " ch
 
+        if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#all_ips[@]} )); then
+            local idx=$((ch-1))
+            local tip="${all_ips[$idx]}"
+            local already=0
+            for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
+            if [ "$already" -eq 1 ]; then
+                local -a tmp=()
+                for s in "${sel_ips[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
+                sel_ips=("${tmp[@]}")
+            else
+                sel_ips+=("$tip")
+            fi
+        else
         case "$ch" in
-            [1-9])
-                local idx=$((ch-1))
-                [ -z "${all_ips[$idx]:-}" ] && continue
-                local tip="${all_ips[$idx]}"
-                local already=0
-                for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
-                if [ "$already" -eq 1 ]; then
-                    local -a tmp=()
-                    for s in "${sel_ips[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
-                    sel_ips=("${tmp[@]}")
-                else
-                    sel_ips+=("$tip")
-                fi ;;
             a|A) sel_ips=("${all_ips[@]}") ;;
             n|N) sel_ips=() ;;
             s|S)
@@ -911,6 +911,7 @@ awg_clients_menu() {
                 read -p "Нажмите Enter..." ;;
             0|"") return ;;
         esac
+        fi
     done
 }
 
@@ -2049,20 +2050,20 @@ adguard_menu() {
         read -p "Выбор (Enter = обновить): " ch
         [ -z "$ch" ] && continue
 
+        if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#all_ips[@]} )); then
+            local idx=$((ch-1))
+            local tip="${all_ips[$idx]}"
+            local already=0
+            for s in "${agh_sel[@]}"; do [ "$s" = "$tip" ] && already=1; done
+            if [ "$already" -eq 1 ]; then
+                local -a tmp=()
+                for s in "${agh_sel[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
+                agh_sel=("${tmp[@]}")
+            else
+                agh_sel+=("$tip")
+            fi
+        else
         case "$ch" in
-            [1-9]|1[0-9]|2[0-9])
-                local idx=$((ch-1))
-                [ -z "${all_ips[$idx]:-}" ] && continue
-                local tip="${all_ips[$idx]}"
-                local already=0
-                for s in "${agh_sel[@]}"; do [ "$s" = "$tip" ] && already=1; done
-                if [ "$already" -eq 1 ]; then
-                    local -a tmp=()
-                    for s in "${agh_sel[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
-                    agh_sel=("${tmp[@]}")
-                else
-                    agh_sel+=("$tip")
-                fi ;;
             a|A) agh_sel=("${all_ips[@]}") ;;
             n|N) agh_sel=() ;;
             s|S)
@@ -2105,6 +2106,7 @@ adguard_menu() {
                 read -p "Enter..."; return ;;
             0) return ;;
         esac
+        fi
     done
 }
 
