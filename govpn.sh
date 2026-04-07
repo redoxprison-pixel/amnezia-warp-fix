@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.1"
+VERSION="4.2"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -495,17 +495,31 @@ _awg_tunnel_up() {
     _awg_warp_running
 }
 
+_awg_cleanup_legacy() {
+    # Удалить устаревшие глобальные fwmark правила
+    local iface; iface=$(_awg_iface)
+    local start_sh="/opt/amnezia/start.sh"
+    docker exec "$AWG_CONTAINER" sh -c "
+        iptables -t mangle -D PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true
+        ip rule list | awk '/fwmark.*lookup 100/{print \$1}' | sed 's/://' | sort -rn | \
+            while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done
+        sed -i '/iptables -t mangle -A PREROUTING.*MARK --set-mark 100/d' '${start_sh}' 2>/dev/null || true
+        sed -i '/ip rule add fwmark 100 lookup 100/d' '${start_sh}' 2>/dev/null || true
+    " > /dev/null 2>&1
+}
+
 _awg_apply_rules() {
-    # ip rule внутри контейнера для выбранных клиентов
     local -a selected=("$@")
     local iface; iface=$(_awg_iface)
 
-    # Очистить старые правила
+    # Полная очистка — и ip rule from IP и fwmark (старый подход)
     docker exec "$AWG_CONTAINER" sh -c "
-        ip rule list | grep 'lookup 100' | awk '{print \$1}' | sed 's/://' | sort -rn | \
+        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' | sort -rn | \
             while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done
+        ip rule del fwmark 0x64 lookup 100 2>/dev/null || true
+        ip rule del fwmark 100 lookup 100 2>/dev/null || true
         iptables -t mangle -D PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true
-        iptables -t nat -S POSTROUTING 2>/dev/null | grep 'o warp -j MASQUERADE' | \
+        iptables -t nat -S POSTROUTING 2>/dev/null | grep 'warp.*MASQUERADE' | \
             sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
         ip route flush table 100 2>/dev/null || true
     " > /dev/null 2>&1
@@ -516,17 +530,16 @@ _awg_apply_rules() {
     docker exec "$AWG_CONTAINER" sh -c \
         "ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"
 
-    # Маркировка всего трафика с VPN интерфейса + per-client MASQUERADE
-    docker exec "$AWG_CONTAINER" sh -c "
-        iptables -t mangle -A PREROUTING -i ${iface} -j MARK --set-mark 100
-        ip rule add fwmark 100 lookup 100 2>/dev/null || true
-    " > /dev/null 2>&1
-
+    # Per-client ip rule from IP (без fwmark)
+    local prio=100
     for ip in "${selected[@]}"; do
+        local bare="${ip%/32}"
         docker exec "$AWG_CONTAINER" sh -c "
-            iptables -t nat -C POSTROUTING -s ${ip} -o warp -j MASQUERADE 2>/dev/null || \
-            iptables -t nat -I POSTROUTING 1 -s ${ip} -o warp -j MASQUERADE
+            ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true
+            iptables -t nat -C POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -I POSTROUTING 1 -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true
         " > /dev/null 2>&1
+        ((prio++))
     done
 }
 
@@ -547,12 +560,20 @@ _awg_patch_start_sh() {
     block+="fi"$'\n'
 
     if [ "${#selected[@]}" -gt 0 ]; then
+        # Очистка устаревших глобальных правил при старте
+        block+="iptables -t mangle -D PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true"$'\n'
+        block+="ip rule del fwmark 0x64 lookup 100 2>/dev/null || true"$'\n'
+        block+="ip rule del fwmark 100 lookup 100 2>/dev/null || true"$'\n'
+        block+="ip rule list | awk '/fwmark.*lookup 100/{print \$1}' | sed 's/://' | sort -rn | while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done"$'\n'
+        # Таблица маршрутизации
         block+="ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
-        block+="iptables -t mangle -A PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true"$'\n'
-        block+="ip rule add fwmark 100 lookup 100 2>/dev/null || true"$'\n'
+        # Per-client правила
+        local prio=100
         for ip in "${selected[@]}"; do
-            block+="iptables -t nat -C POSTROUTING -s ${ip} -o warp -j MASQUERADE 2>/dev/null || \
-iptables -t nat -I POSTROUTING 1 -s ${ip} -o warp -j MASQUERADE"$'\n'
+            local bare="${ip%/32}"
+            block+="ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true"$'\n'
+            block+="iptables -t nat -C POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
+            ((prio++))
         done
     fi
     block+="${AWG_MARKER_E}"
@@ -876,17 +897,17 @@ awg_clients_menu() {
         read -p "Выбор: " ch
 
         if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#all_ips[@]} )); then
-            local idx=$((ch-1))
-            local tip="${all_ips[$idx]}"
-            local already=0
-            for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
-            if [ "$already" -eq 1 ]; then
-                local -a tmp=()
-                for s in "${sel_ips[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
-                sel_ips=("${tmp[@]}")
-            else
-                sel_ips+=("$tip")
-            fi
+                local idx=$((ch-1))
+                local tip="${all_ips[$idx]}"
+                local already=0
+                for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
+                if [ "$already" -eq 1 ]; then
+                    local -a tmp=()
+                    for s in "${sel_ips[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
+                    sel_ips=("${tmp[@]}")
+                else
+                    sel_ips+=("$tip")
+                fi
         else
         case "$ch" in
             a|A) sel_ips=("${all_ips[@]}") ;;
@@ -2051,17 +2072,17 @@ adguard_menu() {
         [ -z "$ch" ] && continue
 
         if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#all_ips[@]} )); then
-            local idx=$((ch-1))
-            local tip="${all_ips[$idx]}"
-            local already=0
-            for s in "${agh_sel[@]}"; do [ "$s" = "$tip" ] && already=1; done
-            if [ "$already" -eq 1 ]; then
-                local -a tmp=()
-                for s in "${agh_sel[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
-                agh_sel=("${tmp[@]}")
-            else
-                agh_sel+=("$tip")
-            fi
+                local idx=$((ch-1))
+                local tip="${all_ips[$idx]}"
+                local already=0
+                for s in "${agh_sel[@]}"; do [ "$s" = "$tip" ] && already=1; done
+                if [ "$already" -eq 1 ]; then
+                    local -a tmp=()
+                    for s in "${agh_sel[@]}"; do [ -n "$s" ] && [ "$s" != "$tip" ] && tmp+=("$s"); done
+                    agh_sel=("${tmp[@]}")
+                else
+                    agh_sel+=("$tip")
+                fi
         else
         case "$ch" in
             a|A) agh_sel=("${all_ips[@]}") ;;
