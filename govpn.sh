@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.2"
+VERSION="4.3"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -888,12 +888,13 @@ awg_clients_menu() {
             local ip="${all_ips[$i]}"
             local name; name=$(_awg_client_name "$ip")
             local label="${name:-${ip%/32}}"
+            local octet="${ip%/32}"; octet="${octet##*.}"
             local in_warp=0
             for s in "${sel_ips[@]}"; do [ "$s" = "$ip" ] && in_warp=1; done
             if [ "$in_warp" -eq 1 ]; then
-                echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}"
+                echo -e "  ${YELLOW}[${octet}]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}"
             else
-                echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
+                echo -e "  ${YELLOW}[${octet}]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
             fi
         done
 
@@ -905,9 +906,14 @@ awg_clients_menu() {
         echo ""
         read -p "Выбор: " ch
 
-        if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#all_ips[@]} )); then
-                local idx=$((ch-1))
-                local tip="${all_ips[$idx]}"
+        if [[ "$ch" =~ ^[0-9]+$ ]]; then
+            # Ищем IP по последнему октету
+            local tip=""
+            for ip in "${all_ips[@]}"; do
+                local oct="${ip%/32}"; oct="${oct##*.}"
+                [ "$oct" = "$ch" ] && tip="$ip" && break
+            done
+            if [ -n "$tip" ]; then
                 local already=0
                 for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
                 if [ "$already" -eq 1 ]; then
@@ -917,6 +923,7 @@ awg_clients_menu() {
                 else
                     sel_ips+=("$tip")
                 fi
+            fi
         else
         case "$ch" in
             a|A) sel_ips=("${all_ips[@]}") ;;
@@ -1918,12 +1925,14 @@ _agh_install() {
 
     echo -e "${YELLOW}[2/4]${NC} Выбор DNS порта..."
     local dns_port="5335"
-    # 53 занят только на loopback - для 0.0.0.0 свободен, но оставим 5335 для безопасности
-    echo -e "  ${WHITE}Рекомендуется: ${GREEN}5335${NC} (systemd-resolved использует 53)"
-    echo -e "  ${WHITE}DNS порт (Enter = 5335):${NC}"
+    echo "  Рекомендуется: 5335 (systemd-resolved использует 53 только на loopback)"
+    echo "  DNS порт (Enter = 5335):"
     read -p "  > " user_port
     [ -n "$user_port" ] && [[ "$user_port" =~ ^[0-9]+$ ]] && dns_port="$user_port"
-    save_config "AGH_DNS_PORT" "$dns_port"
+    # Сохраняем без цветов
+    grep -q "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null && \
+        sed -i "s|^AGH_DNS_PORT=.*|AGH_DNS_PORT=\"${dns_port}\"|" "$CONF_FILE" || \
+        echo "AGH_DNS_PORT=\"${dns_port}\"" >> "$CONF_FILE"
     echo -e "${GREEN}  ✓ Порт: ${dns_port}${NC}"
 
     echo -e "${YELLOW}[3/4]${NC} Создание конфигурации..."
@@ -2075,11 +2084,12 @@ adguard_menu() {
                 local ip="${all_ips[$i]}"
                 local name; name=$(_awg_client_name "$ip")
                 local label="${name:-${ip%/32}}"
+                local octet="${ip%/32}"; octet="${octet##*.}"
                 local in_agh=0
                 for s in "${agh_sel[@]}"; do [ "$s" = "$ip" ] && in_agh=1; done
                 [ "$in_agh" -eq 1 ] && \
-                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}" || \
-                    echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
+                    echo -e "  ${YELLOW}[${octet}]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}" || \
+                    echo -e "  ${YELLOW}[${octet}]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
             done
             echo ""
         fi
@@ -2087,6 +2097,7 @@ adguard_menu() {
         echo -e "  ${YELLOW}[a]${NC}  Включить всем"
         echo -e "  ${YELLOW}[n]${NC}  Выключить всем"
         echo -e "  ${YELLOW}[s]${NC}  Применить"
+        echo -e "  ${YELLOW}[t]${NC}  Тест DNS фильтрации"
         echo -e "  ${YELLOW}[r]${NC}  Перезапустить AdGuard"
         echo -e "  ${YELLOW}[u]${NC}  Обновить фильтры"
         echo -e "  ${RED}[x]${NC}  Удалить AdGuard Home"
@@ -2095,9 +2106,13 @@ adguard_menu() {
         read -p "Выбор (Enter = обновить): " ch
         [ -z "$ch" ] && continue
 
-        if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#all_ips[@]} )); then
-                local idx=$((ch-1))
-                local tip="${all_ips[$idx]}"
+        if [[ "$ch" =~ ^[0-9]+$ ]]; then
+            local tip=""
+            for ip in "${all_ips[@]}"; do
+                local oct="${ip%/32}"; oct="${oct##*.}"
+                [ "$oct" = "$ch" ] && tip="$ip" && break
+            done
+            if [ -n "$tip" ]; then
                 local already=0
                 for s in "${agh_sel[@]}"; do [ "$s" = "$tip" ] && already=1; done
                 if [ "$already" -eq 1 ]; then
@@ -2107,6 +2122,7 @@ adguard_menu() {
                 else
                     agh_sel+=("$tip")
                 fi
+            fi
         else
         case "$ch" in
             a|A) agh_sel=("${all_ips[@]}") ;;
@@ -2129,6 +2145,29 @@ adguard_menu() {
                 systemctl restart AdGuardHome > /dev/null 2>&1 && sleep 2
                 _agh_running && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Ошибка${NC}"
                 sleep 1 ;;
+            t|T)
+                clear
+                echo -e "\n${CYAN}━━━ Тест AdGuard DNS ━━━${NC}\n"
+                echo -e "${WHITE}Проверяем блокировку рекламных доменов:${NC}\n"
+                for domain in doubleclick.net googlesyndication.com adservice.google.com yandex.ru/an; do
+                    local result
+                    result=$(dig @127.0.0.1 -p "${dns_port}" "${domain%%/*}" +short 2>/dev/null | head -1)
+                    if [ -z "$result" ] || [ "$result" = "0.0.0.0" ] || [ "$result" = "::" ]; then
+                        echo -e "  ${GREEN}✅ заблокирован:${NC} ${domain}"
+                    else
+                        echo -e "  ${RED}❌ не заблокирован:${NC} ${domain} → ${result}"
+                    fi
+                done
+                echo ""
+                echo -e "${WHITE}Проверка DNS ответа:${NC}"
+                dig @127.0.0.1 -p "${dns_port}" google.com +short 2>/dev/null | head -2 | \
+                    while read -r r; do echo -e "  google.com → ${GREEN}${r}${NC}"; done
+                echo ""
+                echo -e "${WHITE}Правила внутри контейнера:${NC}"
+                docker exec "$AWG_CONTAINER" iptables -t nat -L PREROUTING -n 2>/dev/null | \
+                    grep "govpn:agh" | while read -r r; do echo -e "  ${CYAN}${r}${NC}"; done
+                echo ""
+                read -p "Нажмите Enter..." ;;
             u|U)
                 echo -e "${YELLOW}Обновление фильтров...${NC}"
                 curl -s "http://localhost:${AGH_WEB_PORT}/control/filtering/refresh" \
