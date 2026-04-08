@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.3"
+VERSION="4.4"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -906,6 +906,8 @@ awg_clients_menu() {
         echo ""
         read -p "Выбор: " ch
 
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
         if [[ "$ch" =~ ^[0-9]+$ ]]; then
             # Ищем IP по последнему октету
             local tip=""
@@ -946,7 +948,6 @@ awg_clients_menu() {
                 echo -e "\n${GREEN}Применено. Изменения активны.${NC}"
                 echo -e "${WHITE}Перезапуск контейнера не нужен — правила применились сразу.${NC}"
                 read -p "Нажмите Enter..." ;;
-            0|"") return ;;
         esac
         fi
     done
@@ -1808,7 +1809,13 @@ AGH_MARKER_B="# --- GOVPN AGH BEGIN ---"
 AGH_MARKER_E="# --- GOVPN AGH END ---"
 
 _agh_installed() { [ -f "$AGH_BIN" ]; }
-_agh_running()   { systemctl is-active AdGuardHome &>/dev/null; }
+_agh_running()   {
+    systemctl is-active AdGuardHome &>/dev/null && return 0
+    # Fallback — проверить порт
+    local port; port=$(_agh_dns_port)
+    ss -tlnup 2>/dev/null | grep -q ":${port} " && return 0
+    return 1
+}
 
 _agh_dns_port() {
     grep "^AGH_DNS_PORT=" "$CONF_FILE" 2>/dev/null | cut -d'"' -f2 || echo "5335"
@@ -2106,6 +2113,8 @@ adguard_menu() {
         read -p "Выбор (Enter = обновить): " ch
         [ -z "$ch" ] && continue
 
+        [ "$ch" = "0" ] && return
+
         if [[ "$ch" =~ ^[0-9]+$ ]]; then
             local tip=""
             for ip in "${all_ips[@]}"; do
@@ -2188,7 +2197,6 @@ adguard_menu() {
                 echo -e "${GREEN}AdGuard Home удалён.${NC}"
                 log_action "AGH UNINSTALL"
                 read -p "Enter..."; return ;;
-            0) return ;;
         esac
         fi
     done
