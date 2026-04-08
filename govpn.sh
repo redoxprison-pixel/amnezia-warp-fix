@@ -578,26 +578,35 @@ _awg_patch_start_sh() {
     fi
     block+="${AWG_MARKER_E}"
 
-    # Удалить старый блок
-    docker exec "$AWG_CONTAINER" sh -c \
-        "sed -i '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d' '${start_sh}' 2>/dev/null || true"
+    # Удалить старый GOVPN блок (все варианты названий)
+    docker exec "$AWG_CONTAINER" sh -c "
+        sed -i '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d' '${start_sh}' 2>/dev/null || true
+        sed -i '/# --- WARP BEGIN ---/,/# --- WARP END ---/d' '${start_sh}' 2>/dev/null || true
+    " 2>/dev/null
 
-    # Вставить перед tail -f /dev/null
+    # Вставить ПОСЛЕ WARP-MANAGER END если есть, иначе перед tail
     docker exec "$AWG_CONTAINER" bash -c "
-if grep -qF 'tail -f /dev/null' '${start_sh}'; then
-    tmpf=\$(mktemp)
+tmpf=\$(mktemp)
+if grep -qF '# --- WARP-MANAGER END ---' '${start_sh}'; then
+    while IFS= read -r line; do
+        echo \"\$line\"
+        if echo \"\$line\" | grep -qF '# --- WARP-MANAGER END ---'; then
+            printf '%s\n' '${block}'
+        fi
+    done < '${start_sh}' > \"\$tmpf\"
+elif grep -qF 'tail -f /dev/null' '${start_sh}'; then
     while IFS= read -r line; do
         if echo \"\$line\" | grep -qF 'tail -f /dev/null'; then
             printf '%s\n' '${block}'
         fi
         echo \"\$line\"
     done < '${start_sh}' > \"\$tmpf\"
-    mv \"\$tmpf\" '${start_sh}'
-    chmod +x '${start_sh}'
 else
-    printf '\n%s\n' '${block}' >> '${start_sh}'
-    chmod +x '${start_sh}'
+    cp '${start_sh}' \"\$tmpf\"
+    printf '\n%s\n' '${block}' >> \"\$tmpf\"
 fi
+mv \"\$tmpf\" '${start_sh}'
+chmod +x '${start_sh}'
 " 2>/dev/null
 }
 
@@ -1951,9 +1960,9 @@ _agh_apply_rules() {
     local dns_port; dns_port=$(_agh_dns_port)
     local -a selected=("$@")
 
-    # Очистить старые правила
+    # Очистить ВСЕ старые AGH правила (и по комментарию и без)
     docker exec "$AWG_CONTAINER" sh -c "
-        iptables -t nat -S PREROUTING 2>/dev/null | grep 'govpn:agh' | \
+        iptables -t nat -S PREROUTING 2>/dev/null | grep -E 'govpn:agh|REDIRECT.*5335|REDIRECT.*53' | \
             sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
     " > /dev/null 2>&1
 
@@ -1976,14 +1985,19 @@ _agh_patch_start_sh() {
     local dns_port; dns_port=$(_agh_dns_port)
     local -a selected=("$@")
 
+    # Бэкап
     docker exec "$AWG_CONTAINER" sh -c \
         "[ -f /opt/amnezia/start.sh.govpn-backup ] || cp '${start_sh}' /opt/amnezia/start.sh.govpn-backup" 2>/dev/null
 
-    docker exec "$AWG_CONTAINER" sh -c \
-        "sed -i '/# --- GOVPN AGH BEGIN ---/,/# --- GOVPN AGH END ---/d' '${start_sh}' 2>/dev/null || true"
+    # Удалить оба возможных старых блока AGH
+    docker exec "$AWG_CONTAINER" sh -c "
+        sed -i '/# --- GOVPN AGH BEGIN ---/,/# --- GOVPN AGH END ---/d' '${start_sh}' 2>/dev/null || true
+        sed -i '/# --- AGH BEGIN ---/,/# --- AGH END ---/d' '${start_sh}' 2>/dev/null || true
+    " 2>/dev/null
 
     [ "${#selected[@]}" -eq 0 ] && return 0
 
+    # Собрать блок
     local block="${AGH_MARKER_B}"$'\n'
     for ip in "${selected[@]}"; do
         local bare="${ip%/32}"
@@ -1992,19 +2006,29 @@ _agh_patch_start_sh() {
     done
     block+="${AGH_MARKER_E}"
 
+    # Вставить после WARP-MANAGER END если есть, иначе перед tail
     docker exec "$AWG_CONTAINER" bash -c "
-if grep -qF 'tail -f /dev/null' '${start_sh}'; then
-    tmpf=\$(mktemp)
+tmpf=\$(mktemp)
+if grep -qF '# --- WARP-MANAGER END ---' '${start_sh}'; then
+    while IFS= read -r line; do
+        echo \"\$line\"
+        if echo \"\$line\" | grep -qF '# --- WARP-MANAGER END ---'; then
+            printf '%s\n' '${block}'
+        fi
+    done < '${start_sh}' > \"\$tmpf\"
+elif grep -qF 'tail -f /dev/null' '${start_sh}'; then
     while IFS= read -r line; do
         if echo \"\$line\" | grep -qF 'tail -f /dev/null'; then
             printf '%s\n' '${block}'
         fi
         echo \"\$line\"
     done < '${start_sh}' > \"\$tmpf\"
-    mv \"\$tmpf\" '${start_sh}'; chmod +x '${start_sh}'
 else
-    printf '\n%s\n' '${block}' >> '${start_sh}'; chmod +x '${start_sh}'
+    cp '${start_sh}' \"\$tmpf\"
+    printf '\n%s\n' '${block}' >> \"\$tmpf\"
 fi
+mv \"\$tmpf\" '${start_sh}'
+chmod +x '${start_sh}'
 " 2>/dev/null
 }
 
