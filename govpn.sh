@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.0"
+VERSION="5.1"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -91,6 +91,35 @@ save_config() {
         echo "${key}=\"${val}\"" >> "$CONF_FILE"
     fi
     source "$CONF_FILE" 2>/dev/null || true
+}
+
+# Транслитерация RU раскладки → EN для букв-команд в меню
+# Позволяет вводить a/n/s/y и их русские аналоги а/н/с/у
+ru_to_en() {
+    local input="$1"
+    case "$input" in
+        # Цифры — без изменений
+        [0-9]) echo "$input"; return ;;
+        # Русские буквы → английские эквиваленты по позиции на клавиатуре
+        "й"|"Й") echo "q" ;;  "ц"|"Ц") echo "w" ;;  "у"|"У") echo "e" ;;
+        "к"|"К") echo "r" ;;  "е"|"Е") echo "t" ;;  "н"|"Н") echo "y" ;;
+        "г"|"Г") echo "u" ;;  "ш"|"Ш") echo "i" ;;  "щ"|"Щ") echo "o" ;;
+        "з"|"З") echo "p" ;;  "ф"|"Ф") echo "a" ;;  "ы"|"Ы") echo "s" ;;
+        "в"|"В") echo "d" ;;  "а"|"А") echo "f" ;;  "п"|"П") echo "g" ;;
+        "р"|"Р") echo "h" ;;  "о"|"О") echo "j" ;;  "л"|"Л") echo "k" ;;
+        "д"|"Д") echo "l" ;;  "я"|"Я") echo "z" ;;  "ч"|"Ч") echo "x" ;;
+        "с"|"С") echo "c" ;;  "м"|"М") echo "v" ;;  "и"|"И") echo "b" ;;
+        "т"|"Т") echo "n" ;;  "ь"|"Ь") echo "m" ;;
+        *) echo "$input" ;;
+    esac
+}
+
+# Читает input с поддержкой RU раскладки
+read_choice() {
+    local prompt="${1:-Выбор: }"
+    local ch
+    read -p "$prompt" ch
+    ru_to_en "$ch"
 }
 
 prepare_system() {
@@ -963,7 +992,7 @@ awg_clients_menu() {
         echo -e "  ${YELLOW}[s]${NC}  Применить"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
 
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
 
@@ -1139,7 +1168,7 @@ iptables_menu() {
         echo -e "  ${RED}[6]${NC}  Сбросить все"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
 
         case "$ch" in
             1) _add_rule "udp" "AmneziaWG/WireGuard" ;;
@@ -1292,7 +1321,7 @@ _delete_rule() {
 
     echo -e "  ${YELLOW}[0]${NC} Назад"
     echo ""
-    read -p "Выбор: " ch
+    ch=$(read_choice "Выбор: ")
     [[ "$ch" == "0" || -z "$ch" ]] && return
     [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#rule_arr[@]} )) || return
 
@@ -1360,7 +1389,7 @@ tools_menu() {
         echo -e "  ${YELLOW}[4]${NC}  Серверы (добавить/переименовать)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _speed_test ;;
             2) _chain_test ;;
@@ -1581,7 +1610,7 @@ _servers_menu() {
         [ ${#ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Переименовать / удалить"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
 
         case "$ch" in
             a|A)
@@ -1671,7 +1700,7 @@ system_menu() {
         echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _backups_menu ;;
             2) _check_conflicts ;;
@@ -2222,7 +2251,7 @@ adguard_menu() {
         echo -e "${WHITE}AdGuard Home не установлен.${NC}\n"
         echo -e "  ${YELLOW}[1]${NC} Установить"
         echo -e "  ${YELLOW}[0]${NC} Назад"
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
         [ "$ch" = "1" ] || return
         _agh_install || return
     fi
@@ -2278,7 +2307,7 @@ adguard_menu() {
         echo -e "  ${RED}[x]${NC}  Удалить AdGuard Home"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор (Enter = обновить): " ch
+        ch=$(read_choice "Выбор (Enter = обновить): ")
         [ -z "$ch" ] && continue
 
         [ "$ch" = "0" ] && return
@@ -2482,7 +2511,7 @@ awg_peers_menu() {
         echo -e "  ${YELLOW}[/]${NC}   Сменить сортировку (${sort_mode})"
         echo -e "  ${YELLOW}[0]${NC}   Назад"
         echo ""
-        read -p "Выбор (Enter = обновить): " ch
+        ch=$(read_choice "Выбор (Enter = обновить): ")
 
         # Пустой Enter — обновить
         [ -z "$ch" ] && continue
@@ -2520,7 +2549,7 @@ _awg_show_client_menu() {
         echo -e "  ${YELLOW}[2]${NC}  Показать QR код"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _awg_show_config "$client_ip" ;;
             2) _awg_show_qr "$client_ip" ;;
@@ -2880,7 +2909,7 @@ _awg_del_peer() {
     done
     echo -e "  ${YELLOW}[0]${NC} Назад"
     echo ""
-    read -p "Выбор: " ch
+    ch=$(read_choice "Выбор: ")
     [[ "$ch" == "0" || -z "$ch" ]] && return
     [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#sorted_ips[@]} )) || return
 
@@ -3040,8 +3069,20 @@ MTG_DOMAINS=(
 MTG_PORTS=(443 8443 2053 2083 2087)
 
 _mtg_list_instances() {
+    # Ищем контейнеры созданные нашим скриптом (mtg-*) и gotelegram (mtproto-proxy*)
     docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | \
-        grep "^mtg-" | sort
+        grep -E "^(mtg-|mtproto-proxy)" | sort
+}
+
+_mtg_count_running() {
+    docker ps --format '{{.Names}}' 2>/dev/null | \
+        grep -cE "^(mtg-|mtproto-proxy)" 2>/dev/null || echo "0"
+}
+
+_mtg_detect_type() {
+    # Определяем тип контейнера — наш (mtg) или gotelegram
+    local name="$1"
+    [[ "$name" == mtg-* ]] && echo "govpn" || echo "external"
 }
 
 _mtg_is_running() {
@@ -3305,7 +3346,7 @@ _mtg_manage() {
         echo -e "  ${RED}[4]${NC}  Удалить прокси"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
 
         case "$ch" in
             1)
@@ -3379,7 +3420,6 @@ _mtg_manage() {
 }
 
 mtproto_menu() {
-    # Проверяем Docker
     if ! command -v docker &>/dev/null; then
         echo -e "${RED}Docker не установлен.${NC}"; read -p "Enter..."; return
     fi
@@ -3390,34 +3430,67 @@ mtproto_menu() {
         clear
         echo -e "\n${CYAN}━━━ MTProto прокси ━━━${NC}\n"
 
-        # Список всех mtg контейнеров
         local -a names=()
         local instances; instances=$(_mtg_list_instances)
 
         if [ -n "$instances" ]; then
             echo -e "${WHITE}Прокси:${NC}"
             while IFS=$'\t' read -r cname status ports; do
-                local port domain link
+                local port domain ctype
+                ctype=$(_mtg_detect_type "$cname")
+
+                # Читаем порт из мета или из docker inspect
                 port=$(grep "^port=" "${MTG_CONF_DIR}/${cname}.meta" 2>/dev/null | cut -d'=' -f2)
+                if [ -z "$port" ]; then
+                    # Читаем из docker ports
+                    port=$(docker inspect "$cname" 2>/dev/null | \
+                        python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+pb=d[0].get('HostConfig',{}).get('PortBindings',{})
+for k,v in pb.items():
+    if v: print(v[0].get('HostPort',''))
+" 2>/dev/null | head -1)
+                fi
+
                 domain=$(grep "^domain=" "${MTG_CONF_DIR}/${cname}.meta" 2>/dev/null | cut -d'=' -f2)
+                if [ -z "$domain" ]; then
+                    # Пробуем извлечь из аргументов контейнера
+                    domain=$(docker inspect "$cname" 2>/dev/null | \
+                        python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+cmd=d[0].get('Config',{}).get('Cmd',[]) or []
+args=' '.join(str(x) for x in cmd)
+# Ищем домен в секрете ee... или аргументах
+import re
+m=re.search(r'generate-secret.*?(\S+\.(?:com|org|net|io|ru))', args)
+if m: print(m.group(1))
+else: print('?')
+" 2>/dev/null | head -1)
+                fi
+
                 local idx=$((${#names[@]}+1))
                 names+=("$cname")
+                local type_label=""
+                [ "$ctype" = "external" ] && type_label=" ${YELLOW}[внешний]${NC}"
+
                 if _mtg_is_running "$cname"; then
-                    echo -e "  ${YELLOW}[${idx}]${NC} ${GREEN}●${NC} ${WHITE}${cname}${NC}  порт:${CYAN}${port:-?}${NC}  домен:${CYAN}${domain:-?}${NC}"
+                    echo -e "  ${YELLOW}[${idx}]${NC} ${GREEN}●${NC} ${WHITE}${cname}${NC}${type_label}  порт:${CYAN}${port:-?}${NC}  домен:${CYAN}${domain:-?}${NC}"
                 else
-                    echo -e "  ${YELLOW}[${idx}]${NC} ${RED}○${NC} ${WHITE}${cname}${NC}  порт:${CYAN}${port:-?}${NC}  ${RED}остановлен${NC}"
+                    echo -e "  ${YELLOW}[${idx}]${NC} ${RED}○${NC} ${WHITE}${cname}${NC}${type_label}  порт:${CYAN}${port:-?}${NC}  ${RED}остановлен${NC}"
                 fi
             done <<< "$instances"
             echo ""
         else
-            echo -e "  ${YELLOW}Прокси не созданы${NC}\n"
+            echo -e "  ${YELLOW}Прокси не найдены${NC}\n"
         fi
 
         echo -e "  ${YELLOW}[+]${NC}  Добавить прокси"
         [ ${#names[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Управление"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
 
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
         [ "$ch" = "+" ] && { _mtg_add; continue; }
@@ -3456,42 +3529,52 @@ show_menu() {
             echo -e "  ${WHITE}Цепь: ${chain}${NC}"
         fi
 
-        # WARP статус
+        # Статусная строка
         echo -e "  ${WHITE}WARP: $(warp_overall_status)${NC}"
-
-        # AdGuard статус
         if _agh_installed; then
             local agh_st
             _agh_running && agh_st="${GREEN}● запущен (DNS :$(_agh_dns_port))${NC}" || \
                 agh_st="${RED}● не запущен${NC}"
             echo -e "  ${WHITE}AGH:  ${agh_st}"
         fi
+        # MTProto статус
+        local mtg_count; mtg_count=$(_mtg_count_running)
+        [ "$mtg_count" -gt 0 ] && \
+            echo -e "  ${WHITE}MTG:  ${GREEN}● ${mtg_count} прокси активно${NC}"
 
         echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
 
         # Адаптивное меню
-        echo -e " ${CYAN}── ОСНОВНОЕ ─────────────────────────${NC}"
         if ! is_bridge; then
+            echo -e " ${CYAN}── WARP ──────────────────────────────${NC}"
             echo -e "  ${GREEN}1)  ★ Настроить WARP${NC}  ${CYAN}(мастер)${NC}"
             echo -e "  2)  Тест WARP"
+            if is_amnezia; then
+                echo -e "  3)  Клиенты → WARP"
+            fi
         fi
         if is_amnezia; then
-            echo -e "  3)  Клиенты → WARP"
+            echo -e " ${CYAN}── КЛИЕНТЫ ───────────────────────────${NC}"
             echo -e "  4)  DNS фильтрация (AdGuard)"
             echo -e "  5)  Управление клиентами AWG"
         fi
-        echo -e " ${CYAN}── СЕТЬ ─────────────────────────────${NC}"
-        echo -e "  6)  iptables проброс"
-        echo -e "  9)  MTProto прокси"
+        echo -e " ${CYAN}── ПРОКСИ ────────────────────────────${NC}"
+        echo -e "  6)  MTProto прокси"
+        echo -e "  7)  iptables проброс"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
-        echo -e "  7)  Серверы, скорость, тесты"
+        echo -e "  8)  Серверы, скорость, тесты"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
-        echo -e "  8)  Система и управление"
+        echo -e "  9)  Система и управление"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
-        read -p "Выбор: " ch
+        ch=$(read_choice "Выбор: ")
 
         [ -z "$ch" ] && continue
+
+        # Транслитерация русской раскладки для букв-команд
+        case "$ch" in
+            *) ;;  # числа обрабатываем ниже
+        esac
 
         case "$ch" in
             1) ! is_bridge && warp_setup_wizard ;;
@@ -3499,17 +3582,12 @@ show_menu() {
             3) is_amnezia && awg_clients_menu ;;
             4) is_amnezia && adguard_menu ;;
             5) is_amnezia && awg_peers_menu ;;
-            6) iptables_menu ;;
-            7) tools_menu ;;
-            8) system_menu ;;
-            9) mtproto_menu ;;
+            6) mtproto_menu ;;
+            7) iptables_menu ;;
+            8) tools_menu ;;
+            9) system_menu ;;
             0)
-                clear
-                [ ! -x "$INSTALL_PATH" ] && {
-                    ln -sf "$(readlink -f "$0")" "$INSTALL_PATH" 2>/dev/null
-                    ln -sf "$INSTALL_PATH" /usr/bin/govpn 2>/dev/null
-                }
-                exit 0 ;;
+                clear; exit 0 ;;
         esac
     done
 }
