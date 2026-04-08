@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.5"
+VERSION="4.6"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1889,11 +1889,48 @@ filtering:
       name: legitimateURLshortener
       id: 24
     - enabled: true
-      url: https://raw.githubusercontent.com/nicehash/NiceHashQuickMiner/master/tools/blocklist.txt
-      name: Mining blocklist
-      id: 25
+      url: https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardMobileAds.txt
+      name: Mobile ads hosts
+      id: 30
+    - enabled: true
+      url: https://raw.githubusercontent.com/jerryn70/GoodbyeAds/master/Hosts/GoodbyeAds.txt
+      name: GoodbyeAds
+      id: 31
   whitelist_filters: []
-  user_rules: []
+  user_rules:
+    - '||an.yandex.ru^'
+    - '||mc.yandex.ru^'
+    - '||bs.yandex.ru^'
+    - '||awaps.yandex.ru^'
+    - '||yabs.yandex.ru^'
+    - '||direct.yandex.ru^'
+    - '||googlesyndication.com^'
+    - '||googleadservices.com^'
+    - '||google-analytics.com^'
+    - '||googletagmanager.com^'
+    - '||googletagservices.com^'
+    - '||doubleclick.net^'
+    - '||adservice.google.com^'
+    - '||pagead2.googlesyndication.com^'
+    - '||adnxs.com^'
+    - '||adsrvr.org^'
+    - '||moatads.com^'
+    - '||scorecardresearch.com^'
+    - '||quantserve.com^'
+    - '||facebook.com/tr^'
+    - '||connect.facebook.net^'
+    - '||pixel.facebook.com^'
+    - '||amazon-adsystem.com^'
+    - '||ads.twitter.com^'
+    - '||analytics.twitter.com^'
+    - '||mail.ru/counter^'
+    - '||top.mail.ru^'
+    - '||counter.ok.ru^'
+    - '||counter.rambler.ru^'
+    - '||ad.mail.ru^'
+    - '||target.my.com^'
+    - '||ads.vk.com^'
+    - '||id.vk.com^'
   parental_enabled: false
   safe_search:
     enabled: false
@@ -1970,6 +2007,10 @@ _agh_install() {
         echo -e "  ${WHITE}Веб-панель: ${CYAN}http://${MY_IP}:${AGH_WEB_PORT}${NC}"
         echo -e "  ${WHITE}DNS порт:   ${CYAN}${dns_port}${NC}"
         echo -e "  ${WHITE}Upstream:   ${CYAN}Cloudflare DoH + AdGuard DoH + Google DoH${NC}"
+        echo ""
+        echo -e "${YELLOW}Применяем правила блокировки рекламы...${NC}"
+        sleep 2  # дать AdGuard время запуститься
+        _agh_apply_custom_rules
         log_action "AGH INSTALL: dns_port=${dns_port}"
     else
         echo -e "${RED}  ✗ Не запустился${NC}"
@@ -1981,6 +2022,59 @@ _agh_install() {
 
 _agh_selected_clients() {
     [ -f "$AGH_CLIENTS_FILE" ] && grep -v '^$' "$AGH_CLIENTS_FILE" || true
+}
+
+_agh_apply_custom_rules() {
+    # Применяем пользовательские правила через API AdGuard без переустановки
+    local port="${AGH_WEB_PORT}"
+    local rules=(
+        '||an.yandex.ru^'
+        '||mc.yandex.ru^'
+        '||bs.yandex.ru^'
+        '||awaps.yandex.ru^'
+        '||yabs.yandex.ru^'
+        '||direct.yandex.ru^'
+        '||googlesyndication.com^'
+        '||googleadservices.com^'
+        '||google-analytics.com^'
+        '||googletagmanager.com^'
+        '||googletagservices.com^'
+        '||doubleclick.net^'
+        '||adservice.google.com^'
+        '||pagead2.googlesyndication.com^'
+        '||adnxs.com^'
+        '||adsrvr.org^'
+        '||scorecardresearch.com^'
+        '||quantserve.com^'
+        '||connect.facebook.net^'
+        '||amazon-adsystem.com^'
+        '||ads.twitter.com^'
+        '||top.mail.ru^'
+        '||ad.mail.ru^'
+        '||target.my.com^'
+        '||ads.vk.com^'
+    )
+
+    # Формируем JSON массив правил
+    local rules_json
+    rules_json=$(printf '"%s",' "${rules[@]}" | sed 's/,$//')
+    rules_json="[${rules_json}]"
+
+    local result
+    result=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "http://localhost:${port}/control/filtering/set_rules" \
+        -H "Content-Type: application/json" \
+        -d "{\"rules\": ${rules_json}}" 2>/dev/null)
+
+    if [ "$result" = "200" ]; then
+        echo -e "${GREEN}  ✓ Пользовательские правила применены (${#rules[@]} правил)${NC}"
+        # Обновляем фильтры
+        curl -s -X POST "http://localhost:${port}/control/filtering/refresh" > /dev/null 2>&1
+        return 0
+    else
+        echo -e "${YELLOW}  ⚠ API недоступен (код ${result}) — правила будут применены при переустановке${NC}"
+        return 1
+    fi
 }
 
 _agh_apply_rules() {
@@ -2118,6 +2212,7 @@ adguard_menu() {
         echo -e "  ${YELLOW}[a]${NC}  Включить всем"
         echo -e "  ${YELLOW}[n]${NC}  Выключить всем"
         echo -e "  ${YELLOW}[s]${NC}  Применить"
+        echo -e "  ${YELLOW}[p]${NC}  Обновить правила блокировки рекламы"
         echo -e "  ${YELLOW}[t]${NC}  Тест DNS фильтрации"
         echo -e "  ${YELLOW}[r]${NC}  Перезапустить AdGuard"
         echo -e "  ${YELLOW}[u]${NC}  Обновить фильтры"
@@ -2168,6 +2263,10 @@ adguard_menu() {
                 systemctl restart AdGuardHome > /dev/null 2>&1 && sleep 2
                 _agh_running && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Ошибка${NC}"
                 sleep 1 ;;
+            p|P)
+                echo -e "\n${YELLOW}Применяем правила блокировки рекламы...${NC}"
+                _agh_apply_custom_rules
+                read -p "Нажмите Enter..." ;;
             t|T)
                 clear
                 echo -e "\n${CYAN}━━━ Тест AdGuard DNS ━━━${NC}\n"
