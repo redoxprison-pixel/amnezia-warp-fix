@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.4"
+VERSION="4.5"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1880,6 +1880,18 @@ filtering:
       url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_11.txt
       name: Malicious URL Blocklist
       id: 11
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_14.txt
+      name: Annoyances filter
+      id: 14
+    - enabled: true
+      url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_24.txt
+      name: legitimateURLshortener
+      id: 24
+    - enabled: true
+      url: https://raw.githubusercontent.com/nicehash/NiceHashQuickMiner/master/tools/blocklist.txt
+      name: Mining blocklist
+      id: 25
   whitelist_filters: []
   user_rules: []
   parental_enabled: false
@@ -1976,10 +1988,12 @@ _agh_apply_rules() {
     local dns_port; dns_port=$(_agh_dns_port)
     local -a selected=("$@")
 
-    # Очистить ВСЕ старые AGH правила (и по комментарию и без)
+    # Полная очистка всех AGH правил (включая дубли)
     docker exec "$AWG_CONTAINER" sh -c "
-        iptables -t nat -S PREROUTING 2>/dev/null | grep -E 'govpn:agh|REDIRECT.*5335|REDIRECT.*53' | \
-            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
+        while iptables -t nat -S PREROUTING 2>/dev/null | grep -q 'govpn:agh'; do
+            iptables -t nat -S PREROUTING 2>/dev/null | grep 'govpn:agh' | head -1 | \
+                sed 's/^-A /-D /' | xargs iptables -t nat 2>/dev/null || break
+        done
     " > /dev/null 2>&1
 
     [ "${#selected[@]}" -eq 0 ] && return 0
@@ -2877,7 +2891,7 @@ show_menu() {
         # AdGuard статус
         if _agh_installed; then
             local agh_st
-            _agh_running && agh_st="${GREEN}● запущен (DNS :$(_agh_port))${NC}" || \
+            _agh_running && agh_st="${GREEN}● запущен (DNS :$(_agh_dns_port))${NC}" || \
                 agh_st="${RED}● не запущен${NC}"
             echo -e "  ${WHITE}AGH:  ${agh_st}"
         fi
