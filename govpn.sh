@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="4.6"
+VERSION="5.0"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -69,18 +69,28 @@ check_deps() {
 
 init_config() {
     mkdir -p "$CONF_DIR" "$BACKUP_DIR"
-    [ -f "$CONF_FILE" ] && source "$CONF_FILE"
+    if [ -f "$CONF_FILE" ]; then
+        # Очищаем escape-коды ANSI если они попали в конфиг
+        if grep -qP '\x1b\[' "$CONF_FILE" 2>/dev/null; then
+            local tmp_conf; tmp_conf=$(mktemp)
+            sed 's/\x1b\[[0-9;]*m//g' "$CONF_FILE" > "$tmp_conf"
+            mv "$tmp_conf" "$CONF_FILE"
+        fi
+        source "$CONF_FILE" 2>/dev/null || true
+    fi
     WARP_SOCKS_PORT="${WARP_SOCKS_PORT:-40000}"
 }
 
 save_config() {
-    local key="$1" val="$2"
+    local key="$1"
+    # Полностью убираем ANSI escape из значения
+    local val; val=$(echo "$2" | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\033')
     if grep -q "^${key}=" "$CONF_FILE" 2>/dev/null; then
         sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$CONF_FILE"
     else
         echo "${key}=\"${val}\"" >> "$CONF_FILE"
     fi
-    source "$CONF_FILE"
+    source "$CONF_FILE" 2>/dev/null || true
 }
 
 prepare_system() {
@@ -678,6 +688,64 @@ warp_setup_wizard() {
     echo -e "\n${CYAN}━━━ Настройка WARP ━━━${NC}\n"
     echo -e "${WHITE}Режим: ${CYAN}${MODE_LABEL}${NC}\n"
 
+    # Проверяем текущее состояние
+    local amn_installed=0 amn_running=0 amn_ip=""
+    local xui_installed=0 xui_running=0 xui_ip=""
+
+    if is_amnezia; then
+        _awg_warp_running 2>/dev/null && amn_running=1
+        docker exec "$AWG_CONTAINER" sh -c "[ -f '${AWG_WARP_CONF}' ]" 2>/dev/null && amn_installed=1
+        [ "$amn_running" -eq 1 ] && amn_ip=$(_awg_warp_ip)
+    fi
+    if is_3xui; then
+        _3xui_warp_installed && xui_installed=1
+        _3xui_warp_running && xui_running=1
+        [ "$xui_running" -eq 1 ] && xui_ip=$(_3xui_warp_ip)
+    fi
+
+    # Если WARP уже работает — показать состояние и предложить действия
+    local already_running=0
+    [ "$amn_running" -eq 1 ] && already_running=1
+    [ "$xui_running" -eq 1 ] && already_running=1
+
+    if [ "$already_running" -eq 1 ]; then
+        echo -e "${GREEN}━━━ WARP уже настроен ━━━${NC}\n"
+        is_amnezia && [ "$amn_running" -eq 1 ] && \
+            echo -e "  ${WHITE}Amnezia:  ${GREEN}● ${amn_ip}${NC}"
+        is_3xui && [ "$xui_running" -eq 1 ] && \
+            echo -e "  ${WHITE}3X-UI:    ${GREEN}● ${xui_ip}${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
+        echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
+        echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Выбор: " warp_action
+        case "$warp_action" in
+            1) warp_test; return ;;
+            2) # Перевыпуск — только wgcf регистрация заново
+                clear
+                echo -e "\n${CYAN}━━━ Перевыпуск ключа WARP ━━━${NC}\n"
+                if is_amnezia && [ "$amn_installed" -eq 1 ]; then
+                    echo -e "${YELLOW}Регистрируем новый аккаунт WARP...${NC}"
+                    _awg_create_warp_conf && {
+                        echo -e "${GREEN}  ✓ Новый ключ создан${NC}"
+                        echo -e "${YELLOW}  Перезапускаю туннель...${NC}"
+                        docker exec "$AWG_CONTAINER" sh -c \
+                            "wg-quick down '${AWG_WARP_CONF}' 2>/dev/null; wg-quick up '${AWG_WARP_CONF}' 2>/dev/null" 2>/dev/null
+                        sleep 3
+                        local new_ip; new_ip=$(_awg_warp_ip)
+                        echo -e "${GREEN}  ✓ Новый IP: ${new_ip}${NC}"
+                        log_action "AWG WARP REKEY: ${new_ip}"
+                    } || echo -e "${RED}  ✗ Ошибка перевыпуска${NC}"
+                fi
+                read -p "Нажмите Enter..."; return ;;
+            3) : ;; # продолжаем к полной установке
+            *) return ;;
+        esac
+    fi
+
+    # Полная установка
     local do_3xui=0 do_amnezia=0
 
     if [ "$MODE" = "combo" ]; then
@@ -700,21 +768,13 @@ warp_setup_wizard() {
         do_amnezia=1
     else
         echo -e "${YELLOW}Bridge режим — WARP не применимо.${NC}"
-        echo -e "${WHITE}Используйте iptables проброс (п.4).${NC}"
+        echo -e "${WHITE}Используйте iptables проброс (п.6).${NC}"
         read -p "Enter..."; return
     fi
 
     local ok=0
-
-    if [ "$do_3xui" -eq 1 ]; then
-        _3xui_install_warp && ok=1 || true
-        echo ""
-    fi
-
-    if [ "$do_amnezia" -eq 1 ]; then
-        _awg_install_warp && ok=1 || true
-        echo ""
-    fi
+    [ "$do_3xui" -eq 1 ] && { _3xui_install_warp && ok=1 || true; echo ""; }
+    [ "$do_amnezia" -eq 1 ] && { _awg_install_warp && ok=1 || true; echo ""; }
 
     if [ "$ok" -eq 1 ]; then
         echo -e "${GREEN}══════════════════════════════════════════${NC}"
@@ -723,7 +783,6 @@ warp_setup_wizard() {
     else
         echo -e "${RED}  Настройка не удалась. Проверьте логи.${NC}"
     fi
-
     read -p "Нажмите Enter..."
 }
 
@@ -2957,6 +3016,419 @@ PYEOF
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  MTPROTO ПРОКСИ (mtg v2)
+# ═══════════════════════════════════════════════════════════════
+
+MTG_CONF_DIR="${CONF_DIR}/mtproto"
+MTG_IMAGE="nineseconds/mtg:2"
+
+# Список доменов для FakeTLS с описаниями
+MTG_DOMAINS=(
+    "bing.com:Microsoft Bing"
+    "apple.com:Apple"
+    "microsoft.com:Microsoft"
+    "amazon.com:Amazon"
+    "cloudflare.com:Cloudflare"
+    "wikipedia.org:Wikipedia"
+    "speedtest.net:Speedtest"
+    "github.com:GitHub"
+    "stackoverflow.com:StackOverflow"
+    "medium.com:Medium"
+)
+
+# Популярные порты для MTProto
+MTG_PORTS=(443 8443 2053 2083 2087)
+
+_mtg_list_instances() {
+    docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | \
+        grep "^mtg-" | sort
+}
+
+_mtg_is_running() {
+    local name="$1"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"
+}
+
+_mtg_connections() {
+    local name="$1"
+    # Получаем статистику из mtg stats endpoint (порт 3129 по умолчанию)
+    local stats_port
+    stats_port=$(cat "${MTG_CONF_DIR}/${name}.meta" 2>/dev/null | grep "^stats_port=" | cut -d'=' -f2)
+    [ -z "$stats_port" ] && echo "?" && return
+    local conns
+    conns=$(curl -s --max-time 2 "http://localhost:${stats_port}/stats" 2>/dev/null | \
+        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('connections',{}).get('active',0))" 2>/dev/null)
+    echo "${conns:-?}"
+}
+
+_mtg_get_link() {
+    local name="$1"
+    cat "${MTG_CONF_DIR}/${name}.meta" 2>/dev/null | grep "^link=" | cut -d'=' -f2-
+}
+
+_mtg_ping_domain() {
+    local domain="$1"
+    local ms
+    ms=$(curl -so /dev/null -w '%{time_connect}' --max-time 3 "https://${domain}/" 2>/dev/null)
+    [ -z "$ms" ] && echo "999" && return
+    awk "BEGIN{printf \"%.0f\", $ms*1000}" 2>/dev/null || echo "999"
+}
+
+_mtg_detect_country() {
+    local geo
+    geo=$(curl -s --max-time 5 "http://ip-api.com/json/${MY_IP}?fields=country,countryCode,city" 2>/dev/null)
+    local country city cc
+    country=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+    city=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
+    cc=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('countryCode',''))" 2>/dev/null)
+    echo "${cc}|${country}|${city}"
+}
+
+_mtg_check_port() {
+    local port="$1"
+    ss -tlnup 2>/dev/null | grep -q ":${port} " && return 1 || return 0
+}
+
+_mtg_add() {
+    clear
+    echo -e "\n${CYAN}━━━ Новый MTProto прокси ━━━${NC}\n"
+
+    # Определяем страну сервера
+    echo -ne "${WHITE}Определяю страну сервера...${NC} "
+    local geo_info; geo_info=$(_mtg_detect_country)
+    local geo_cc="${geo_info%%|*}"
+    local geo_rest="${geo_info#*|}"
+    local geo_country="${geo_rest%%|*}"
+    local geo_city="${geo_rest##*|}"
+    echo -e "${GREEN}${geo_cc} ${geo_country} (${geo_city})${NC}"
+
+    # Если Россия — предупреждение
+    if [ "$geo_cc" = "RU" ]; then
+        echo -e "${YELLOW}  ⚠ Российский IP — MTProto работает, но некоторые домены могут быть заблокированы${NC}"
+    fi
+    echo ""
+
+    # Выбор порта
+    echo -e "${WHITE}Выберите порт:${NC}"
+    local port_colors=("$GREEN" "$GREEN" "$CYAN" "$CYAN" "$CYAN")
+    local port_notes=("рекомендуется — выглядит как HTTPS" "альтернативный HTTPS" "нестандартный" "нестандартный" "нестандартный")
+    local i=1
+    for p in "${MTG_PORTS[@]}"; do
+        local note="${port_notes[$((i-1))]}"
+        local col="${port_colors[$((i-1))]}"
+        if _mtg_check_port "$p"; then
+            echo -e "  ${YELLOW}[$i]${NC} ${col}${p}${NC}  — ${note}"
+        else
+            local occ; occ=$(ss -tlnup 2>/dev/null | grep ":${p} " | sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
+            echo -e "  ${YELLOW}[$i]${NC} ${RED}${p}${NC}  — ${RED}занят (${occ})${NC}"
+        fi
+        ((i++))
+    done
+    echo -e "  ${YELLOW}[$i]${NC} Свой порт"
+    echo ""
+    read -p "Выбор [1]: " port_choice
+    [ -z "$port_choice" ] && port_choice=1
+
+    local chosen_port=""
+    if [[ "$port_choice" =~ ^[0-9]+$ ]] && (( port_choice >= 1 && port_choice <= ${#MTG_PORTS[@]} )); then
+        chosen_port="${MTG_PORTS[$((port_choice-1))]}"
+    elif (( port_choice == ${#MTG_PORTS[@]} + 1 )); then
+        while true; do
+            echo -e "${WHITE}Введите порт (1-65535):${NC}"
+            read -p "> " chosen_port
+            [[ "$chosen_port" =~ ^[0-9]+$ ]] && (( chosen_port >= 1 && chosen_port <= 65535 )) && break
+            echo -e "${RED}Некорректный порт.${NC}"
+        done
+    else
+        chosen_port="443"
+    fi
+
+    # Предупреждение если порт занят
+    if ! _mtg_check_port "$chosen_port"; then
+        local occ; occ=$(ss -tlnup 2>/dev/null | grep ":${chosen_port} " | sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
+        echo -e "\n${RED}  ⚠ Порт ${chosen_port} занят процессом: ${occ}${NC}"
+        echo -e "${WHITE}  Это может вызвать конфликт. Продолжить всё равно? (y/n):${NC}"
+        read -p "  > " force_port
+        [[ "$force_port" != "y" ]] && return
+    fi
+    echo ""
+
+    # Выбор домена с пингом
+    echo -e "${WHITE}Выберите домен маскировки (FakeTLS):${NC}"
+    echo -e "${CYAN}  Тестирую доступность доменов...${NC}"
+    echo ""
+
+    local -a domain_list=() domain_ms=()
+    for entry in "${MTG_DOMAINS[@]}"; do
+        local d="${entry%%:*}"
+        local desc="${entry##*:}"
+        local ms; ms=$(_mtg_ping_domain "$d")
+        domain_list+=("$d")
+        domain_ms+=("$ms")
+        local col="$GREEN"
+        (( ms > 100 )) && col="$YELLOW"
+        (( ms > 300 )) && col="$RED"
+        [ "$ms" = "999" ] && col="$RED" && ms="нет ответа"
+        printf "  ${YELLOW}[%d]${NC} %-20s ${col}%s${NC}  %s\n" \
+            "${#domain_list[@]}" "$d" "${ms}ms" "$desc"
+    done
+    echo -e "  ${YELLOW}[$((${#domain_list[@]}+1))]${NC} Свой домен"
+    echo ""
+    echo -e "${YELLOW}  ⚠ Не используйте домены заблокированные в вашем регионе!${NC}"
+    echo ""
+    read -p "Выбор [1]: " domain_choice
+    [ -z "$domain_choice" ] && domain_choice=1
+
+    local chosen_domain=""
+    if [[ "$domain_choice" =~ ^[0-9]+$ ]] && (( domain_choice >= 1 && domain_choice <= ${#domain_list[@]} )); then
+        chosen_domain="${domain_list[$((domain_choice-1))]}"
+    elif (( domain_choice == ${#domain_list[@]} + 1 )); then
+        echo -e "${WHITE}Введите домен (например: telegram.org):${NC}"
+        read -p "> " chosen_domain
+        [ -z "$chosen_domain" ] && return
+    else
+        chosen_domain="bing.com"
+    fi
+
+    # Генерируем имя контейнера
+    local name="mtg-${chosen_port}"
+
+    # Проверяем что контейнер не существует
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+        echo -e "${YELLOW}  Контейнер ${name} уже существует. Удалить и пересоздать? (y/n):${NC}"
+        read -p "  > " recreate
+        [[ "$recreate" != "y" ]] && return
+        docker stop "$name" > /dev/null 2>&1
+        docker rm "$name" > /dev/null 2>&1
+    fi
+
+    # Генерируем секрет
+    echo -e "\n${YELLOW}Генерация секрета...${NC}"
+    local secret
+    secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$secret" ]; then
+        echo -e "${RED}  ✗ Не удалось сгенерировать секрет. Docker установлен?${NC}"
+        read -p "Enter..."; return
+    fi
+    echo -e "${GREEN}  ✓ Секрет: ${secret:0:20}...${NC}"
+
+    # Конфиг файл для mtg
+    mkdir -p "$MTG_CONF_DIR"
+    local conf_file="${MTG_CONF_DIR}/${name}.toml"
+    cat > "$conf_file" << TOML
+secret = "${secret}"
+bind-to = "0.0.0.0:3128"
+
+[network]
+dns = "https://1.1.1.1/dns-query"
+TOML
+
+    # Запускаем контейнер
+    echo -e "${YELLOW}Запускаю контейнер ${name}...${NC}"
+    docker run -d \
+        --name "$name" \
+        --restart unless-stopped \
+        -v "${conf_file}:/config.toml" \
+        -p "${chosen_port}:3128" \
+        "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
+
+    sleep 3
+
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+        echo -e "${RED}  ✗ Контейнер не запустился${NC}"
+        echo -e "${YELLOW}  Логи: docker logs ${name}${NC}"
+        read -p "Enter..."; return
+    fi
+
+    # Формируем ссылку
+    local link="tg://proxy?server=${MY_IP}&port=${chosen_port}&secret=${secret}"
+    local link_tme="https://t.me/proxy?server=${MY_IP}&port=${chosen_port}&secret=${secret}"
+
+    # Сохраняем мета-данные
+    cat > "${MTG_CONF_DIR}/${name}.meta" << META
+port=${chosen_port}
+domain=${chosen_domain}
+secret=${secret}
+link=${link}
+link_tme=${link_tme}
+created=$(date '+%Y-%m-%d %H:%M:%S')
+META
+
+    echo -e "${GREEN}  ✓ MTProto прокси запущен!${NC}\n"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${WHITE}Порт:   ${CYAN}${chosen_port}${NC}"
+    echo -e "  ${WHITE}Домен:  ${CYAN}${chosen_domain}${NC}"
+    echo -e "  ${WHITE}Ссылка: ${GREEN}${link}${NC}"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    if command -v qrencode &>/dev/null; then
+        echo -e "\n${WHITE}QR код:${NC}\n"
+        echo "$link" | qrencode -t ansiutf8 2>/dev/null
+    fi
+
+    log_action "MTG ADD: ${name} port=${chosen_port} domain=${chosen_domain}"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
+_mtg_manage() {
+    local name="$1"
+    local meta_file="${MTG_CONF_DIR}/${name}.meta"
+
+    while true; do
+        clear
+        local port domain link running_st
+        port=$(grep "^port=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
+        domain=$(grep "^domain=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
+        link=$(grep "^link=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
+        local created; created=$(grep "^created=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
+
+        if _mtg_is_running "$name"; then
+            running_st="${GREEN}● активен${NC}"
+        else
+            running_st="${RED}● остановлен${NC}"
+        fi
+
+        echo -e "\n${CYAN}━━━ ${name} ━━━${NC}\n"
+        echo -e "  ${WHITE}Статус:  ${running_st}"
+        echo -e "  ${WHITE}Порт:    ${CYAN}${port}${NC}"
+        echo -e "  ${WHITE}Домен:   ${CYAN}${domain} (FakeTLS)${NC}"
+        echo -e "  ${WHITE}Создан:  ${WHITE}${created}${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC}  Показать ссылку и QR"
+        echo -e "  ${YELLOW}[2]${NC}  Перевыпустить секрет"
+        if _mtg_is_running "$name"; then
+            echo -e "  ${YELLOW}[3]${NC}  Остановить"
+        else
+            echo -e "  ${YELLOW}[3]${NC}  Запустить"
+        fi
+        echo -e "  ${RED}[4]${NC}  Удалить прокси"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Выбор: " ch
+
+        case "$ch" in
+            1)
+                clear
+                echo -e "\n${CYAN}━━━ Ссылки: ${name} ━━━${NC}\n"
+                echo -e "${WHITE}tg:// ссылка:${NC}"
+                echo -e "${GREEN}${link}${NC}\n"
+                local link_tme; link_tme=$(grep "^link_tme=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
+                echo -e "${WHITE}t.me ссылка:${NC}"
+                echo -e "${GREEN}${link_tme}${NC}\n"
+                if command -v qrencode &>/dev/null; then
+                    echo -e "${WHITE}QR код (tg://):${NC}\n"
+                    echo "$link" | qrencode -t ansiutf8 2>/dev/null
+                fi
+                read -p "Нажмите Enter..." ;;
+            2)
+                clear
+                echo -e "\n${CYAN}━━━ Перевыпуск секрета: ${name} ━━━${NC}\n"
+                echo -e "${YELLOW}Генерируем новый секрет для домена ${domain}...${NC}"
+                local new_secret
+                new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
+                if [ -z "$new_secret" ]; then
+                    echo -e "${RED}Ошибка генерации секрета.${NC}"; read -p "Enter..."; continue
+                fi
+                # Обновляем конфиг
+                local conf_file="${MTG_CONF_DIR}/${name}.toml"
+                sed -i "s|^secret = .*|secret = \"${new_secret}\"|" "$conf_file"
+                # Перезапускаем контейнер
+                docker stop "$name" > /dev/null 2>&1
+                docker rm "$name" > /dev/null 2>&1
+                docker run -d --name "$name" --restart unless-stopped \
+                    -v "${conf_file}:/config.toml" \
+                    -p "${port}:3128" "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
+                sleep 2
+                # Обновляем мета
+                local new_link="tg://proxy?server=${MY_IP}&port=${port}&secret=${new_secret}"
+                local new_link_tme="https://t.me/proxy?server=${MY_IP}&port=${port}&secret=${new_secret}"
+                sed -i "s|^secret=.*|secret=${new_secret}|" "$meta_file"
+                sed -i "s|^link=.*|link=${new_link}|" "$meta_file"
+                sed -i "s|^link_tme=.*|link_tme=${new_link_tme}|" "$meta_file"
+                echo -e "${GREEN}  ✓ Новый секрет активен${NC}"
+                echo -e "${GREEN}  Новая ссылка: ${new_link}${NC}"
+                log_action "MTG REKEY: ${name}"
+                read -p "Нажмите Enter..." ;;
+            3)
+                if _mtg_is_running "$name"; then
+                    docker stop "$name" > /dev/null 2>&1
+                    echo -e "${YELLOW}Остановлен.${NC}"
+                else
+                    local conf_file="${MTG_CONF_DIR}/${name}.toml"
+                    docker start "$name" > /dev/null 2>&1 || \
+                    docker run -d --name "$name" --restart unless-stopped \
+                        -v "${conf_file}:/config.toml" \
+                        -p "${port}:3128" "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
+                    sleep 2
+                    _mtg_is_running "$name" && echo -e "${GREEN}Запущен.${NC}" || echo -e "${RED}Не удалось запустить.${NC}"
+                fi
+                sleep 1 ;;
+            4)
+                read -p "$(echo -e "${RED}Удалить ${name}? (y/n): ${NC}")" c
+                [ "$c" != "y" ] && continue
+                docker stop "$name" > /dev/null 2>&1
+                docker rm "$name" > /dev/null 2>&1
+                rm -f "${MTG_CONF_DIR}/${name}.toml" "${MTG_CONF_DIR}/${name}.meta"
+                echo -e "${GREEN}  ✓ Удалён.${NC}"
+                log_action "MTG DEL: ${name}"
+                read -p "Нажмите Enter..."; return ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+mtproto_menu() {
+    # Проверяем Docker
+    if ! command -v docker &>/dev/null; then
+        echo -e "${RED}Docker не установлен.${NC}"; read -p "Enter..."; return
+    fi
+
+    mkdir -p "$MTG_CONF_DIR"
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ MTProto прокси ━━━${NC}\n"
+
+        # Список всех mtg контейнеров
+        local -a names=()
+        local instances; instances=$(_mtg_list_instances)
+
+        if [ -n "$instances" ]; then
+            echo -e "${WHITE}Прокси:${NC}"
+            while IFS=$'\t' read -r cname status ports; do
+                local port domain link
+                port=$(grep "^port=" "${MTG_CONF_DIR}/${cname}.meta" 2>/dev/null | cut -d'=' -f2)
+                domain=$(grep "^domain=" "${MTG_CONF_DIR}/${cname}.meta" 2>/dev/null | cut -d'=' -f2)
+                local idx=$((${#names[@]}+1))
+                names+=("$cname")
+                if _mtg_is_running "$cname"; then
+                    echo -e "  ${YELLOW}[${idx}]${NC} ${GREEN}●${NC} ${WHITE}${cname}${NC}  порт:${CYAN}${port:-?}${NC}  домен:${CYAN}${domain:-?}${NC}"
+                else
+                    echo -e "  ${YELLOW}[${idx}]${NC} ${RED}○${NC} ${WHITE}${cname}${NC}  порт:${CYAN}${port:-?}${NC}  ${RED}остановлен${NC}"
+                fi
+            done <<< "$instances"
+            echo ""
+        else
+            echo -e "  ${YELLOW}Прокси не созданы${NC}\n"
+        fi
+
+        echo -e "  ${YELLOW}[+]${NC}  Добавить прокси"
+        [ ${#names[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Управление"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        read -p "Выбор: " ch
+
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+        [ "$ch" = "+" ] && { _mtg_add; continue; }
+
+        if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#names[@]} )); then
+            _mtg_manage "${names[$((ch-1))]}"
+        fi
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  ГЛАВНОЕ МЕНЮ
 # ═══════════════════════════════════════════════════════════════
 
@@ -3010,6 +3482,7 @@ show_menu() {
         fi
         echo -e " ${CYAN}── СЕТЬ ─────────────────────────────${NC}"
         echo -e "  6)  iptables проброс"
+        echo -e "  9)  MTProto прокси"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
         echo -e "  7)  Серверы, скорость, тесты"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
@@ -3029,6 +3502,7 @@ show_menu() {
             6) iptables_menu ;;
             7) tools_menu ;;
             8) system_menu ;;
+            9) mtproto_menu ;;
             0)
                 clear
                 [ ! -x "$INSTALL_PATH" ] && {
