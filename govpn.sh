@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.9"
+VERSION="5.10"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1560,36 +1560,54 @@ _reality_scanner() {
     echo -e "${MAGENTA}$(printf '%.0s─' {1..75})${NC}"
 
     local out_file="/tmp/reality_scan_$$.csv"
-    local count=0
 
-    # Сканер пишет результаты в stderr (лог), CSV в файл
-    # Читаем stderr напрямую через pipe
-    { "$scanner_bin" -addr "$target" -thread "$threads" -timeout "$timeout" \
-        -out "$out_file" 2>&1 >/dev/null; } | \
-    while IFS= read -r line; do
-        if echo "$line" | grep -q "feasible=true"; then
-            local ip domain issuer
-            ip=$(echo "$line" | grep -oP 'ip=\K\S+')
-            domain=$(echo "$line" | grep -oP 'cert-domain=\K\S+')
-            issuer=$(echo "$line" | grep -oP 'cert-issuer=\K"[^"]*"' | tr -d '"')
-            [ -z "$domain" ] || [ "$domain" = "N/A" ] && continue
+    # Таймаут зависит от размера диапазона
+    local scan_timeout=30
+    if echo "$target" | grep -qE '/[0-9]$|/1[0-6]$'; then
+        scan_timeout=120  # большие диапазоны (/8-/16)
+    elif echo "$target" | grep -qE '/1[7-9]$|/2[0-2]$'; then
+        scan_timeout=60   # средние (/17-/22)
+    fi
+    echo -e "${CYAN}Сканирование (до ${scan_timeout}с, потоков: ${threads})...${NC}"
+
+    timeout "$scan_timeout" "$scanner_bin" \
+        -addr "$target" -thread "$threads" -timeout "$timeout" \
+        -out "$out_file" > /dev/null 2>&1 || true
+
+    echo ""
+
+    # Показываем результаты из CSV
+    if [ -f "$out_file" ] && [ "$(wc -l < "$out_file")" -gt 1 ]; then
+        local total; total=$(( $(wc -l < "$out_file") - 1 ))
+        echo -e "${GREEN}Найдено: ${total} серверов совместимых с Reality${NC}\n"
+
+        printf "  ${WHITE}%-20s %-35s %-15s${NC}\n" "IP" "Домен (SNI)" "Страна"
+        echo -e "  $(printf '─%.0s' {1..70})"
+
+        tail -n +2 "$out_file" | head -"$max_results" | \
+        while IFS=',' read -r ip origin domain issuer geo; do
+            domain="${domain//\"/}"
+            issuer="${issuer//\"/}"
+            geo="${geo//\"/}"
+            [ -z "$domain" ] && continue
             printf "  ${GREEN}✓${NC} %-18s ${CYAN}%-35s${NC} %s\n" \
-                "$ip" "$domain" "${issuer:0:25}"
-            ((count++))
-            [ "$count" -ge "$max_results" ] && break
-        fi
-    done
+                "$ip" "$domain" "${geo:-?}"
+        done
 
-    echo -e "\n${MAGENTA}$(printf '%.0s─' {1..75})${NC}"
-    if [ -f "$out_file" ]; then
-        local total; total=$(( $(wc -l < "$out_file" 2>/dev/null || echo 1) - 1 ))
-        [ "$total" -gt 0 ] && echo -e "${GREEN}Всего в файле: ${total} результатов → ${out_file}${NC}"
         echo ""
         echo -e "${WHITE}Лучшие SNI для Reality (скопируйте в 3X-UI → serverName):${NC}"
-        tail -n +2 "$out_file" 2>/dev/null | head -5 | \
+        tail -n +2 "$out_file" | head -5 | \
         while IFS=',' read -r ip origin domain issuer geo; do
+            domain="${domain//\"/}"
             [ -n "$domain" ] && echo -e "  ${GREEN}▶${NC} ${CYAN}${domain}${NC}"
         done
+        echo -e "\n${WHITE}Файл результатов: ${CYAN}${out_file}${NC}"
+    else
+        echo -e "${YELLOW}Результатов нет.${NC}"
+        echo -e "${WHITE}Попробуйте: увеличить timeout, уменьшить диапазон или выбрать другой CDN.${NC}"
+        echo ""
+        echo -e "${WHITE}Ручная проверка домена:${NC}"
+        echo -e "  ${CYAN}RealiTLScanner -addr ваш_домен -timeout 5${NC}"
     fi
     echo ""
     read -p "Нажмите Enter..."
