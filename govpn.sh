@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.7"
+VERSION="5.8"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1416,7 +1416,7 @@ _reality_scanner() {
         # Пробуем через Go
         if command -v go &>/dev/null && go version 2>/dev/null | grep -q "go1\.[2-9][0-9]"; then
             echo -e "${CYAN}  Сборка из исходников (Go)...${NC}"
-            go install github.com/XTLS/RealiTLScanner@latest 2>/dev/null && \
+            go install github.com/xtls/RealiTLScanner@latest 2>/dev/null && \
                 cp ~/go/bin/RealiTLScanner "$scanner_bin" 2>/dev/null
         fi
 
@@ -1437,14 +1437,14 @@ _reality_scanner() {
                 echo -e "${GREEN}  ✓ Go установлен${NC}"
                 echo -e "${CYAN}  Сборка RealiTLScanner...${NC}"
                 GOPATH=/tmp/go_build /usr/local/go/bin/go install \
-                    github.com/XTLS/RealiTLScanner@latest 2>/dev/null && \
+                    github.com/xtls/RealiTLScanner@latest 2>/dev/null && \
                     cp /tmp/go_build/bin/RealiTLScanner "$scanner_bin" 2>/dev/null
             }
         fi
 
         if [ ! -f "$scanner_bin" ]; then
             echo -e "${RED}  ✗ Не удалось установить RealiTLScanner${NC}"
-            echo -e "${WHITE}  Установите вручную: go install github.com/XTLS/RealiTLScanner@latest${NC}"
+            echo -e "${WHITE}  Установите вручную: go install github.com/xtls/RealiTLScanner@latest${NC}"
             read -p "Enter..."; return
         fi
         chmod +x "$scanner_bin"
