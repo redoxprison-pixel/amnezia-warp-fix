@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.8"
+VERSION="5.9"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1555,56 +1555,42 @@ _reality_scanner() {
     clear
     echo -e "\n${CYAN}━━━ Сканирование: ${target} ━━━${NC}\n"
     echo -e "${YELLOW}Поиск TLS 1.3 + ALPN h2 серверов...${NC}"
-    echo -e "${CYAN}(Ctrl+C для остановки)${NC}\n"
+    echo -e "${WHITE}Нажмите Ctrl+C для остановки после нужного количества результатов.${NC}\n"
+    printf "  ${WHITE}%-18s %-35s %-20s${NC}\n" "IP" "Домен (SNI)" "Издатель"
+    echo -e "${MAGENTA}$(printf '%.0s─' {1..75})${NC}"
 
     local out_file="/tmp/reality_scan_$$.csv"
     local count=0
 
-    # Запускаем сканер с выводом в реальном времени
+    # Запускаем сканер — логи идут в stderr, парсим их напрямую
+    # CSV из -out для сохранения результатов
     "$scanner_bin" -addr "$target" -thread "$threads" -timeout "$timeout" \
-        -out "$out_file" 2>/dev/null &
-    local scan_pid=$!
-
-    # Показываем результаты по мере появления
-    local shown=0
-    while kill -0 "$scan_pid" 2>/dev/null; do
-        if [ -f "$out_file" ] && [ "$shown" -lt "$max_results" ]; then
-            local lines; lines=$(wc -l < "$out_file" 2>/dev/null || echo 0)
-            if (( lines > shown + 1 )); then  # +1 для заголовка
-                tail -n +"$((shown + 2))" "$out_file" | head -"$((max_results - shown))" | \
-                while IFS=',' read -r ip origin domain issuer geo; do
-                    printf "  ${GREEN}✓${NC} ${WHITE}%-20s${NC} ${CYAN}%-30s${NC} %s %s\n" \
-                        "$ip" "$domain" "$issuer" "$geo"
-                done
-                shown=$lines
-            fi
+        -out "$out_file" 2>&1 1>/dev/null | \
+    while IFS= read -r line; do
+        if echo "$line" | grep -q "feasible=true"; then
+            local ip domain issuer
+            ip=$(echo "$line" | grep -oP 'ip=\K\S+')
+            domain=$(echo "$line" | grep -oP 'cert-domain=\K\S+')
+            issuer=$(echo "$line" | grep -oP 'cert-issuer=\K"[^"]*"' | tr -d '"')
+            [ -z "$domain" ] || [ "$domain" = "N/A" ] && continue
+            printf "  ${GREEN}✓${NC} %-18s ${CYAN}%-35s${NC} %s\n" \
+                "$ip" "$domain" "${issuer:0:25}"
+            ((count++))
+            [ "$count" -ge "$max_results" ] && break
         fi
-        [ "$shown" -ge "$((max_results + 1))" ] && kill "$scan_pid" 2>/dev/null && break
-        sleep 1
     done
-    wait "$scan_pid" 2>/dev/null
 
-    # Финальный вывод
-    echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "\n${MAGENTA}$(printf '%.0s─' {1..75})${NC}"
     if [ -f "$out_file" ]; then
-        local total; total=$(( $(wc -l < "$out_file") - 1 ))
-        echo -e "${GREEN}Найдено: ${total} серверов совместимых с Reality${NC}\n"
-
-        if [ "$total" -gt 0 ]; then
-            echo -e "${WHITE}Топ результатов для использования как SNI:${NC}"
-            tail -n +2 "$out_file" | head -"$max_results" | \
-            while IFS=',' read -r ip origin domain issuer geo; do
-                echo -e "  ${GREEN}●${NC} ${CYAN}${domain}${NC}  ${WHITE}(${ip}, ${geo})${NC}"
-            done
-
-            echo ""
-            echo -e "${WHITE}Скопируйте домен в поле${NC} ${CYAN}serverName / SNI${NC} ${WHITE}в настройках Reality в 3X-UI.${NC}"
-            echo -e "${WHITE}Результаты сохранены: ${CYAN}${out_file}${NC}"
-        fi
-    else
-        echo -e "${YELLOW}Результатов нет. Попробуйте другой диапазон или увеличьте timeout.${NC}"
+        local total; total=$(( $(wc -l < "$out_file" 2>/dev/null || echo 1) - 1 ))
+        [ "$total" -gt 0 ] && echo -e "${GREEN}Всего в файле: ${total} результатов → ${out_file}${NC}"
+        echo ""
+        echo -e "${WHITE}Лучшие SNI для Reality (скопируйте в 3X-UI → serverName):${NC}"
+        tail -n +2 "$out_file" 2>/dev/null | head -5 | \
+        while IFS=',' read -r ip origin domain issuer geo; do
+            [ -n "$domain" ] && echo -e "  ${GREEN}▶${NC} ${CYAN}${domain}${NC}"
+        done
     fi
-    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     read -p "Нажмите Enter..."
 }
