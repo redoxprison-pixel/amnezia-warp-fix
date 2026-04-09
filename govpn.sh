@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.4"
+VERSION="5.5"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2925,19 +2925,29 @@ mtproto_menu() {
 
                 domain=$(grep "^domain=" "${MTG_CONF_DIR}/${cname}.meta" 2>/dev/null | cut -d'=' -f2)
                 if [ -z "$domain" ]; then
-                    # Пробуем извлечь из аргументов контейнера
-                    domain=$(docker inspect "$cname" 2>/dev/null | \
+                    # Декодируем домен из FakeTLS секрета (ee + 16 байт random + домен hex)
+                    local secret
+                    secret=$(docker inspect "$cname" 2>/dev/null | \
                         python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 cmd=d[0].get('Config',{}).get('Cmd',[]) or []
-args=' '.join(str(x) for x in cmd)
-# Ищем домен в секрете ee... или аргументах
-import re
-m=re.search(r'generate-secret.*?(\S+\.(?:com|org|net|io|ru))', args)
-if m: print(m.group(1))
-else: print('?')
-" 2>/dev/null | head -1)
+for arg in cmd:
+    if str(arg).startswith('ee') and len(str(arg)) > 34:
+        print(arg)
+        break
+" 2>/dev/null | tr -d '[:space:]')
+                    if [ -n "$secret" ]; then
+                        domain=$(python3 -c "
+s='${secret}'
+try:
+    hd=s[34:]
+    print(bytes.fromhex(hd).decode('utf-8'))
+except:
+    print('?')
+" 2>/dev/null)
+                    fi
+                    [ -z "$domain" ] && domain="?"
                 fi
 
                 local idx=$((${#names[@]}+1))
