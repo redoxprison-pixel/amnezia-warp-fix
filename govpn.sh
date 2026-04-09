@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.10"
+VERSION="5.11"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1485,21 +1485,23 @@ _reality_scanner() {
             ;;
         2)
             echo -e "\n${WHITE}Выберите страну:${NC}"
-            echo -e "  ${YELLOW}[1]${NC}  🇷🇺 Россия   — 77.88.0.0/18 (Яндекс CDN)"
-            echo -e "  ${YELLOW}[2]${NC}  🇩🇪 Германия — 85.24.0.0/20"
-            echo -e "  ${YELLOW}[3]${NC}  🇳🇱 Нидерланды — 185.107.56.0/22"
-            echo -e "  ${YELLOW}[4]${NC}  🇫🇷 Франция   — 91.134.0.0/20"
-            echo -e "  ${YELLOW}[5]${NC}  🇸🇪 Швеция    — 91.123.240.0/22"
-            echo -e "  ${YELLOW}[6]${NC}  Свой диапазон"
+            echo -e "  ${YELLOW}[1]${NC}  🇷🇺 Россия   — mail.ru CDN (94.100.180.0/22)"
+            echo -e "  ${YELLOW}[2]${NC}  🇩🇪 Германия — Hetzner (95.216.0.0/22)"
+            echo -e "  ${YELLOW}[3]${NC}  🇳🇱 Нидерланды — Serverius (185.107.56.0/22)"
+            echo -e "  ${YELLOW}[4]${NC}  🇫🇷 Франция   — OVH (91.134.0.0/22)"
+            echo -e "  ${YELLOW}[5]${NC}  🇸🇪 Швеция    — Bahnhof (91.123.240.0/22)"
+            echo -e "  ${YELLOW}[6]${NC}  🌍 Общий CDN  — Fastly (151.101.0.0/22)"
+            echo -e "  ${YELLOW}[7]${NC}  Свой диапазон"
             echo ""
             read -p "Выбор: " country_choice
             case "$country_choice" in
-                1) target="77.88.0.0/18"       ;;
-                2) target="85.24.0.0/20"       ;;
+                1) target="94.100.180.0/22"    ;;
+                2) target="95.216.0.0/22"      ;;
                 3) target="185.107.56.0/22"    ;;
-                4) target="91.134.0.0/20"      ;;
+                4) target="91.134.0.0/22"      ;;
                 5) target="91.123.240.0/22"    ;;
-                6)
+                6) target="151.101.0.0/22"     ;;
+                7)
                     echo -e "${WHITE}Введите IP/CIDR/домен:${NC}"
                     read -p "> " target
                     ;;
@@ -1554,10 +1556,7 @@ _reality_scanner() {
 
     clear
     echo -e "\n${CYAN}━━━ Сканирование: ${target} ━━━${NC}\n"
-    echo -e "${YELLOW}Поиск TLS 1.3 + ALPN h2 серверов...${NC}"
-    echo -e "${WHITE}Нажмите Ctrl+C для остановки после нужного количества результатов.${NC}\n"
-    printf "  ${WHITE}%-18s %-35s %-20s${NC}\n" "IP" "Домен (SNI)" "Издатель"
-    echo -e "${MAGENTA}$(printf '%.0s─' {1..75})${NC}"
+    echo -e "${YELLOW}Поиск TLS 1.3 + ALPN h2 серверов...${NC}\n"
 
     local out_file="/tmp/reality_scan_$$.csv"
 
