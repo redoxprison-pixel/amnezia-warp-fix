@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.2"
+VERSION="5.3"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2170,7 +2170,7 @@ _agh_apply_rules() {
     local dns_port; dns_port=$(_agh_dns_port)
     local -a selected=("$@")
 
-    # Полная очистка всех AGH правил (включая дубли)
+    # Полная очистка всех AGH правил
     docker exec "$AWG_CONTAINER" sh -c "
         while iptables -t nat -S PREROUTING 2>/dev/null | grep -q 'govpn:agh'; do
             iptables -t nat -S PREROUTING 2>/dev/null | grep 'govpn:agh' | head -1 | \
@@ -2180,13 +2180,39 @@ _agh_apply_rules() {
 
     [ "${#selected[@]}" -eq 0 ] && return 0
 
+    # Определяем gateway хоста из сети контейнера (amn0 интерфейс)
+    local host_gw
+    host_gw=$(docker inspect "$AWG_CONTAINER" 2>/dev/null | \
+        python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+nets=d[0].get('NetworkSettings',{}).get('Networks',{})
+gws=[v.get('Gateway','') for v in nets.values() if v.get('Gateway') and not v.get('Gateway','').startswith('172.17')]
+if gws: print(gws[0])
+else:
+    gws=[v.get('Gateway','') for v in nets.values() if v.get('Gateway')]
+    print(gws[0] if gws else '')
+" 2>/dev/null | tr -d '[:space:]')
+
+    # Fallback
+    [ -z "$host_gw" ] && host_gw="172.29.172.1"
+
+    # Убедимся что хост разрешает входящий трафик на dns_port с интерфейса amn0
+    iptables -C INPUT -i amn0 -p udp --dport "$dns_port" -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT -i amn0 -p udp --dport "$dns_port" -j ACCEPT 2>/dev/null || true
+    iptables -C INPUT -i amn0 -p tcp --dport "$dns_port" -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT -i amn0 -p tcp --dport "$dns_port" -j ACCEPT 2>/dev/null || true
+
+    # DNAT на хост gateway (работает через network namespace)
     for ip in "${selected[@]}"; do
         local bare="${ip%/32}"
         docker exec "$AWG_CONTAINER" sh -c "
-            iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p udp --dport 53 \
-                -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true
-            iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p tcp --dport 53 \
-                -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true
+            iptables -t nat -A PREROUTING -s ${bare}/32 -p udp --dport 53 \
+                -j DNAT --to-destination ${host_gw}:${dns_port} \
+                -m comment --comment 'govpn:agh' 2>/dev/null || true
+            iptables -t nat -A PREROUTING -s ${bare}/32 -p tcp --dport 53 \
+                -j DNAT --to-destination ${host_gw}:${dns_port} \
+                -m comment --comment 'govpn:agh' 2>/dev/null || true
         " > /dev/null 2>&1
     done
 }
@@ -2209,12 +2235,28 @@ _agh_patch_start_sh() {
 
     [ "${#selected[@]}" -eq 0 ] && return 0
 
-    # Собрать блок
+    # Определяем gateway хоста
+    local host_gw
+    host_gw=$(docker inspect "$AWG_CONTAINER" 2>/dev/null | \
+        python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+nets=d[0].get('NetworkSettings',{}).get('Networks',{})
+gws=[v.get('Gateway','') for v in nets.values() if v.get('Gateway') and not v.get('Gateway','').startswith('172.17')]
+if gws: print(gws[0])
+else:
+    gws=[v.get('Gateway','') for v in nets.values() if v.get('Gateway')]
+    print(gws[0] if gws else '172.29.172.1')
+" 2>/dev/null | tr -d '[:space:]')
+    [ -z "$host_gw" ] && host_gw="172.29.172.1"
+
+    # Собрать блок с DNAT
     local block="${AGH_MARKER_B}"$'\n'
+    # Правило INPUT на хосте (через start.sh не получится — это хост, не контейнер)
     for ip in "${selected[@]}"; do
         local bare="${ip%/32}"
-        block+="iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p udp --dport 53 -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true"$'\n'
-        block+="iptables -t nat -A PREROUTING -i ${iface} -s ${bare} -p tcp --dport 53 -j REDIRECT --to-port ${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true"$'\n'
+        block+="iptables -t nat -A PREROUTING -s ${bare}/32 -p udp --dport 53 -j DNAT --to-destination ${host_gw}:${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true"$'\n'
+        block+="iptables -t nat -A PREROUTING -s ${bare}/32 -p tcp --dport 53 -j DNAT --to-destination ${host_gw}:${dns_port} -m comment --comment 'govpn:agh' 2>/dev/null || true"$'\n'
     done
     block+="${AGH_MARKER_E}"
 
