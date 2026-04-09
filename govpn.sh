@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.11"
+VERSION="5.12"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1469,8 +1469,8 @@ _reality_scanner() {
             echo -e "  ${YELLOW}[1]${NC} Cloudflare (1.1.1.0/24)"
             echo -e "  ${YELLOW}[2]${NC} Fastly     (151.101.0.0/22)"
             echo -e "  ${YELLOW}[3]${NC} Akamai     (23.32.0.0/22)"
-            echo -e "  ${YELLOW}[4]${NC} Amazon     (13.224.0.0/22)"
-            echo -e "  ${YELLOW}[5]${NC} Google     (142.250.0.0/22)"
+            echo -e "  ${YELLOW}[4]${NC} Amazon CF  (13.224.0.0/22)"
+            echo -e "  ${YELLOW}[5]${NC} Microsoft  (13.107.4.0/22)"
             echo ""
             read -p "Выбор [1]: " cdn_choice
             case "${cdn_choice:-1}" in
@@ -1478,30 +1478,38 @@ _reality_scanner() {
                 2) target="151.101.0.0/22"   ;;
                 3) target="23.32.0.0/22"     ;;
                 4) target="13.224.0.0/22"    ;;
-                5) target="142.250.0.0/22"   ;;
+                5) target="13.107.4.0/22"    ;;
                 *) target="1.1.1.0/24"       ;;
             esac
             threads=10
             ;;
         2)
-            echo -e "\n${WHITE}Выберите страну:${NC}"
-            echo -e "  ${YELLOW}[1]${NC}  🇷🇺 Россия   — mail.ru CDN (94.100.180.0/22)"
-            echo -e "  ${YELLOW}[2]${NC}  🇩🇪 Германия — Hetzner (95.216.0.0/22)"
-            echo -e "  ${YELLOW}[3]${NC}  🇳🇱 Нидерланды — Serverius (185.107.56.0/22)"
-            echo -e "  ${YELLOW}[4]${NC}  🇫🇷 Франция   — OVH (91.134.0.0/22)"
-            echo -e "  ${YELLOW}[5]${NC}  🇸🇪 Швеция    — Bahnhof (91.123.240.0/22)"
-            echo -e "  ${YELLOW}[6]${NC}  🌍 Общий CDN  — Fastly (151.101.0.0/22)"
-            echo -e "  ${YELLOW}[7]${NC}  Свой диапазон"
+            echo -e "\n${WHITE}Выберите страну / CDN:${NC}"
+            echo -e "  ${YELLOW}[1]${NC}  🇷🇺 Россия — mail.ru CDN"
+            echo -e "  ${YELLOW}[2]${NC}  🇷🇺 Россия — VK/OK CDN"
+            echo -e "  ${YELLOW}[3]${NC}  🇷🇺 Россия — Сбер/банки"
+            echo -e "  ${YELLOW}[4]${NC}  🇷🇺 Россия — мессенджеры (Telegram CDN)"
+            echo -e "  ${YELLOW}[5]${NC}  🇩🇪 Германия — Hetzner"
+            echo -e "  ${YELLOW}[6]${NC}  🇳🇱 Нидерланды — Serverius"
+            echo -e "  ${YELLOW}[7]${NC}  🌍 Fastly CDN"
+            echo -e "  ${YELLOW}[8]${NC}  🌍 Akamai CDN"
+            echo -e "  ${YELLOW}[9]${NC}  Свой диапазон / домен"
             echo ""
             read -p "Выбор: " country_choice
             case "$country_choice" in
-                1) target="94.100.180.0/22"    ;;
-                2) target="95.216.0.0/22"      ;;
-                3) target="185.107.56.0/22"    ;;
-                4) target="91.134.0.0/22"      ;;
-                5) target="91.123.240.0/22"    ;;
-                6) target="151.101.0.0/22"     ;;
-                7)
+                1) target="94.100.180.0/22 87.240.128.0/22 149.154.160.0/22 91.108.56.0/22"
+                   threads=15 ;;
+                2) target="87.240.128.0/22 93.186.224.0/22"
+                   threads=10 ;;
+                3) target="185.100.84.0/22 37.18.56.0/22"
+                   threads=10 ;;
+                4) target="149.154.160.0/22 91.108.4.0/22 91.108.56.0/22"
+                   threads=10 ;;
+                5) target="95.216.0.0/22"      ;;
+                6) target="185.107.56.0/22"    ;;
+                7) target="151.101.0.0/22"     ;;
+                8) target="23.32.0.0/22"       ;;
+                9)
                     echo -e "${WHITE}Введите IP/CIDR/домен:${NC}"
                     read -p "> " target
                     ;;
@@ -1559,54 +1567,70 @@ _reality_scanner() {
     echo -e "${YELLOW}Поиск TLS 1.3 + ALPN h2 серверов...${NC}\n"
 
     local out_file="/tmp/reality_scan_$$.csv"
+    local combined_file="/tmp/reality_combined_$$.csv"
+    echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$combined_file"
 
-    # Таймаут зависит от размера диапазона
+    # Таймаут зависит от размера диапазона (берём первый таргет для определения)
+    local first_target="${target%% *}"
     local scan_timeout=30
-    if echo "$target" | grep -qE '/[0-9]$|/1[0-6]$'; then
-        scan_timeout=120  # большие диапазоны (/8-/16)
-    elif echo "$target" | grep -qE '/1[7-9]$|/2[0-2]$'; then
-        scan_timeout=60   # средние (/17-/22)
+    if echo "$first_target" | grep -qE '/[0-9]$|/1[0-6]$'; then
+        scan_timeout=120
+    elif echo "$first_target" | grep -qE '/1[7-9]$|/2[0-2]$'; then
+        scan_timeout=60
     fi
-    echo -e "${CYAN}Сканирование (до ${scan_timeout}с, потоков: ${threads})...${NC}"
 
-    timeout "$scan_timeout" "$scanner_bin" \
-        -addr "$target" -thread "$threads" -timeout "$timeout" \
-        -out "$out_file" > /dev/null 2>&1 || true
+    # Сканируем каждый диапазон
+    local t_num=0
+    for t in $target; do
+        ((t_num++))
+        local t_count; t_count=$(echo "$target" | wc -w)
+        echo -e "${CYAN}[${t_num}/${t_count}] Сканирую ${t} (до ${scan_timeout}с, потоков: ${threads})...${NC}"
+        local t_file="/tmp/reality_t${t_num}_$$.csv"
+        timeout "$scan_timeout" "$scanner_bin" \
+            -addr "$t" -thread "$threads" -timeout "$timeout" \
+            -out "$t_file" > /dev/null 2>&1 || true
+        [ -f "$t_file" ] && tail -n +2 "$t_file" >> "$combined_file" && rm -f "$t_file"
+    done
 
     echo ""
 
-    # Показываем результаты из CSV
-    if [ -f "$out_file" ] && [ "$(wc -l < "$out_file")" -gt 1 ]; then
-        local total; total=$(( $(wc -l < "$out_file") - 1 ))
-        echo -e "${GREEN}Найдено: ${total} серверов совместимых с Reality${NC}\n"
+    # Показываем результаты — дедуплицируем домены через sort/uniq, убираем wildcards
+    if [ -f "$combined_file" ] && [ "$(wc -l < "$combined_file")" -gt 1 ]; then
 
-        printf "  ${WHITE}%-20s %-35s %-15s${NC}\n" "IP" "Домен (SNI)" "Страна"
-        echo -e "  $(printf '─%.0s' {1..70})"
+        # Обрабатываем CSV: чистим домены, убираем дубли
+        local clean_domains
+        clean_domains=$(tail -n +2 "$combined_file" | \
+            awk -F',' '{
+                d=$3; gsub(/"/, "", d); gsub(/^\*\./, "", d); gsub(/^ */, "", d)
+                if (d != "" && d != "N/A") print $1"\t"d"\t"$5
+            }' | sort -t$'\t' -k2 -u | head -"$max_results")
 
-        tail -n +2 "$out_file" | head -"$max_results" | \
-        while IFS=',' read -r ip origin domain issuer geo; do
-            domain="${domain//\"/}"
-            issuer="${issuer//\"/}"
-            geo="${geo//\"/}"
-            [ -z "$domain" ] && continue
-            printf "  ${GREEN}✓${NC} %-18s ${CYAN}%-35s${NC} %s\n" \
-                "$ip" "$domain" "${geo:-?}"
-        done
+        local total; total=$(echo "$clean_domains" | grep -c "." 2>/dev/null || echo 0)
 
-        echo ""
-        echo -e "${WHITE}Лучшие SNI для Reality (скопируйте в 3X-UI → serverName):${NC}"
-        tail -n +2 "$out_file" | head -5 | \
-        while IFS=',' read -r ip origin domain issuer geo; do
-            domain="${domain//\"/}"
-            [ -n "$domain" ] && echo -e "  ${GREEN}▶${NC} ${CYAN}${domain}${NC}"
-        done
-        echo -e "\n${WHITE}Файл результатов: ${CYAN}${out_file}${NC}"
+        if [ "$total" -gt 0 ]; then
+            echo -e "${GREEN}Найдено: ${total} уникальных SNI для Reality${NC}\n"
+            printf "  ${WHITE}%-20s %-35s %-10s${NC}\n" "IP" "Домен (SNI)" "Страна"
+            echo -e "  $(printf '─%.0s' {1..68})"
+
+            echo "$clean_domains" | while IFS=$'\t' read -r ip domain geo; do
+                geo="${geo//\"/}"; geo="${geo// /}"
+                [ "$geo" = "N/A" ] || [ -z "$geo" ] && geo="—"
+                printf "  ${GREEN}✓${NC} %-18s ${CYAN}%-35s${NC} %s\n" "$ip" "$domain" "$geo"
+            done
+
+            echo ""
+            echo -e "${WHITE}━━ Скопируйте в 3X-UI → Reality → serverName: ━━${NC}"
+            echo "$clean_domains" | awk -F'\t' '{print $2}' | sort -u | \
+                while read -r d; do echo -e "  ${GREEN}▶${NC} ${CYAN}${d}${NC}"; done
+
+            echo -e "\n${WHITE}Результаты: ${CYAN}${combined_file}${NC}"
+        else
+            echo -e "${YELLOW}Результатов нет — серверы не поддерживают TLS 1.3 + h2.${NC}"
+            echo -e "${WHITE}Попробуйте Cloudflare: выберите пункт 1 → 1${NC}"
+        fi
     else
         echo -e "${YELLOW}Результатов нет.${NC}"
-        echo -e "${WHITE}Попробуйте: увеличить timeout, уменьшить диапазон или выбрать другой CDN.${NC}"
-        echo ""
-        echo -e "${WHITE}Ручная проверка домена:${NC}"
-        echo -e "  ${CYAN}RealiTLScanner -addr ваш_домен -timeout 5${NC}"
+        echo -e "${WHITE}Попробуйте Cloudflare: ${CYAN}RealiTLScanner -addr 1.1.1.0/24 -timeout 3${NC}"
     fi
     echo ""
     read -p "Нажмите Enter..."
