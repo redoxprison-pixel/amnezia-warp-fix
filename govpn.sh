@@ -1562,10 +1562,10 @@ _reality_scanner() {
     local out_file="/tmp/reality_scan_$$.csv"
     local count=0
 
-    # Запускаем сканер — логи идут в stderr, парсим их напрямую
-    # CSV из -out для сохранения результатов
-    "$scanner_bin" -addr "$target" -thread "$threads" -timeout "$timeout" \
-        -out "$out_file" 2>&1 1>/dev/null | \
+    # Сканер пишет результаты в stderr (лог), CSV в файл
+    # Читаем stderr напрямую через pipe
+    { "$scanner_bin" -addr "$target" -thread "$threads" -timeout "$timeout" \
+        -out "$out_file" 2>&1 >/dev/null; } | \
     while IFS= read -r line; do
         if echo "$line" | grep -q "feasible=true"; then
             local ip domain issuer
