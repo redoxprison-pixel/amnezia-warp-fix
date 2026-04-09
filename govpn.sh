@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.6"
+VERSION="5.7"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1408,21 +1408,46 @@ _reality_scanner() {
     echo -e "${WHITE}Сканирует TLS серверы для использования как SNI в Reality (3X-UI/VLESS).${NC}"
     echo -e "${WHITE}Нужен TLS 1.3 + ALPN h2 — иначе Reality не будет работать.${NC}\n"
 
-    # Скачиваем RealiTLScanner если нет
+    # Скачиваем/собираем RealiTLScanner если нет
     local scanner_bin="/usr/local/bin/RealiTLScanner"
     if [ ! -f "$scanner_bin" ]; then
-        echo -e "${YELLOW}Скачиваю RealiTLScanner...${NC}"
-        local arch
-        case "$(uname -m)" in
-            x86_64)  arch="amd64" ;;
-            aarch64) arch="arm64" ;;
-            *) echo -e "${RED}Архитектура не поддерживается${NC}"; read -p "Enter..."; return ;;
-        esac
-        local url="https://github.com/XTLS/RealiTLScanner/releases/latest/download/RealiTLScanner-linux-${arch}"
-        curl -fsSL "$url" -o "$scanner_bin" 2>/dev/null && chmod +x "$scanner_bin" || {
-            echo -e "${RED}  ✗ Не удалось скачать. Проверьте интернет.${NC}"
+        echo -e "${YELLOW}Установка RealiTLScanner...${NC}"
+
+        # Пробуем через Go
+        if command -v go &>/dev/null && go version 2>/dev/null | grep -q "go1\.[2-9][0-9]"; then
+            echo -e "${CYAN}  Сборка из исходников (Go)...${NC}"
+            go install github.com/XTLS/RealiTLScanner@latest 2>/dev/null && \
+                cp ~/go/bin/RealiTLScanner "$scanner_bin" 2>/dev/null
+        fi
+
+        # Если Go нет — устанавливаем Go и собираем
+        if [ ! -f "$scanner_bin" ]; then
+            echo -e "${CYAN}  Устанавливаю Go...${NC}"
+            local go_ver="1.22.4"
+            local arch
+            case "$(uname -m)" in
+                x86_64)  arch="amd64" ;;
+                aarch64) arch="arm64" ;;
+                *) echo -e "${RED}Архитектура не поддерживается${NC}"; read -p "Enter..."; return ;;
+            esac
+            curl -fsSL "https://go.dev/dl/go${go_ver}.linux-${arch}.tar.gz" -o /tmp/go.tar.gz 2>/dev/null && {
+                tar -C /usr/local -xzf /tmp/go.tar.gz 2>/dev/null
+                rm -f /tmp/go.tar.gz
+                export PATH="/usr/local/go/bin:$PATH"
+                echo -e "${GREEN}  ✓ Go установлен${NC}"
+                echo -e "${CYAN}  Сборка RealiTLScanner...${NC}"
+                GOPATH=/tmp/go_build /usr/local/go/bin/go install \
+                    github.com/XTLS/RealiTLScanner@latest 2>/dev/null && \
+                    cp /tmp/go_build/bin/RealiTLScanner "$scanner_bin" 2>/dev/null
+            }
+        fi
+
+        if [ ! -f "$scanner_bin" ]; then
+            echo -e "${RED}  ✗ Не удалось установить RealiTLScanner${NC}"
+            echo -e "${WHITE}  Установите вручную: go install github.com/XTLS/RealiTLScanner@latest${NC}"
             read -p "Enter..."; return
-        }
+        fi
+        chmod +x "$scanner_bin"
         echo -e "${GREEN}  ✓ Установлен${NC}\n"
     fi
 
