@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.5"
+VERSION="5.6"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1387,6 +1387,7 @@ tools_menu() {
         echo -e "  ${YELLOW}[2]${NC}  Тест цепочки"
         echo -e "  ${YELLOW}[3]${NC}  Проверить сайт"
         echo -e "  ${YELLOW}[4]${NC}  Серверы (добавить/переименовать)"
+        echo -e "  ${YELLOW}[5]${NC}  Reality SNI Scanner"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
@@ -1395,9 +1396,192 @@ tools_menu() {
             2) _chain_test ;;
             3) _site_check ;;
             4) _servers_menu ;;
+            5) _reality_scanner ;;
             0|"") return ;;
         esac
     done
+}
+
+_reality_scanner() {
+    clear
+    echo -e "\n${CYAN}━━━ Reality SNI Scanner ━━━${NC}\n"
+    echo -e "${WHITE}Сканирует TLS серверы для использования как SNI в Reality (3X-UI/VLESS).${NC}"
+    echo -e "${WHITE}Нужен TLS 1.3 + ALPN h2 — иначе Reality не будет работать.${NC}\n"
+
+    # Скачиваем RealiTLScanner если нет
+    local scanner_bin="/usr/local/bin/RealiTLScanner"
+    if [ ! -f "$scanner_bin" ]; then
+        echo -e "${YELLOW}Скачиваю RealiTLScanner...${NC}"
+        local arch
+        case "$(uname -m)" in
+            x86_64)  arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+            *) echo -e "${RED}Архитектура не поддерживается${NC}"; read -p "Enter..."; return ;;
+        esac
+        local url="https://github.com/XTLS/RealiTLScanner/releases/latest/download/RealiTLScanner-linux-${arch}"
+        curl -fsSL "$url" -o "$scanner_bin" 2>/dev/null && chmod +x "$scanner_bin" || {
+            echo -e "${RED}  ✗ Не удалось скачать. Проверьте интернет.${NC}"
+            read -p "Enter..."; return
+        }
+        echo -e "${GREEN}  ✓ Установлен${NC}\n"
+    fi
+
+    # Выбор режима сканирования
+    echo -e "${WHITE}Что сканировать?${NC}\n"
+    echo -e "  ${YELLOW}[1]${NC}  Популярные CDN (Cloudflare, Fastly, Akamai) — быстро"
+    echo -e "  ${YELLOW}[2]${NC}  По стране — выбор из списка"
+    echo -e "  ${YELLOW}[3]${NC}  Свой IP / домен / CIDR"
+    echo -e "  ${YELLOW}[4]${NC}  Свои IP как домен маскировки (аналог MTProto FakeTLS)"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "Выбор: " scan_mode
+
+    local target="" threads=5 timeout=5
+
+    case "$scan_mode" in
+        1)
+            echo -e "\n${WHITE}Выберите CDN:${NC}"
+            echo -e "  ${YELLOW}[1]${NC} Cloudflare (1.1.1.0/24)"
+            echo -e "  ${YELLOW}[2]${NC} Fastly     (151.101.0.0/22)"
+            echo -e "  ${YELLOW}[3]${NC} Akamai     (23.32.0.0/22)"
+            echo -e "  ${YELLOW}[4]${NC} Amazon     (13.224.0.0/22)"
+            echo -e "  ${YELLOW}[5]${NC} Google     (142.250.0.0/22)"
+            echo ""
+            read -p "Выбор [1]: " cdn_choice
+            case "${cdn_choice:-1}" in
+                1) target="1.1.1.0/24"       ;;
+                2) target="151.101.0.0/22"   ;;
+                3) target="23.32.0.0/22"     ;;
+                4) target="13.224.0.0/22"    ;;
+                5) target="142.250.0.0/22"   ;;
+                *) target="1.1.1.0/24"       ;;
+            esac
+            threads=10
+            ;;
+        2)
+            echo -e "\n${WHITE}Выберите страну:${NC}"
+            echo -e "  ${YELLOW}[1]${NC}  🇷🇺 Россия   — 77.88.0.0/18 (Яндекс CDN)"
+            echo -e "  ${YELLOW}[2]${NC}  🇩🇪 Германия — 85.24.0.0/20"
+            echo -e "  ${YELLOW}[3]${NC}  🇳🇱 Нидерланды — 185.107.56.0/22"
+            echo -e "  ${YELLOW}[4]${NC}  🇫🇷 Франция   — 91.134.0.0/20"
+            echo -e "  ${YELLOW}[5]${NC}  🇸🇪 Швеция    — 91.123.240.0/22"
+            echo -e "  ${YELLOW}[6]${NC}  Свой диапазон"
+            echo ""
+            read -p "Выбор: " country_choice
+            case "$country_choice" in
+                1) target="77.88.0.0/18"       ;;
+                2) target="85.24.0.0/20"       ;;
+                3) target="185.107.56.0/22"    ;;
+                4) target="91.134.0.0/20"      ;;
+                5) target="91.123.240.0/22"    ;;
+                6)
+                    echo -e "${WHITE}Введите IP/CIDR/домен:${NC}"
+                    read -p "> " target
+                    ;;
+                *) echo -e "${RED}Неверный выбор${NC}"; read -p "Enter..."; return ;;
+            esac
+            ;;
+        3)
+            echo -e "\n${WHITE}Введите IP, домен или CIDR (например: 1.2.3.4, site.com, 1.2.3.0/24):${NC}"
+            read -p "> " target
+            [ -z "$target" ] && return
+            ;;
+        4)
+            # Проверяем свои IP как потенциальные домены маскировки
+            clear
+            echo -e "\n${CYAN}━━━ Проверка своих серверов как SNI ━━━${NC}\n"
+            echo -e "${WHITE}Проверяю серверы из вашего списка...${NC}\n"
+            local found=0
+            while IFS='=' read -r ip val; do
+                [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]] || continue
+                local name; name=$(echo "$val" | cut -d'|' -f1)
+                echo -ne "  ${WHITE}${name:-$ip} (${ip}):${NC} "
+                local result
+                result=$("$scanner_bin" -addr "$ip" -timeout 3 2>/dev/null | grep "feasible=true" | head -1)
+                if [ -n "$result" ]; then
+                    local domain; domain=$(echo "$result" | grep -oP 'domain=\K\S+')
+                    local tls; tls=$(echo "$result" | grep -oP 'tls=\K\S+')
+                    echo -e "${GREEN}✓ TLS${tls} — ${domain}${NC}"
+                    ((found++))
+                else
+                    echo -e "${RED}✗ не подходит для Reality${NC}"
+                fi
+            done < "$ALIASES_FILE" 2>/dev/null
+            [ $found -eq 0 ] && echo -e "${YELLOW}Нет подходящих серверов. Добавьте серверы в п.7→4.${NC}"
+            echo ""
+            read -p "Нажмите Enter..."
+            return
+            ;;
+        0|"") return ;;
+        *) return ;;
+    esac
+
+    # Параметры сканирования
+    echo ""
+    echo -e "${WHITE}Количество потоков (Enter = ${threads}):${NC}"
+    read -p "> " user_threads
+    [ -n "$user_threads" ] && [[ "$user_threads" =~ ^[0-9]+$ ]] && threads="$user_threads"
+
+    local max_results=10
+    echo -e "${WHITE}Максимум результатов (Enter = ${max_results}):${NC}"
+    read -p "> " user_max
+    [ -n "$user_max" ] && [[ "$user_max" =~ ^[0-9]+$ ]] && max_results="$user_max"
+
+    clear
+    echo -e "\n${CYAN}━━━ Сканирование: ${target} ━━━${NC}\n"
+    echo -e "${YELLOW}Поиск TLS 1.3 + ALPN h2 серверов...${NC}"
+    echo -e "${CYAN}(Ctrl+C для остановки)${NC}\n"
+
+    local out_file="/tmp/reality_scan_$$.csv"
+    local count=0
+
+    # Запускаем сканер с выводом в реальном времени
+    "$scanner_bin" -addr "$target" -thread "$threads" -timeout "$timeout" \
+        -out "$out_file" 2>/dev/null &
+    local scan_pid=$!
+
+    # Показываем результаты по мере появления
+    local shown=0
+    while kill -0 "$scan_pid" 2>/dev/null; do
+        if [ -f "$out_file" ] && [ "$shown" -lt "$max_results" ]; then
+            local lines; lines=$(wc -l < "$out_file" 2>/dev/null || echo 0)
+            if (( lines > shown + 1 )); then  # +1 для заголовка
+                tail -n +"$((shown + 2))" "$out_file" | head -"$((max_results - shown))" | \
+                while IFS=',' read -r ip origin domain issuer geo; do
+                    printf "  ${GREEN}✓${NC} ${WHITE}%-20s${NC} ${CYAN}%-30s${NC} %s %s\n" \
+                        "$ip" "$domain" "$issuer" "$geo"
+                done
+                shown=$lines
+            fi
+        fi
+        [ "$shown" -ge "$((max_results + 1))" ] && kill "$scan_pid" 2>/dev/null && break
+        sleep 1
+    done
+    wait "$scan_pid" 2>/dev/null
+
+    # Финальный вывод
+    echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    if [ -f "$out_file" ]; then
+        local total; total=$(( $(wc -l < "$out_file") - 1 ))
+        echo -e "${GREEN}Найдено: ${total} серверов совместимых с Reality${NC}\n"
+
+        if [ "$total" -gt 0 ]; then
+            echo -e "${WHITE}Топ результатов для использования как SNI:${NC}"
+            tail -n +2 "$out_file" | head -"$max_results" | \
+            while IFS=',' read -r ip origin domain issuer geo; do
+                echo -e "  ${GREEN}●${NC} ${CYAN}${domain}${NC}  ${WHITE}(${ip}, ${geo})${NC}"
+            done
+
+            echo ""
+            echo -e "${WHITE}Скопируйте домен в поле${NC} ${CYAN}serverName / SNI${NC} ${WHITE}в настройках Reality в 3X-UI.${NC}"
+            echo -e "${WHITE}Результаты сохранены: ${CYAN}${out_file}${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Результатов нет. Попробуйте другой диапазон или увеличьте timeout.${NC}"
+    fi
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    read -p "Нажмите Enter..."
 }
 
 _speed_test() {
@@ -2553,7 +2737,7 @@ _mtg_list_instances() {
 
 _mtg_count_running() {
     docker ps --format '{{.Names}}' 2>/dev/null | \
-        grep -icE "^(mtg-|mtproto)" 2>/dev/null || echo "0"
+        grep -icE "^(mtg-|mtproto)" 2>/dev/null | tr -d '[:space:]' | head -1 || echo "0"
 }
 
 _mtg_detect_type() {
