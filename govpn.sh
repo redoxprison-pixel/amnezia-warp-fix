@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.15"
+VERSION="5.16"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -712,6 +712,67 @@ _awg_warp_status() {
 #  МАСТЕР НАСТРОЙКИ WARP
 # ═══════════════════════════════════════════════════════════════
 
+_3xui_warp_instruction() {
+    clear
+    local socks_port="${WARP_SOCKS_PORT:-40000}"
+    local wip; wip=$(_3xui_warp_ip 2>/dev/null || echo "?")
+
+    echo -e "\n${CYAN}━━━ Инструкция: WARP в 3X-UI ━━━${NC}\n"
+    echo -e "${WHITE}WARP работает как SOCKS5 прокси на ${CYAN}127.0.0.1:${socks_port}${NC}"
+    echo -e "${WHITE}Текущий WARP IP: ${GREEN}${wip}${NC}\n"
+
+    echo -e "${MAGENTA}━━ Способ 1: Outbound для всех клиентов ━━${NC}"
+    echo -e "${WHITE}В панели 3X-UI:${NC}"
+    echo -e "  ${CYAN}1.${NC} Настройки → Xray конфигурация → Outbounds"
+    echo -e "  ${CYAN}2.${NC} Добавить outbound:"
+    echo -e '     {
+       "tag": "WARP",
+       "protocol": "socks",
+       "settings": {
+         "servers": [{
+           "address": "127.0.0.1",
+           "port": '"${socks_port}"'
+         }]
+       }
+     }'
+    echo -e "  ${CYAN}3.${NC} Routing → Добавить правило:"
+    echo -e '     { "outboundTag": "WARP", "domain": ["geosite:geolocation-!cn"] }'
+    echo -e "  ${CYAN}4.${NC} Сохранить → Перезапустить Xray\n"
+
+    echo -e "${MAGENTA}━━ Способ 2: Только для конкретного inbound ━━${NC}"
+    echo -e "${WHITE}В настройках нужного inbound:${NC}"
+    echo -e "  ${CYAN}1.${NC} Открыть inbound → Sniffing → включить"
+    echo -e "  ${CYAN}2.${NC} Routing → Источник: inbound tag → Назначение: WARP\n"
+
+    echo -e "${MAGENTA}━━ Способ 3: Автоматически (наш скрипт уже добавил) ━━${NC}"
+    # Проверяем добавлен ли outbound
+    local db="/etc/x-ui/x-ui.db"
+    if [ -f "$db" ] && command -v sqlite3 &>/dev/null; then
+        local has_warp
+        has_warp=$(sqlite3 "$db" "SELECT value FROM settings WHERE key='xrayTemplateConfig';" 2>/dev/null | \
+            python3 -c "import json,sys; cfg=json.load(sys.stdin); outs=[o for o in cfg.get('outbounds',[]) if o.get('tag','').upper()=='WARP']; print(len(outs))" 2>/dev/null)
+        if [ "${has_warp:-0}" -gt 0 ]; then
+            echo -e "  ${GREEN}✓ Outbound WARP уже добавлен в xray конфигурацию${NC}"
+            echo -e "  ${WHITE}Осталось только настроить routing в 3X-UI панели.${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ Outbound не добавлен. Нажмите [a] чтобы добавить автоматически.${NC}"
+        fi
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}[a]${NC}  Добавить outbound WARP автоматически"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "Выбор: " instr_choice
+    case "$instr_choice" in
+        a|A)
+            echo -e "${YELLOW}Применяю...${NC}"
+            _3xui_patch_db && echo -e "${GREEN}✓ Outbound WARP добавлен. Перезапустите Xray в 3X-UI.${NC}" || \
+                echo -e "${RED}Ошибка. Добавьте вручную по инструкции выше.${NC}"
+            read -p "Нажмите Enter..." ;;
+    esac
+}
+
 warp_setup_wizard() {
     clear
     echo -e "\n${CYAN}━━━ Настройка WARP ━━━${NC}\n"
@@ -747,11 +808,13 @@ warp_setup_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
         echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
+        is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         read -p "Выбор: " warp_action
         case "$warp_action" in
             1) warp_test; return ;;
+            i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
             2) # Перевыпуск — только wgcf регистрация заново
                 clear
                 echo -e "\n${CYAN}━━━ Перевыпуск ключа WARP ━━━${NC}\n"
@@ -1434,35 +1497,50 @@ _reality_scanner() {
         echo -e "${GREEN}  ✓ Готов${NC}\n"
     fi
 
-    # Собираем свои серверы из aliases
-    local -a my_servers=()
-    # Сначала добавляем текущий сервер
-    [ -n "$MY_IP" ] && my_servers+=("$MY_IP")
+    # Собираем свои серверы
+    local -a srv_ips=() srv_names=()
+    [ -n "$MY_IP" ] && {
+        local my_name; my_name=$(grep "^${MY_IP}=" "$ALIASES_FILE" 2>/dev/null | cut -d'=' -f2 | cut -d'|' -f1)
+        srv_ips+=("$MY_IP"); srv_names+=("${my_name:-этот сервер}")
+    }
     if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
         while IFS='=' read -r ip val; do
             [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]] || continue
-            [ "$ip" = "$MY_IP" ] && continue  # не дублируем
-            my_servers+=("$ip")
+            [ "$ip" = "$MY_IP" ] && continue
+            local n; n=$(echo "$val" | cut -d'|' -f1)
+            srv_ips+=("$ip"); srv_names+=("${n:-$ip}")
         done < "$ALIASES_FILE"
     fi
 
-    # Меню
+    # Строим меню динамически
     clear
-    echo -e "\n${CYAN}━━━ Reality SNI Scanner ━━━${NC}\n"
-    echo -e "${WHITE}Режим: поиск серверов с TLS 1.3 + ALPN h2 для маскировки Reality.${NC}\n"
+    echo -e "\n${CYAN}━━━ Reality SNI Scanner ━━━${NC}"
+    echo -e "${WHITE}Ищем серверы с TLS 1.3 + ALPN h2 для маскировки Reality.${NC}\n"
 
-    echo -e "  ${GREEN}[1]${NC}  ${GREEN}★ Мои серверы${NC}  ${CYAN}— сканирует ваши IP (лучший результат)${NC}"
-    if [ ${#my_servers[@]} -gt 0 ]; then
-        for s in "${my_servers[@]}"; do
-            local sname; sname=$(grep "^${s}=" "$ALIASES_FILE" 2>/dev/null | cut -d'=' -f2 | cut -d'|' -f1)
-            echo -e "     ${WHITE}${sname:-$s}${NC} ${CYAN}(${s})${NC}"
+    local idx=1
+    local -a menu_ips=() menu_labels=()
+
+    # Мои серверы — каждый отдельным пунктом
+    if [ ${#srv_ips[@]} -gt 0 ]; then
+        echo -e "${CYAN}  Мои серверы:${NC}"
+        for i in "${!srv_ips[@]}"; do
+            local ip="${srv_ips[$i]}" name="${srv_names[$i]}"
+            echo -e "  ${GREEN}[${idx}]${NC}  ${WHITE}${name}${NC}  ${CYAN}(${ip})${NC}"
+            menu_ips+=("$ip"); menu_labels+=("server")
+            ((idx++))
         done
-    else
-        echo -e "     ${YELLOW}(нет серверов — добавьте через п.7→4)${NC}"
+        echo ""
     fi
-    echo ""
-    echo -e "  ${YELLOW}[6]${NC}  🌍 Международные CDN  ${WHITE}— Cloudflare / Fastly / Akamai${NC}"
-    echo -e "  ${YELLOW}[10]${NC} 🔍 Свой IP / домен    ${WHITE}— ввести вручную${NC}"
+
+    # Разделитель
+    echo -e "  ${YELLOW}[${idx}]${NC}  🌍 CDN  ${WHITE}Cloudflare / Fastly / Akamai${NC}"
+    menu_ips+=("cdn"); menu_labels+=("cdn")
+    local cdn_idx=$idx; ((idx++))
+
+    echo -e "  ${YELLOW}[${idx}]${NC}  🔍 Свой IP / домен"
+    menu_ips+=("custom"); menu_labels+=("custom")
+    local custom_idx=$idx; ((idx++))
+
     echo -e "  ${YELLOW}[0]${NC}  ↩  Назад"
     echo ""
     read -p "Выбор [1]: " choice
@@ -1472,127 +1550,29 @@ _reality_scanner() {
     local -a scan_ips=()
     local threads=5
 
-    case "$choice" in
-        1)
-            if [ ${#my_servers[@]} -eq 0 ]; then
-                echo -e "${YELLOW}Нет серверов. Добавьте через п.7→4.${NC}"
-                read -p "Enter..."; return
-            fi
-            scan_ips=("${my_servers[@]}")
-            threads=5
-            ;;
-        6)
-            scan_ips=("1.1.1.1" "151.101.1.1" "23.32.0.1")
-            threads=8
-            ;;
-        10)
-            echo -e "${WHITE}Введите IP или домен:${NC}"
-            read -p "> " custom_ip
-            [ -z "$custom_ip" ] && return
-            scan_ips=("$custom_ip")
-            threads=5
-            ;;
-        *) return ;;
-    esac
-
-    _reality_do_scan "$scanner_bin" 10 "$threads" "${scan_ips[@]}"
-}
-
-_reality_do_scan() {
-    local scanner_bin="$1" max_results="$2" threads="$3"
-    shift 3
-    local scan_ips=("$@")
-    local time_per_ip=25
-
-    clear
-    echo -e "\n${CYAN}━━━ Сканирование ━━━${NC}\n"
-
-    local combined_file="/tmp/reality_combined_$$.csv"
-    echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$combined_file"
-
-    local t_num=0 total_t=${#scan_ips[@]}
-    for ip in "${scan_ips[@]}"; do
-        ((t_num++))
-        echo -ne "  ${CYAN}[${t_num}/${total_t}]${NC} ${WHITE}${ip}${NC} … "
-        local t_file="/tmp/reality_t${t_num}_$$.csv"
-        timeout "$time_per_ip" "$scanner_bin" \
-            -addr "$ip" -thread "$threads" -timeout 4 \
-            -out "$t_file" > /dev/null 2>&1 || true
-        local found=0
-        [ -f "$t_file" ] && found=$(( $(wc -l < "$t_file") - 1 )) && \
-            tail -n +2 "$t_file" >> "$combined_file" && rm -f "$t_file"
-        [ "$found" -gt 0 ] && echo -e "${GREEN}${found} SNI${NC}" || echo -e "${YELLOW}0 SNI${NC}"
-    done
-
-    echo ""
-    _reality_show_results "$combined_file" "$max_results" "$scanner_bin" "$threads" "${scan_ips[@]}"
-}
-
-_reality_show_results() {
-    local combined_file="$1" max_results="$2" scanner_bin="$3" threads="$4"
-    shift 4
-    local scan_ips=("$@")
-
-    if [ ! -f "$combined_file" ] || [ "$(wc -l < "$combined_file")" -le 1 ]; then
-        echo -e "${RED}Результатов нет.${NC}"
-        echo -e "${WHITE}Эти IP не поддерживают TLS 1.3 + h2. Попробуйте CDN (пункт 6).${NC}"
-        rm -f "$combined_file"
-        echo ""; read -p "Enter..."; return
-    fi
-
-    local clean
-    clean=$(tail -n +2 "$combined_file" | \
-        awk -F',' '{
-            d=$3; gsub(/"/, "", d); gsub(/^\*\./, "", d)
-            ip=$1; gsub(/"/, "", ip)
-            if (d != "" && d != "N/A" && ip != "") print ip"\t"d
-        }' | sort -t$'\t' -k2 -u | head -"$max_results")
-
-    local total; total=$(echo "$clean" | grep -c "." 2>/dev/null || echo 0)
-
-    echo -e "${GREEN}✅ Найдено: ${total} SNI${NC}\n"
-    printf "  ${WHITE}%-20s %s${NC}\n" "IP" "Домен (SNI)"
-    echo -e "  $(printf '─%.0s' {1..55})"
-    echo "$clean" | while IFS=$'\t' read -r ip domain; do
-        printf "  ${GREEN}✓${NC} %-18s ${CYAN}%s${NC}\n" "$ip" "$domain"
-    done
-
-    echo ""
-    echo -e "${MAGENTA}━━ Скопируйте в 3X-UI → Reality → serverName: ━━${NC}"
-    echo "$clean" | awk -F$'\t' '{print $2}' | sort -u | \
-        while read -r d; do echo -e "  ${GREEN}▶${NC} ${CYAN}${d}${NC}"; done
-
-    echo ""
-    echo -e "  ${YELLOW}[+]${NC}  Найти ещё (сканируем дольше)"
-    echo -e "  ${YELLOW}[0]${NC}  ↩  Назад"
-    echo ""
-    read -p "Выбор: " more_choice
-
-    if [ "$more_choice" = "+" ]; then
-        local new_max=$(( max_results + 10 ))
-        local new_time=45
-        echo -e "\n${CYAN}Сканируем дольше (${new_time}с на каждый IP)...${NC}"
-        local new_combined="/tmp/reality_more_$$.csv"
-        echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$new_combined"
-        local t_num=0
-        for ip in "${scan_ips[@]}"; do
-            ((t_num++))
-            echo -ne "  ${CYAN}[${t_num}/${#scan_ips[@]}]${NC} ${ip} … "
-            local t_file="/tmp/reality_more${t_num}_$$.csv"
-            timeout "$new_time" "$scanner_bin" \
-                -addr "$ip" -thread "$threads" -timeout 4 \
-                -out "$t_file" > /dev/null 2>&1 || true
-            local found=0
-            [ -f "$t_file" ] && found=$(( $(wc -l < "$t_file") - 1 )) && \
-                tail -n +2 "$t_file" >> "$new_combined" && rm -f "$t_file"
-            echo -e "${GREEN}${found} SNI${NC}"
-        done
-        rm -f "$combined_file"
-        _reality_show_results "$new_combined" "$new_max" "$scanner_bin" "$threads" "${scan_ips[@]}"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice < idx )); then
+        local sel_type="${menu_labels[$((choice-1))]}"
+        case "$sel_type" in
+            server)
+                scan_ips=("${menu_ips[$((choice-1))]}")
+                threads=5
+                ;;
+            cdn)
+                scan_ips=("1.1.1.1" "151.101.1.1" "23.32.0.1")
+                threads=8
+                ;;
+            custom)
+                echo -e "${WHITE}Введите IP или домен:${NC}"
+                read -p "> " custom_ip
+                [ -z "$custom_ip" ] && return
+                scan_ips=("$custom_ip"); threads=5
+                ;;
+        esac
+    else
         return
     fi
 
-    rm -f "$combined_file"
+    _reality_do_scan "$scanner_bin" 10 "$threads" "${scan_ips[@]}"
 }
 
 _speed_test() {
