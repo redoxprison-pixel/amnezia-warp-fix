@@ -1575,6 +1575,103 @@ _reality_scanner() {
     _reality_do_scan "$scanner_bin" 10 "$threads" "${scan_ips[@]}"
 }
 
+_reality_do_scan() {
+    local scanner_bin="$1" max_results="$2" threads="$3"
+    shift 3
+    local scan_ips=("$@")
+    local time_per_ip=25
+
+    clear
+    echo -e "\n${CYAN}━━━ Сканирование ━━━${NC}\n"
+
+    local combined_file="/tmp/reality_combined_$$.csv"
+    echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$combined_file"
+
+    local t_num=0 total_t=${#scan_ips[@]}
+    for ip in "${scan_ips[@]}"; do
+        ((t_num++))
+        echo -ne "  ${CYAN}[${t_num}/${total_t}]${NC} ${WHITE}${ip}${NC} … "
+        local t_file="/tmp/reality_t${t_num}_$$.csv"
+        timeout "$time_per_ip" "$scanner_bin" \
+            -addr "$ip" -thread "$threads" -timeout 4 \
+            -out "$t_file" > /dev/null 2>&1 || true
+        local found=0
+        [ -f "$t_file" ] && found=$(( $(wc -l < "$t_file") - 1 )) && \
+            tail -n +2 "$t_file" >> "$combined_file" && rm -f "$t_file"
+        [ "$found" -gt 0 ] && echo -e "${GREEN}${found} SNI${NC}" || echo -e "${YELLOW}0 SNI${NC}"
+    done
+
+    echo ""
+    _reality_show_results "$combined_file" "$max_results" "$scanner_bin" "$threads" "${scan_ips[@]}"
+}
+
+_reality_show_results() {
+    local combined_file="$1" max_results="$2" scanner_bin="$3" threads="$4"
+    shift 4
+    local scan_ips=("$@")
+
+    if [ ! -f "$combined_file" ] || [ "$(wc -l < "$combined_file")" -le 1 ]; then
+        echo -e "${RED}Результатов нет.${NC}"
+        echo -e "${WHITE}Эти IP не поддерживают TLS 1.3 + h2. Попробуйте CDN.${NC}"
+        rm -f "$combined_file"
+        echo ""; read -p "Enter..."; return
+    fi
+
+    local clean
+    clean=$(tail -n +2 "$combined_file" | \
+        awk -F',' '{
+            d=$3; gsub(/"/, "", d); gsub(/^\*\./, "", d)
+            ip=$1; gsub(/"/, "", ip)
+            if (d != "" && d != "N/A" && ip != "") print ip"\t"d
+        }' | sort -t$'\t' -k2 -u | head -"$max_results")
+
+    local total; total=$(echo "$clean" | grep -c "." 2>/dev/null || echo 0)
+
+    echo -e "${GREEN}✅ Найдено: ${total} SNI${NC}\n"
+    printf "  ${WHITE}%-20s %s${NC}\n" "IP" "Домен (SNI)"
+    echo -e "  $(printf '─%.0s' {1..55})"
+    echo "$clean" | while IFS=$'\t' read -r ip domain; do
+        printf "  ${GREEN}✓${NC} %-18s ${CYAN}%s${NC}\n" "$ip" "$domain"
+    done
+
+    echo ""
+    echo -e "${MAGENTA}━━ Скопируйте в 3X-UI → Reality → serverName: ━━${NC}"
+    echo "$clean" | awk -F$'\t' '{print $2}' | sort -u | \
+        while read -r d; do echo -e "  ${GREEN}▶${NC} ${CYAN}${d}${NC}"; done
+
+    echo ""
+    echo -e "  ${YELLOW}[+]${NC}  Найти ещё (сканируем дольше)"
+    echo -e "  ${YELLOW}[0]${NC}  ↩  Назад"
+    echo ""
+    read -p "Выбор: " more_choice
+
+    if [ "$more_choice" = "+" ]; then
+        local new_max=$(( max_results + 10 ))
+        local new_time=45
+        echo -e "\n${CYAN}Сканируем дольше (${new_time}с на каждый IP)...${NC}"
+        local new_combined="/tmp/reality_more_$$.csv"
+        echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$new_combined"
+        local t_num=0
+        for ip in "${scan_ips[@]}"; do
+            ((t_num++))
+            echo -ne "  ${CYAN}[${t_num}/${#scan_ips[@]}]${NC} ${ip} … "
+            local t_file="/tmp/reality_more${t_num}_$$.csv"
+            timeout "$new_time" "$scanner_bin" \
+                -addr "$ip" -thread "$threads" -timeout 4 \
+                -out "$t_file" > /dev/null 2>&1 || true
+            local found=0
+            [ -f "$t_file" ] && found=$(( $(wc -l < "$t_file") - 1 )) && \
+                tail -n +2 "$t_file" >> "$new_combined" && rm -f "$t_file"
+            echo -e "${GREEN}${found} SNI${NC}"
+        done
+        rm -f "$combined_file"
+        _reality_show_results "$new_combined" "$new_max" "$scanner_bin" "$threads" "${scan_ips[@]}"
+        return
+    fi
+
+    rm -f "$combined_file"
+}
+
 _speed_test() {
     clear
     echo -e "\n${CYAN}━━━ Тест скорости ━━━${NC}\n"
