@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.14"
+VERSION="5.15"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1405,133 +1405,123 @@ tools_menu() {
 _reality_scanner() {
     clear
     echo -e "\n${CYAN}━━━ Reality SNI Scanner ━━━${NC}\n"
-    echo -e "${WHITE}Находит домены для SNI в Reality (3X-UI/VLESS).${NC}\n"
 
     local scanner_bin="/usr/local/bin/RealiTLScanner"
-
-    # Установка — сначала ищем готовый бинарник, потом собираем
     if [ ! -f "$scanner_bin" ]; then
         echo -e "${YELLOW}Установка RealiTLScanner...${NC}"
-        local arch
-        case "$(uname -m)" in
-            x86_64)  arch="64" ;;
-            aarch64) arch="arm64" ;;
-            *) arch="" ;;
-        esac
-
-        # Пробуем скачать готовый бинарник
+        local arch; case "$(uname -m)" in x86_64) arch="64" ;; aarch64) arch="arm64" ;; *) arch="" ;; esac
         if [ -n "$arch" ]; then
-            local url="https://github.com/XTLS/RealiTLScanner/releases/download/v0.2.1/RealiTLScanner-linux-${arch}"
-            curl -fsSL --max-time 30 "$url" -o "$scanner_bin" 2>/dev/null && \
-                chmod +x "$scanner_bin" && \
-                echo -e "${GREEN}  ✓ Установлен (бинарник)${NC}" || rm -f "$scanner_bin"
+            curl -fsSL --max-time 30 \
+                "https://github.com/XTLS/RealiTLScanner/releases/download/v0.2.1/RealiTLScanner-linux-${arch}" \
+                -o "$scanner_bin" 2>/dev/null && chmod +x "$scanner_bin" || rm -f "$scanner_bin"
         fi
-
-        # Если не получилось — собираем из Go
         if [ ! -f "$scanner_bin" ]; then
-            echo -e "${CYAN}  Сборка из исходников...${NC}"
-            if ! command -v go &>/dev/null; then
-                local go_ver="1.22.4"
-                [ "$(uname -m)" = "x86_64" ] && arch="amd64" || arch="arm64"
-                curl -fsSL "https://go.dev/dl/go${go_ver}.linux-${arch}.tar.gz" -o /tmp/go.tar.gz 2>/dev/null
+            command -v go &>/dev/null || {
+                local ga; [ "$(uname -m)" = "x86_64" ] && ga="amd64" || ga="arm64"
+                curl -fsSL "https://go.dev/dl/go1.22.4.linux-${ga}.tar.gz" -o /tmp/go.tar.gz 2>/dev/null
                 tar -C /usr/local -xzf /tmp/go.tar.gz 2>/dev/null; rm -f /tmp/go.tar.gz
                 export PATH="/usr/local/go/bin:$PATH"
-            fi
+            }
             GOPATH=/tmp/go_build go install github.com/xtls/RealiTLScanner@latest 2>/dev/null && \
                 cp /tmp/go_build/bin/RealiTLScanner "$scanner_bin" 2>/dev/null
         fi
-
         [ ! -f "$scanner_bin" ] && {
             echo -e "${RED}Не удалось установить.${NC}"
-            echo -e "${WHITE}Вручную: wget https://github.com/XTLS/RealiTLScanner/releases/download/v0.2.1/RealiTLScanner-linux-64 -O /usr/local/bin/RealiTLScanner && chmod +x /usr/local/bin/RealiTLScanner${NC}"
+            echo -e "${WHITE}wget https://github.com/XTLS/RealiTLScanner/releases/download/v0.2.1/RealiTLScanner-linux-64 -O /usr/local/bin/RealiTLScanner && chmod +x /usr/local/bin/RealiTLScanner${NC}"
             read -p "Enter..."; return
         }
         chmod +x "$scanner_bin"
+        echo -e "${GREEN}  ✓ Готов${NC}\n"
     fi
 
-    # Простое меню — только страна/CDN
-    echo -e "${WHITE}Выберите источник для поиска SNI:${NC}\n"
-    echo -e "  ${YELLOW}[1]${NC}  ${GREEN}★ Автопоиск${NC} — сканирует несколько CDN ${CYAN}(рекомендуется)${NC}"
-    echo -e "  ${YELLOW}[2]${NC}  🇺🇸 Cloudflare"
-    echo -e "  ${YELLOW}[3]${NC}  🌍 Fastly CDN"
-    echo -e "  ${YELLOW}[4]${NC}  🌍 Akamai"
-    echo -e "  ${YELLOW}[5]${NC}  🇺🇸 Amazon CloudFront"
-    echo -e "  ${YELLOW}[6]${NC}  🇷🇺 Россия — смешанные провайдеры"
-    echo -e "  ${YELLOW}[7]${NC}  🇩🇪 Германия"
-    echo -e "  ${YELLOW}[8]${NC}  🇳🇱 Нидерланды"
-    echo -e "  ${YELLOW}[9]${NC}  Свои серверы из списка"
-    echo -e "  ${YELLOW}[10]${NC} Свой IP / домен / CIDR"
-    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    # Собираем свои серверы из aliases
+    local -a my_servers=()
+    # Сначала добавляем текущий сервер
+    [ -n "$MY_IP" ] && my_servers+=("$MY_IP")
+    if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+        while IFS='=' read -r ip val; do
+            [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]] || continue
+            [ "$ip" = "$MY_IP" ] && continue  # не дублируем
+            my_servers+=("$ip")
+        done < "$ALIASES_FILE"
+    fi
+
+    # Меню
+    clear
+    echo -e "\n${CYAN}━━━ Reality SNI Scanner ━━━${NC}\n"
+    echo -e "${WHITE}Режим: поиск серверов с TLS 1.3 + ALPN h2 для маскировки Reality.${NC}\n"
+
+    echo -e "  ${GREEN}[1]${NC}  ${GREEN}★ Мои серверы${NC}  ${CYAN}— сканирует ваши IP (лучший результат)${NC}"
+    if [ ${#my_servers[@]} -gt 0 ]; then
+        for s in "${my_servers[@]}"; do
+            local sname; sname=$(grep "^${s}=" "$ALIASES_FILE" 2>/dev/null | cut -d'=' -f2 | cut -d'|' -f1)
+            echo -e "     ${WHITE}${sname:-$s}${NC} ${CYAN}(${s})${NC}"
+        done
+    else
+        echo -e "     ${YELLOW}(нет серверов — добавьте через п.7→4)${NC}"
+    fi
+    echo ""
+    echo -e "  ${YELLOW}[6]${NC}  🌍 Международные CDN  ${WHITE}— Cloudflare / Fastly / Akamai${NC}"
+    echo -e "  ${YELLOW}[10]${NC} 🔍 Свой IP / домен    ${WHITE}— ввести вручную${NC}"
+    echo -e "  ${YELLOW}[0]${NC}  ↩  Назад"
     echo ""
     read -p "Выбор [1]: " choice
     [ -z "$choice" ] && choice=1
     [ "$choice" = "0" ] && return
 
-    # IP — один адрес из диапазона провайдера для infinite mode
-    # RealiTLScanner сам расширяет поиск по соседним IP
     local -a scan_ips=()
-    local threads=5 max_results=10
+    local threads=5
 
     case "$choice" in
-        1)  scan_ips=("1.1.1.1" "151.101.1.1" "23.32.0.1" "13.224.0.1")
-            threads=8 ;;
-        2)  scan_ips=("1.1.1.1"); threads=5 ;;
-        3)  scan_ips=("151.101.1.1" "151.101.65.1"); threads=8 ;;
-        4)  scan_ips=("23.32.0.1" "23.64.0.1"); threads=8 ;;
-        5)  scan_ips=("13.224.0.1" "52.84.0.1"); threads=8 ;;
-        6)  scan_ips=("94.100.180.1" "87.240.128.1" "149.154.160.1")
-            threads=8 ;;
-        7)  scan_ips=("95.216.0.1" "135.181.0.1"); threads=5 ;;
-        8)  scan_ips=("185.107.56.1" "185.220.100.1"); threads=5 ;;
-        9)  # Свои серверы из aliases
-            if [ ! -f "$ALIASES_FILE" ] || [ ! -s "$ALIASES_FILE" ]; then
-                echo -e "${YELLOW}Нет серверов в списке. Добавьте через п.7→4.${NC}"
+        1)
+            if [ ${#my_servers[@]} -eq 0 ]; then
+                echo -e "${YELLOW}Нет серверов. Добавьте через п.7→4.${NC}"
                 read -p "Enter..."; return
             fi
-            while IFS='=' read -r ip val; do
-                [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]] || continue
-                scan_ips+=("$ip")
-            done < "$ALIASES_FILE"
-            threads=5 ;;
-        10) echo -e "${WHITE}Введите IP или домен (один):${NC}"
+            scan_ips=("${my_servers[@]}")
+            threads=5
+            ;;
+        6)
+            scan_ips=("1.1.1.1" "151.101.1.1" "23.32.0.1")
+            threads=8
+            ;;
+        10)
+            echo -e "${WHITE}Введите IP или домен:${NC}"
             read -p "> " custom_ip
             [ -z "$custom_ip" ] && return
-            scan_ips=("$custom_ip"); threads=5 ;;
+            scan_ips=("$custom_ip")
+            threads=5
+            ;;
         *) return ;;
     esac
 
-    _reality_do_scan "$scanner_bin" "$max_results" "$threads" "${scan_ips[@]}"
+    _reality_do_scan "$scanner_bin" 10 "$threads" "${scan_ips[@]}"
 }
 
 _reality_do_scan() {
     local scanner_bin="$1" max_results="$2" threads="$3"
     shift 3
     local scan_ips=("$@")
-
-    # Время на каждый IP
     local time_per_ip=25
-    local total_t=${#scan_ips[@]}
 
     clear
     echo -e "\n${CYAN}━━━ Сканирование ━━━${NC}\n"
-    echo -e "${WHITE}Ищем серверы с TLS 1.3 + ALPN h2...${NC}\n"
 
     local combined_file="/tmp/reality_combined_$$.csv"
     echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$combined_file"
 
-    local t_num=0
+    local t_num=0 total_t=${#scan_ips[@]}
     for ip in "${scan_ips[@]}"; do
         ((t_num++))
-        echo -ne "  ${CYAN}[${t_num}/${total_t}]${NC} ${ip} … "
+        echo -ne "  ${CYAN}[${t_num}/${total_t}]${NC} ${WHITE}${ip}${NC} … "
         local t_file="/tmp/reality_t${t_num}_$$.csv"
-        # Infinite mode — сканер сам идёт по соседним IP
         timeout "$time_per_ip" "$scanner_bin" \
             -addr "$ip" -thread "$threads" -timeout 4 \
             -out "$t_file" > /dev/null 2>&1 || true
         local found=0
         [ -f "$t_file" ] && found=$(( $(wc -l < "$t_file") - 1 )) && \
             tail -n +2 "$t_file" >> "$combined_file" && rm -f "$t_file"
-        echo -e "${GREEN}${found} SNI${NC}"
+        [ "$found" -gt 0 ] && echo -e "${GREEN}${found} SNI${NC}" || echo -e "${YELLOW}0 SNI${NC}"
     done
 
     echo ""
@@ -1544,12 +1534,12 @@ _reality_show_results() {
     local scan_ips=("$@")
 
     if [ ! -f "$combined_file" ] || [ "$(wc -l < "$combined_file")" -le 1 ]; then
-        echo -e "${YELLOW}Результатов нет.${NC}"
-        echo -e "${WHITE}Попробуйте Автопоиск (пункт 1).${NC}"
+        echo -e "${RED}Результатов нет.${NC}"
+        echo -e "${WHITE}Эти IP не поддерживают TLS 1.3 + h2. Попробуйте CDN (пункт 6).${NC}"
+        rm -f "$combined_file"
         echo ""; read -p "Enter..."; return
     fi
 
-    # Очищаем: убираем wildcards, дедуплицируем по домену
     local clean
     clean=$(tail -n +2 "$combined_file" | \
         awk -F',' '{
@@ -1563,7 +1553,6 @@ _reality_show_results() {
     echo -e "${GREEN}✅ Найдено: ${total} SNI${NC}\n"
     printf "  ${WHITE}%-20s %s${NC}\n" "IP" "Домен (SNI)"
     echo -e "  $(printf '─%.0s' {1..55})"
-
     echo "$clean" | while IFS=$'\t' read -r ip domain; do
         printf "  ${GREEN}✓${NC} %-18s ${CYAN}%s${NC}\n" "$ip" "$domain"
     done
@@ -1574,16 +1563,15 @@ _reality_show_results() {
         while read -r d; do echo -e "  ${GREEN}▶${NC} ${CYAN}${d}${NC}"; done
 
     echo ""
-    echo -e "  ${YELLOW}[+]${NC}  Найти ещё (дольше, больше результатов)"
-    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo -e "  ${YELLOW}[+]${NC}  Найти ещё (сканируем дольше)"
+    echo -e "  ${YELLOW}[0]${NC}  ↩  Назад"
     echo ""
     read -p "Выбор: " more_choice
+
     if [ "$more_choice" = "+" ]; then
         local new_max=$(( max_results + 10 ))
-        local new_time=$(( 25 + 15 ))  # больше времени на IP
-        # Пересканируем с большим таймаутом
-        echo ""
-        echo -e "${CYAN}Ищем ещё (${new_time}с на каждый IP)...${NC}"
+        local new_time=45
+        echo -e "\n${CYAN}Сканируем дольше (${new_time}с на каждый IP)...${NC}"
         local new_combined="/tmp/reality_more_$$.csv"
         echo "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE" > "$new_combined"
         local t_num=0
@@ -3297,6 +3285,16 @@ run_startup() {
 
     ((s++)); printf "  ${CYAN}[%d/%d]${NC}  Определение режима...\n" "$s" "$total"
     detect_mode
+
+    # Автодобавление IP этого сервера в список серверов
+    if [ -n "$MY_IP" ] && ! grep -q "^${MY_IP}=" "$ALIASES_FILE" 2>/dev/null; then
+        local geo_cc geo_city
+        geo_cc=$(curl -s --max-time 3 "http://ip-api.com/json/${MY_IP}?fields=countryCode,city" 2>/dev/null | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('countryCode','')+'|'+d.get('city',''))" 2>/dev/null)
+        local cc="${geo_cc%%|*}" city="${geo_cc##*|}"
+        local sname="${city:-Server}"
+        echo "${MY_IP}=${sname}||${cc}|" >> "$ALIASES_FILE"
+    fi
 
     # Установка команды
     local self; self=$(readlink -f "$0" 2>/dev/null || echo "$0")
