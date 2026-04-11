@@ -1430,17 +1430,17 @@ tools_menu() {
                 local country; country=$(echo "$val" | cut -d'|' -f3)
                 local label="${name:-$ip}"
                 [ -n "$country" ] && label="${label} (${country})"
-                local is_cur=""
-                [ "$ip" = "$MY_IP" ] && is_cur=" ${CYAN}←${NC}"
-                # Быстрый TCP пинг
-                local port; port=$(grep "govpn:" /proc/net/ip_tables_names 2>/dev/null | head -1)
-                local ms; ms=$(tcp_ping "$ip" "443" 2 2>/dev/null)
-                if [ -n "$ms" ]; then
-                    echo -e "  ${GREEN}●${NC} ${WHITE}${label}${NC}${is_cur}  ${GREEN}${ms}ms${NC}"
+                if [ "$ip" = "$MY_IP" ]; then
+                    # Текущий сервер — всегда онлайн
+                    echo -e "  ${GREEN}●${NC} ${WHITE}${label}${NC}  ${CYAN}← этот сервер${NC}"
                 else
-                    ms=$(ping -c 1 -W 2 "$ip" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p')
-                    [ -n "$ms" ] && echo -e "  ${GREEN}●${NC} ${WHITE}${label}${NC}${is_cur}  ${GREEN}${ms}ms${NC}" || \
-                        echo -e "  ${RED}●${NC} ${WHITE}${label}${NC}${is_cur}  ${RED}недоступен${NC}"
+                    # Удалённый сервер — пингуем
+                    local ms; ms=$(tcp_ping "$ip" "22" 2 2>/dev/null)
+                    [ -z "$ms" ] && ms=$(tcp_ping "$ip" "443" 2 2>/dev/null)
+                    [ -z "$ms" ] && ms=$(ping -c 1 -W 2 "$ip" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p')
+                    [ -n "$ms" ] && \
+                        echo -e "  ${GREEN}●${NC} ${WHITE}${label}${NC}  ${GREEN}${ms}ms${NC}" || \
+                        echo -e "  ${RED}●${NC} ${WHITE}${label}${NC}  ${RED}недоступен${NC}"
                 fi
             done < "$ALIASES_FILE"
             echo ""
