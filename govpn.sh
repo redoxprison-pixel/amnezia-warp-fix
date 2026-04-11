@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.21"
+VERSION="5.22"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2027,18 +2027,235 @@ _servers_menu() {
 #  HYSTERIA2 — МЕНЮ УПРАВЛЕНИЯ
 # ═══════════════════════════════════════════════════════════════
 
+# ─── Вспомогательные функции для управления пользователями Hy2 ───
+
+_hy2_list_users() {
+    python3 /tmp/hy2_list.py 2>/dev/null
+}
+
+_hy2_ensure_userpass() {
+    python3 /tmp/hy2_migrate.py 2>/dev/null
+}
+
+_hy2_add_user() {
+    python3 /tmp/hy2_adduser.py "$1" "$2" 2>/dev/null
+}
+
+_hy2_del_user() {
+    python3 /tmp/hy2_deluser.py "$1" 2>/dev/null
+}
+
+_hy2_user_uri() {
+    local username="$1" password="$2"
+    local port sni obfs_pass
+    port=$(grep -oP '^listen: :\K[0-9]+' /etc/hysteria/config.yaml 2>/dev/null || echo "443")
+    sni=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('masquerade',{}).get('proxy',{}).get('url','').replace('https://',''))" 2>/dev/null || echo "")
+    obfs_pass=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('obfs',{}).get('salamander',{}).get('password',''))" 2>/dev/null || echo "")
+    local uri="hy2://${password}@${MY_IP}:${port}?security=tls&sni=${sni}&allowInsecure=true"
+    [ -n "$obfs_pass" ] && uri="${uri}&obfs=salamander&obfs-password=${obfs_pass}"
+    uri="${uri}#${username}"
+    echo "$uri"
+}
+
+_hy2_write_helpers() {
+    python3 - << 'PYEOF'
+import os
+
+list_py = """import yaml,sys
+try:
+    cfg=yaml.safe_load(open('/etc/hysteria/config.yaml'))
+    auth=cfg.get('auth',{})
+    if auth.get('type')=='userpass':
+        for u,p in auth.get('userpass',{}).items(): print(f"{u}:{p}")
+    elif auth.get('type')=='password':
+        print(f"default:{auth.get('password','')}")
+except Exception as e: print(f"ERR:{e}",file=sys.stderr)
+"""
+
+migrate_py = """import yaml,sys
+p='/etc/hysteria/config.yaml'
+try:
+    cfg=yaml.safe_load(open(p))
+    auth=cfg.get('auth',{})
+    if auth.get('type')=='password':
+        cfg['auth']={'type':'userpass','userpass':{'default':auth.get('password','')}}
+        yaml.dump(cfg,open(p,'w'),default_flow_style=False,allow_unicode=True)
+        print("migrated")
+    else: print("ok")
+except Exception as e: print(f"err:{e}",file=sys.stderr); sys.exit(1)
+"""
+
+adduser_py = """import yaml,sys
+p='/etc/hysteria/config.yaml'
+u,pw=sys.argv[1],sys.argv[2]
+try:
+    cfg=yaml.safe_load(open(p))
+    cfg['auth']['userpass'][u]=pw
+    yaml.dump(cfg,open(p,'w'),default_flow_style=False,allow_unicode=True)
+    print("ok")
+except Exception as e: print(f"err:{e}",file=sys.stderr); sys.exit(1)
+"""
+
+deluser_py = """import yaml,sys
+p='/etc/hysteria/config.yaml'
+u=sys.argv[1]
+try:
+    cfg=yaml.safe_load(open(p))
+    users=cfg['auth'].get('userpass',{})
+    if u not in users: print("err:not found"); sys.exit(1)
+    del users[u]
+    cfg['auth']['userpass']=users
+    yaml.dump(cfg,open(p,'w'),default_flow_style=False,allow_unicode=True)
+    print("ok")
+except Exception as e: print(f"err:{e}",file=sys.stderr); sys.exit(1)
+"""
+
+for fname, code in [('/tmp/hy2_list.py',list_py),('/tmp/hy2_migrate.py',migrate_py),
+                     ('/tmp/hy2_adduser.py',adduser_py),('/tmp/hy2_deluser.py',deluser_py)]:
+    with open(fname,'w') as f: f.write(code)
+print("ok")
+PYEOF
+}
+
+_hy2_users_menu() {
+    _hy2_write_helpers > /dev/null 2>&1
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Hysteria2 — пользователи ━━━${NC}\n"
+        command -v python3 &>/dev/null || { echo -e "${RED}python3 не найден${NC}"; read -p "Enter..."; return; }
+        python3 -c "import yaml" 2>/dev/null || apt-get install -y python3-yaml > /dev/null 2>&1
+        _hy2_ensure_userpass > /dev/null 2>&1
+        local -a users=()
+        while IFS= read -r line; do
+            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && users+=("$line")
+        done < <(_hy2_list_users)
+        if [ ${#users[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}Пользователей нет${NC}\n"
+        else
+            local i=1
+            for u in "${users[@]}"; do
+                echo -e "  ${YELLOW}[$i]${NC}  ${WHITE}${u%%:*}${NC}  ${CYAN}${u##*:}${NC}"
+                (( i++ ))
+            done
+            echo ""
+        fi
+        echo -e "  ${GREEN}[a]${NC}  Добавить пользователя"
+        echo -e "  ${RED}[d]${NC}  Удалить пользователя"
+        echo -e "  ${YELLOW}[q]${NC}  QR-код пользователя"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        case "$ch" in
+            a|A|а|А)
+                echo -ne "\n  Имя пользователя: "; read -r uname
+                [ -z "$uname" ] && continue
+                local upass; upass=$(date +%s%N | md5sum | cut -c 1-12)
+                echo -ne "  Пароль [авто: ${upass}]: "; read -r inp
+                [ -n "$inp" ] && upass="$inp"
+                local res; res=$(_hy2_add_user "$uname" "$upass")
+                if [[ "$res" == "ok" ]]; then
+                    systemctl restart hysteria-server > /dev/null 2>&1
+                    local uri; uri=$(_hy2_user_uri "$uname" "$upass")
+                    echo -e "\n  ${GREEN}✓ Добавлен: ${uname}${NC}"
+                    echo -e "  ${CYAN}${uri}${NC}"
+                    echo "$uri" > "/root/hysteria2_${uname}.txt"
+                    command -v qrencode &>/dev/null && { echo ""; qrencode -t ANSIUTF8 "$uri"; }
+                    log_action "HY2: добавлен ${uname}"
+                else
+                    echo -e "  ${RED}✗ ${res}${NC}"
+                fi
+                read -p "  Enter..."
+                ;;
+            d|D|д|Д)
+                [ ${#users[@]} -eq 0 ] && continue
+                echo -ne "\n  Номер для удаления: "; read -r num
+                [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#users[@]} )) || continue
+                local tname="${users[$((num-1))]%%:*}"
+                echo -ne "  ${RED}Удалить ${tname}? (y/n): ${NC}"; read -r c
+                [[ "$c" != "y" ]] && continue
+                local res; res=$(_hy2_del_user "$tname")
+                if [[ "$res" == "ok" ]]; then
+                    systemctl restart hysteria-server > /dev/null 2>&1
+                    rm -f "/root/hysteria2_${tname}.txt"
+                    echo -e "  ${GREEN}✓ Удалён: ${tname}${NC}"
+                    log_action "HY2: удалён ${tname}"
+                else
+                    echo -e "  ${RED}✗ ${res}${NC}"
+                fi
+                read -p "  Enter..."
+                ;;
+            q|Q|й|Й)
+                [ ${#users[@]} -eq 0 ] && continue
+                echo -ne "\n  Номер пользователя: "; read -r num
+                [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#users[@]} )) || continue
+                local target="${users[$((num-1))]}"
+                local uri; uri=$(_hy2_user_uri "${target%%:*}" "${target##*:}")
+                echo -e "\n  ${CYAN}${uri}${NC}\n"
+                command -v qrencode &>/dev/null && qrencode -t ANSIUTF8 "$uri"
+                read -p "  Enter..."
+                ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+_install_hui() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка H-UI (веб-панель для Hysteria2) ━━━${NC}\n"
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^h-ui$'; then
+        echo -e "  ${YELLOW}H-UI уже установлен${NC}"
+        local hui_port; hui_port=$(docker inspect h-ui 2>/dev/null | python3 -c "import json,sys,re; c=json.load(sys.stdin); cmd=' '.join(c[0].get('Config',{}).get('Cmd',[])); m=re.search(r'-p (\d+)',cmd); print(m.group(1) if m else '8081')" 2>/dev/null || echo "8081")
+        echo -e "  ${WHITE}Панель:${NC} ${CYAN}http://${MY_IP}:${hui_port}${NC}"
+        echo -ne "  Переустановить? (y/n): "; read -r c
+        if [[ "$c" == "y" ]]; then
+            docker stop h-ui > /dev/null 2>&1; docker rm h-ui > /dev/null 2>&1
+        else
+            read -p "  Enter..."; return
+        fi
+    fi
+    _install_docker || { read -p "  Enter..."; return 1; }
+    local hui_port="8081" hui_tz="Europe/Moscow"
+    echo -ne "\n  Порт H-UI [8081]: "; read -r inp; [ -n "$inp" ] && hui_port="$inp"
+    echo -ne "  Часовой пояс [Europe/Moscow]: "; read -r inp; [ -n "$inp" ] && hui_tz="$inp"
+    echo ""
+    echo -e "  ${CYAN}→ Загрузка образа H-UI...${NC}"
+    docker pull jonssonyan/h-ui > /dev/null 2>&1
+    echo -e "  ${CYAN}→ Запуск контейнера...${NC}"
+    docker run -d --cap-add=NET_ADMIN \
+        --name h-ui --restart always \
+        --network=host \
+        -e TZ="${hui_tz}" \
+        -v /h-ui/bin:/h-ui/bin \
+        -v /h-ui/data:/h-ui/data \
+        -v /h-ui/export:/h-ui/export \
+        -v /h-ui/logs:/h-ui/logs \
+        jonssonyan/h-ui ./h-ui -p "${hui_port}" > /dev/null 2>&1
+    sleep 4
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^h-ui$'; then
+        local creds; creds=$(docker exec h-ui ./h-ui reset 2>/dev/null || echo "sysadmin / sysadmin")
+        echo -e "\n  ${GREEN}✅ H-UI установлен!${NC}"
+        echo -e "  ${WHITE}Панель:${NC}       ${CYAN}http://${MY_IP}:${hui_port}${NC}"
+        echo -e "  ${WHITE}Данные входа:${NC} ${CYAN}${creds}${NC}"
+        echo ""
+        echo -e "  ${YELLOW}После входа: настройте Hysteria2 в 'Hysteria Manage',${NC}"
+        echo -e "  ${YELLOW}добавьте пользователей в 'Account Manage'${NC}"
+        command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q 'active' && \
+            ufw allow "${hui_port}/tcp" > /dev/null 2>&1 && \
+            echo -e "  ${GREEN}✓ UFW: ${hui_port}/tcp открыт${NC}"
+        log_action "INSTALL: H-UI port=${hui_port}"
+    else
+        echo -e "\n  ${RED}✗ H-UI не запустился. docker logs h-ui${NC}"
+    fi
+    read -p "  Enter..."
+}
+
 hysteria2_menu() {
     while true; do
         clear
         echo -e "\n${CYAN}━━━ Hysteria2 ━━━${NC}\n"
-
-        # Статус сервиса
-        local hy2_port hy2_sni hy2_pass hy2_obfs
-        hy2_port=$(grep -oP '^listen: :\K\d+' /etc/hysteria/config.yaml 2>/dev/null || echo "?")
-        hy2_sni=$(grep -oP '(?<=url: https://)\S+' /etc/hysteria/config.yaml 2>/dev/null | head -1 || echo "?")
-        hy2_pass=$(grep -A1 'type: password' /etc/hysteria/config.yaml 2>/dev/null | grep 'password:' | awk '{print $2}' | head -1 || echo "?")
-        hy2_obfs=$(grep -A2 'type: salamander' /etc/hysteria/config.yaml 2>/dev/null | grep 'password:' | awk '{print $2}' | head -1 || echo "?")
-
+        local hy2_port hy2_sni
+        hy2_port=$(grep -oP '^listen: :\K[0-9]+' /etc/hysteria/config.yaml 2>/dev/null || echo "?")
+        hy2_sni=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('masquerade',{}).get('proxy',{}).get('url','?').replace('https://','')" 2>/dev/null || echo "?")
         if systemctl is-active --quiet hysteria-server; then
             echo -e "  ${WHITE}Статус:${NC} ${GREEN}● запущен${NC}"
         else
@@ -2046,61 +2263,52 @@ hysteria2_menu() {
         fi
         echo -e "  ${WHITE}Порт:${NC}   ${CYAN}${hy2_port}/udp${NC}"
         echo -e "  ${WHITE}SNI:${NC}    ${CYAN}${hy2_sni}${NC}"
-        echo ""
-
-        # Ключ подключения
-        if [ -f /root/hysteria2.txt ]; then
-            local hy2_key; hy2_key=$(cat /root/hysteria2.txt 2>/dev/null)
-            echo -e "  ${WHITE}Ключ подключения:${NC}"
-            echo -e "  ${CYAN}${hy2_key}${NC}"
-            echo ""
+        local hui_info
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^h-ui$'; then
+            local hp; hp=$(docker inspect h-ui 2>/dev/null | python3 -c "import json,sys,re; c=json.load(sys.stdin); cmd=' '.join(c[0].get('Config',{}).get('Cmd',[])); m=re.search(r'-p (\d+)',cmd); print(m.group(1) if m else '8081')" 2>/dev/null || echo "8081")
+            hui_info="${GREEN}● http://${MY_IP}:${hp}${NC}"
+        else
+            hui_info="${YELLOW}● не установлен${NC}"
         fi
-
-        echo -e "  ${YELLOW}[1]${NC}  Показать QR-код"
-        echo -e "  ${YELLOW}[2]${NC}  Перезапустить сервис"
-        echo -e "  ${YELLOW}[3]${NC}  Показать лог (30 строк)"
-        echo -e "  ${YELLOW}[4]${NC}  Переустановить / изменить конфиг"
+        echo -e "  ${WHITE}H-UI:${NC}   ${hui_info}"
+        echo ""
+        [ -f /root/hysteria2.txt ] && echo -e "  ${WHITE}Ключ (default):${NC}\n  ${CYAN}$(cat /root/hysteria2.txt)${NC}\n"
+        echo -e "  ${YELLOW}[1]${NC}  QR-код (default ключ)"
+        echo -e "  ${YELLOW}[2]${NC}  Управление пользователями"
+        echo -e "  ${YELLOW}[3]${NC}  Установить / открыть H-UI"
+        echo -e "  ${YELLOW}[4]${NC}  Перезапустить сервис"
+        echo -e "  ${YELLOW}[5]${NC}  Лог (30 строк)"
+        echo -e "  ${YELLOW}[6]${NC}  Переустановить / изменить конфиг"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-
         local ch; ch=$(read_choice "Выбор: ")
         case "$ch" in
             1)
-                if [ -f /root/hysteria2.txt ] && command -v qrencode &>/dev/null; then
-                    echo ""
-                    qrencode -t ANSIUTF8 "$(cat /root/hysteria2.txt)"
-                    read -p "  Enter..."
-                elif ! command -v qrencode &>/dev/null; then
-                    echo -e "  ${YELLOW}Установка qrencode...${NC}"
-                    apt-get install -y qrencode > /dev/null 2>&1
-                    qrencode -t ANSIUTF8 "$(cat /root/hysteria2.txt)" && read -p "  Enter..."
-                else
-                    echo -e "  ${YELLOW}/root/hysteria2.txt не найден${NC}"
-                    read -p "  Enter..."
-                fi
-                ;;
-            2)
-                echo -ne "  ${YELLOW}Перезапуск...${NC} "
-                systemctl restart hysteria-server
-                sleep 2
-                systemctl is-active --quiet hysteria-server &&                     echo -e "${GREEN}✓ запущен${NC}" || echo -e "${RED}✗ ошибка${NC}"
+                [ -f /root/hysteria2.txt ] || { echo -e "  ${YELLOW}Нет ключа${NC}"; read -p "  Enter..."; continue; }
+                command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+                echo ""; qrencode -t ANSIUTF8 "$(cat /root/hysteria2.txt)"
                 read -p "  Enter..."
                 ;;
-            3)
-                echo ""
-                journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null ||                     echo -e "${YELLOW}journalctl недоступен${NC}"
-                read -p "  Enter..."
-                ;;
+            2) _hy2_users_menu ;;
+            3) _install_hui ;;
             4)
+                echo -ne "  ${YELLOW}Перезапуск...${NC} "
+                systemctl restart hysteria-server; sleep 2
+                systemctl is-active --quiet hysteria-server && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+                read -p "  Enter..."
+                ;;
+            5)
+                echo ""; journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null || echo -e "${YELLOW}journalctl недоступен${NC}"
+                read -p "  Enter..."
+                ;;
+            6)
                 _install_hysteria2
-                # После переустановки обновляем HY2_RUNNING
                 systemctl is-active --quiet hysteria-server && HY2_RUNNING=1 || HY2_RUNNING=0
                 ;;
             0|"") return ;;
         esac
     done
 }
-
 # ═══════════════════════════════════════════════════════════════
 #  МАСТЕР УСТАНОВКИ СЕРВЕРОВ
 # ═══════════════════════════════════════════════════════════════
