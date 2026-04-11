@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.18"
+VERSION="5.19"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2014,6 +2014,347 @@ _servers_menu() {
 #  СИСТЕМА
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+#  МАСТЕР УСТАНОВКИ СЕРВЕРОВ
+# ═══════════════════════════════════════════════════════════════
+
+# Проверяет/устанавливает Docker
+_install_docker() {
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓ Docker уже установлен${NC}  $(docker --version 2>/dev/null | cut -d' ' -f3 | tr -d ',')"
+        return 0
+    fi
+    echo -e "  ${YELLOW}Docker не найден — устанавливаю...${NC}"
+    export DEBIAN_FRONTEND=noninteractive
+    curl -fsSL https://get.docker.com | sh 2>&1 | tail -5
+    systemctl enable docker > /dev/null 2>&1
+    systemctl start docker > /dev/null 2>&1
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓ Docker установлен${NC}"
+        return 0
+    else
+        echo -e "  ${RED}✗ Не удалось установить Docker${NC}"
+        return 1
+    fi
+}
+
+# Установка AmneziaWG
+_install_amnezia_awg() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка AmneziaWG ━━━${NC}\n"
+
+    # Проверка — уже установлен?
+    if command -v docker &>/dev/null; then
+        local existing
+        existing=$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -i 'amnezia-awg' | head -1)
+        if [ -n "$existing" ]; then
+            echo -e "  ${YELLOW}Уже установлен контейнер: ${existing}${NC}"
+            echo -ne "  Переустановить? (y/n): "; read -r c
+            [[ "$c" != "y" ]] && return
+            docker stop "$existing" > /dev/null 2>&1
+            docker rm "$existing" > /dev/null 2>&1
+        fi
+    fi
+
+    # Параметры
+    local container_name="amnezia-awg2"
+    local awg_port subnet
+
+    echo -ne "  Имя контейнера [${container_name}]: "; read -r inp
+    [ -n "$inp" ] && container_name="$inp"
+
+    echo -ne "  UDP-порт WireGuard [47684]: "; read -r inp
+    awg_port="${inp:-47684}"
+
+    echo -ne "  Подсеть клиентов [10.8.1.0/24]: "; read -r inp
+    subnet="${inp:-10.8.1.0/24}"
+    local server_ip="${subnet%.*}.1"
+
+    echo ""
+
+    # Docker
+    _install_docker || { read -p "  Enter..."; return 1; }
+
+    # Включаем IP forwarding
+    echo -e "  ${CYAN}→ IP forwarding...${NC}"
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+    grep -q 'net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null || \
+        echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+
+    # Генерируем ключи
+    echo -e "  ${CYAN}→ Генерация ключей...${NC}"
+    local privkey pubkey
+    privkey=$(wg genkey 2>/dev/null || docker run --rm lscr.io/linuxserver/wireguard wg genkey 2>/dev/null)
+    if [ -z "$privkey" ]; then
+        echo -e "  ${RED}✗ Не удалось сгенерировать ключи (нет wg и docker)${NC}"
+        read -p "  Enter..."; return 1
+    fi
+    pubkey=$(echo "$privkey" | wg pubkey 2>/dev/null)
+
+    # Запускаем контейнер
+    echo -e "  ${CYAN}→ Запуск контейнера ${container_name}...${NC}"
+
+    local awg_conf_dir="/opt/amnezia/awg"
+    mkdir -p "$awg_conf_dir"
+
+    # Создаём начальный конфиг
+    cat > "${awg_conf_dir}/awg0.conf" << EOF
+[Interface]
+PrivateKey = ${privkey}
+Address = ${server_ip}/24
+ListenPort = ${awg_port}
+PostUp = iptables -A FORWARD -i awg0 -j ACCEPT; iptables -A FORWARD -o awg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i awg0 -j ACCEPT; iptables -D FORWARD -o awg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+EOF
+    chmod 600 "${awg_conf_dir}/awg0.conf"
+
+    # Создаём пустой clientsTable
+    echo '[]' > "${awg_conf_dir}/clientsTable"
+
+    docker run -d \
+        --name "$container_name" \
+        --restart unless-stopped \
+        --cap-add NET_ADMIN \
+        --cap-add SYS_MODULE \
+        --sysctl net.ipv4.ip_forward=1 \
+        --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+        -p "${awg_port}:${awg_port}/udp" \
+        -v "${awg_conf_dir}:/opt/amnezia/awg" \
+        -v /lib/modules:/lib/modules:ro \
+        ghcr.io/amnezia-vpn/amnezia-wg:latest \
+        awg-quick up /opt/amnezia/awg/awg0.conf 2>&1 | tail -3
+
+    sleep 3
+
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container_name}$"; then
+        echo -e "\n  ${GREEN}✅ AmneziaWG установлен!${NC}"
+        echo -e "  ${WHITE}Контейнер:${NC} ${CYAN}${container_name}${NC}"
+        echo -e "  ${WHITE}Порт:${NC}      ${CYAN}${awg_port}/udp${NC}"
+        echo -e "  ${WHITE}Подсеть:${NC}   ${CYAN}${subnet}${NC}"
+        echo -e "  ${WHITE}Pubkey:${NC}    ${CYAN}${pubkey}${NC}"
+        log_action "INSTALL: AmneziaWG container=${container_name} port=${awg_port}"
+
+        # Открываем порт в ufw если есть
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q 'active'; then
+            ufw allow "${awg_port}/udp" > /dev/null 2>&1
+            echo -e "  ${GREEN}✓ UFW: порт ${awg_port}/udp открыт${NC}"
+        fi
+
+        echo -e "\n  ${YELLOW}Перезапустите govpn для определения нового режима.${NC}"
+    else
+        echo -e "\n  ${RED}✗ Контейнер не запустился. Проверьте: docker logs ${container_name}${NC}"
+    fi
+
+    read -p "  Enter..."
+}
+
+# Установка 3X-UI
+_install_3xui() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка 3X-UI ━━━${NC}\n"
+
+    if systemctl is-active x-ui &>/dev/null 2>&1 || [ -f "/etc/x-ui/x-ui.db" ]; then
+        echo -e "  ${YELLOW}3X-UI уже установлен${NC}"
+        echo -ne "  Переустановить/обновить? (y/n): "; read -r c
+        [[ "$c" != "y" ]] && return
+    fi
+
+    echo -e "  ${WHITE}Варианты:${NC}"
+    echo -e "  ${YELLOW}[1]${NC}  3X-UI (стандартный)  — github.com/MHSanaei/3x-ui"
+    echo -e "  ${YELLOW}[2]${NC}  3X-UI Pro             — github.com/mozaroc/x-ui-pro"
+    echo ""
+    local ch; ch=$(read_choice "Выбор [1]: ")
+    ch="${ch:-1}"
+
+    echo ""
+    case "$ch" in
+        1)
+            echo -e "  ${CYAN}→ Установка 3X-UI...${NC}\n"
+            bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) 2>&1
+            ;;
+        2)
+            echo -e "  ${CYAN}→ Установка 3X-UI Pro...${NC}\n"
+            bash <(curl -fsSL https://raw.githubusercontent.com/mozaroc/x-ui-pro/master/install.sh) 2>&1
+            ;;
+        *)
+            echo -e "  ${YELLOW}Отмена${NC}"; read -p "  Enter..."; return
+            ;;
+    esac
+
+    if systemctl is-active x-ui &>/dev/null 2>&1; then
+        echo -e "\n  ${GREEN}✅ 3X-UI установлен и запущен${NC}"
+        local xui_port
+        xui_port=$(grep -oP '(?<="port":)\d+' /usr/local/x-ui/bin/config.json 2>/dev/null || echo "2053")
+        echo -e "  ${WHITE}Панель:${NC} ${CYAN}http://${MY_IP}:${xui_port}${NC}"
+        log_action "INSTALL: 3X-UI"
+        echo -e "\n  ${YELLOW}Перезапустите govpn для определения нового режима.${NC}"
+    else
+        echo -e "\n  ${YELLOW}Проверьте статус: systemctl status x-ui${NC}"
+    fi
+
+    read -p "  Enter..."
+}
+
+# Установка Hysteria2
+_install_hysteria2() {
+    clear
+    echo -e "\n${CYAN}━━━ Установка Hysteria2 ━━━${NC}\n"
+
+    if command -v hysteria &>/dev/null; then
+        local ver; ver=$(hysteria version 2>/dev/null | head -1)
+        echo -e "  ${YELLOW}Hysteria2 уже установлен: ${ver}${NC}"
+        echo -ne "  Переустановить/обновить? (y/n): "; read -r c
+        [[ "$c" != "y" ]] && return
+    fi
+
+    # Параметры
+    local hy_port domain acme_email
+    echo -ne "  Порт Hysteria2 [443]: "; read -r inp; hy_port="${inp:-443}"
+    echo -ne "  Домен (для ACME-сертификата, или Enter для self-signed): "; read -r domain
+    if [ -n "$domain" ]; then
+        echo -ne "  Email для ACME: "; read -r acme_email
+    fi
+    echo -ne "  Пароль доступа: "; read -r hy_pass
+    [ -z "$hy_pass" ] && hy_pass=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16)
+
+    echo ""
+    echo -e "  ${CYAN}→ Установка Hysteria2...${NC}"
+    bash <(curl -fsSL https://get.hy2.sh/) 2>&1 | tail -10
+
+    if ! command -v hysteria &>/dev/null; then
+        echo -e "  ${RED}✗ Не удалось установить Hysteria2${NC}"
+        read -p "  Enter..."; return 1
+    fi
+
+    # Генерируем конфиг
+    mkdir -p /etc/hysteria
+    local cert_block
+    if [ -n "$domain" ]; then
+        cert_block="acme:
+  domains:
+    - ${domain}
+  email: ${acme_email:-admin@${domain}}"
+    else
+        # self-signed
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+            -keyout /etc/hysteria/server.key \
+            -out /etc/hysteria/server.crt \
+            -days 3650 -nodes -subj "/CN=govpn" 2>/dev/null
+        cert_block="tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key"
+    fi
+
+    cat > /etc/hysteria/config.yaml << EOF
+listen: :${hy_port}
+
+${cert_block}
+
+auth:
+  type: password
+  password: ${hy_pass}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://news.ycombinator.com/
+    rewriteHost: true
+EOF
+
+    # Systemd сервис (если не создан установщиком)
+    if [ ! -f /etc/systemd/system/hysteria-server.service ]; then
+        cat > /etc/systemd/system/hysteria-server.service << 'EOF'
+[Unit]
+Description=Hysteria2 Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl enable hysteria-server > /dev/null 2>&1
+    systemctl restart hysteria-server > /dev/null 2>&1
+    sleep 2
+
+    if systemctl is-active hysteria-server &>/dev/null 2>&1; then
+        echo -e "\n  ${GREEN}✅ Hysteria2 установлен и запущен!${NC}"
+        echo -e "  ${WHITE}Порт:${NC}     ${CYAN}${hy_port}${NC}"
+        echo -e "  ${WHITE}Пароль:${NC}   ${CYAN}${hy_pass}${NC}"
+        [ -n "$domain" ] && echo -e "  ${WHITE}Домен:${NC}    ${CYAN}${domain}${NC}"
+        echo ""
+        echo -e "  ${WHITE}Строка подключения (Nekoray/v2rayN):${NC}"
+        local host="${domain:-${MY_IP}}"
+        echo -e "  ${CYAN}hysteria2://${hy_pass}@${host}:${hy_port}?insecure=1#govpn-hy2${NC}"
+
+        # UFW
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q 'active'; then
+            ufw allow "${hy_port}/udp" > /dev/null 2>&1
+            echo -e "  ${GREEN}✓ UFW: порт ${hy_port}/udp открыт${NC}"
+        fi
+
+        log_action "INSTALL: Hysteria2 port=${hy_port}"
+    else
+        echo -e "\n  ${RED}✗ Hysteria2 не запустился${NC}"
+        echo -e "  Проверьте: journalctl -u hysteria-server -n 30"
+    fi
+
+    read -p "  Enter..."
+}
+
+# Главное меню установщика
+install_wizard() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Установка сервера ━━━${NC}\n"
+
+        # Показываем что уже установлено
+        local status_awg="" status_xui="" status_hy2=""
+
+        if command -v docker &>/dev/null; then
+            local awg_ct; awg_ct=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i 'amnezia-awg' | head -1)
+            [ -n "$awg_ct" ] && status_awg=" ${GREEN}● запущен (${awg_ct})${NC}" || \
+                status_awg=" ${YELLOW}● не установлен${NC}"
+        else
+            status_awg=" ${YELLOW}● Docker отсутствует${NC}"
+        fi
+
+        systemctl is-active x-ui &>/dev/null 2>&1 && \
+            status_xui=" ${GREEN}● запущен${NC}" || \
+            status_xui=" ${YELLOW}● не установлен${NC}"
+
+        systemctl is-active hysteria-server &>/dev/null 2>&1 && \
+            status_hy2=" ${GREEN}● запущен${NC}" || \
+            status_hy2=" ${YELLOW}● не установлен${NC}"
+
+        echo -e "  ${YELLOW}[1]${NC}  AmneziaWG (Docker)     ${status_awg}"
+        echo -e "  ${YELLOW}[2]${NC}  3X-UI / 3X-UI Pro      ${status_xui}"
+        echo -e "  ${YELLOW}[3]${NC}  Hysteria2              ${status_hy2}"
+        echo -e "  ${YELLOW}[d]${NC}  Только Docker"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+
+        case "$ch" in
+            1)        _install_amnezia_awg ;;
+            2)        _install_3xui ;;
+            3)        _install_hysteria2 ;;
+            d|D|д|Д)
+                echo ""
+                _install_docker
+                read -p "  Enter..."
+                ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 system_menu() {
     while true; do
         clear
@@ -3794,6 +4135,7 @@ show_menu() {
         echo -e "  7)  Серверы, скорость, тесты"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e "  8)  Система и управление"
+        echo -e "  9)  Установить сервер"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         ch=$(read_choice "Выбор: ")
@@ -3814,6 +4156,7 @@ show_menu() {
             6) iptables_menu ;;
             7) tools_menu ;;
             8) system_menu ;;
+            9) install_wizard ;;
             0)
                 clear; exit 0 ;;
         esac
