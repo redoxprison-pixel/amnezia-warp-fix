@@ -206,7 +206,6 @@ is_bridge() { [[ "$MODE" == "bridge" ]]; }
 #  МОНИТОРИНГ — системные метрики для шапки
 # ═══════════════════════════════════════════════════════════════
 
-# Форматирует байты в человекочитаемый вид (K/M/G)
 _fmt_bytes() {
     local b=$1
     if (( b >= 1073741824 )); then
@@ -220,61 +219,43 @@ _fmt_bytes() {
     fi
 }
 
-# Возвращает строку: CPU 12%  RAM 1.2/2.0G  Disk 18G
 get_sys_stats() {
-    # CPU — берём idle из /proc/stat, два замера с паузой 0.4s
     local cpu_line1 cpu_line2
     cpu_line1=$(grep '^cpu ' /proc/stat 2>/dev/null)
     sleep 0.4
     cpu_line2=$(grep '^cpu ' /proc/stat 2>/dev/null)
-
     local cpu_pct="?"
     if [ -n "$cpu_line1" ] && [ -n "$cpu_line2" ]; then
         cpu_pct=$(awk -v l1="$cpu_line1" -v l2="$cpu_line2" 'BEGIN {
-            split(l1, a); split(l2, b)
-            idle1=a[5]; idle2=b[5]
-            total1=0; total2=0
-            for(i=2;i<=8;i++){total1+=a[i]; total2+=b[i]}
+            split(l1,a); split(l2,b)
+            idle1=a[5]; idle2=b[5]; total1=0; total2=0
+            for(i=2;i<=8;i++){total1+=a[i];total2+=b[i]}
             dt=total2-total1; di=idle2-idle1
-            if(dt>0) printf "%d", int((dt-di)*100/dt+0.5)
-            else print "0"
+            if(dt>0) printf "%d",int((dt-di)*100/dt+0.5); else print "0"
         }' /dev/null)
     fi
-
-    # RAM — из /proc/meminfo (kB)
     local mem_total mem_avail
     mem_total=$(grep '^MemTotal:' /proc/meminfo 2>/dev/null | awk '{print $2}')
     mem_avail=$(grep '^MemAvailable:' /proc/meminfo 2>/dev/null | awk '{print $2}')
     local ram_str="?"
     if [ -n "$mem_total" ] && [ -n "$mem_avail" ] && (( mem_total > 0 )); then
-        local mem_used=$(( (mem_total - mem_avail) * 1024 ))
-        local mem_tot_b=$(( mem_total * 1024 ))
-        ram_str="$(_fmt_bytes "$mem_used")/$(_fmt_bytes "$mem_tot_b")"
+        ram_str="$(_fmt_bytes "$(( (mem_total - mem_avail) * 1024 ))")/$(_fmt_bytes "$(( mem_total * 1024 ))")"
     fi
-
-    # Disk — корневой раздел
-    local disk_avail="?"
+    local disk_avail
     disk_avail=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')
     [ -n "$disk_avail" ] && disk_avail="$(_fmt_bytes "$disk_avail") free" || disk_avail="?"
-
     echo "CPU ${cpu_pct}%  RAM ${ram_str}  Disk ${disk_avail}"
 }
 
-# Возвращает строку: 5 peers (3 active) ↓1.2M ↑0.4M
 get_awg_stats() {
     is_amnezia || return
     [ -z "$AWG_CONTAINER" ] && return
-
     local iface; iface=$(_awg_iface)
-
-    # Кол-во пиров
     local peer_total=0
     peer_total=$(docker exec "$AWG_CONTAINER" sh -c \
         "awg show ${iface} peers 2>/dev/null | grep -c '^' || wg show ${iface} peers 2>/dev/null | grep -c '^'" 2>/dev/null \
         | tr -d '[:space:]')
     [[ "$peer_total" =~ ^[0-9]+$ ]] || peer_total=0
-
-    # Активные пиры — handshake не старше 3 минут (180 секунд)
     local now; now=$(date +%s)
     local peer_active=0
     while IFS= read -r ts; do
@@ -283,20 +264,13 @@ get_awg_stats() {
     done < <(docker exec "$AWG_CONTAINER" sh -c \
         "awg show ${iface} latest-handshakes 2>/dev/null || wg show ${iface} latest-handshakes 2>/dev/null" 2>/dev/null \
         | awk '{print $2}')
-
-    # Трафик через интерфейс (rx/tx bytes из /proc/net/dev внутри контейнера)
-    local rx_str="" tx_str=""
-    local rx tx
+    local rx tx rx_str="" tx_str=""
     rx=$(docker exec "$AWG_CONTAINER" sh -c \
         "cat /proc/net/dev 2>/dev/null | awk -v iface='${iface}:' '\$1==iface{print \$2}'" 2>/dev/null | tr -d '[:space:]')
     tx=$(docker exec "$AWG_CONTAINER" sh -c \
         "cat /proc/net/dev 2>/dev/null | awk -v iface='${iface}:' '\$1==iface{print \$10}'" 2>/dev/null | tr -d '[:space:]')
-
-    if [[ "$rx" =~ ^[0-9]+$ ]] && [[ "$tx" =~ ^[0-9]+$ ]]; then
-        rx_str="↓$(_fmt_bytes "$rx")"
-        tx_str="↑$(_fmt_bytes "$tx")"
-    fi
-
+    [[ "$rx" =~ ^[0-9]+$ ]] && [[ "$tx" =~ ^[0-9]+$ ]] && \
+        rx_str="↓$(_fmt_bytes "$rx")" && tx_str="↑$(_fmt_bytes "$tx")"
     local result="${peer_total} peers"
     [ "$peer_total" -gt 0 ] && result="${result} (${peer_active} active)"
     [ -n "$rx_str" ] && result="${result}  ${rx_str} ${tx_str}"
@@ -2189,44 +2163,157 @@ _check_conflicts() {
     read -p "Нажмите Enter..."
 }
 
-_self_update() {
-    clear
-    echo -e "\n${CYAN}━━━ Обновление govpn ━━━${NC}\n"
-    echo -e "${WHITE}Текущая: ${GREEN}v${VERSION}${NC}"
-    echo -e "${WHITE}Источник: ${CYAN}${REPO_URL}${NC}\n"
+# ═══════════════════════════════════════════════════════════════
+#  АВТООБНОВЛЕНИЕ
+# ═══════════════════════════════════════════════════════════════
 
-    echo -e "${YELLOW}Загрузка...${NC}"
-    local tmp="/tmp/govpn_update.sh"
-    curl -fsSL --max-time 30 "$REPO_URL" -o "$tmp" 2>/dev/null || {
-        echo -e "${RED}Не удалось загрузить.${NC}"; read -p "Enter..."; return
-    }
+UPDATE_CACHE_FILE="${CONF_DIR}/update.cache"   # содержит: "VERSION|TIMESTAMP"
+UPDATE_CACHE_TTL=21600                          # 6 часов
 
-    head -1 "$tmp" 2>/dev/null | grep -q "#!/bin/bash" || {
-        echo -e "${RED}Файл некорректен.${NC}"; rm -f "$tmp"; read -p "Enter..."; return
-    }
+# Возвращает версию из кеша (если кеш свежий), иначе пустую строку
+_update_cached_ver() {
+    [ -f "$UPDATE_CACHE_FILE" ] || return
+    local line; line=$(cat "$UPDATE_CACHE_FILE" 2>/dev/null)
+    local cached_ver="${line%%|*}"
+    local cached_ts="${line##*|}"
+    [[ "$cached_ver" =~ ^[0-9]+\.[0-9]+ ]] || return
+    [[ "$cached_ts" =~ ^[0-9]+$ ]] || return
+    local now; now=$(date +%s)
+    (( now - cached_ts < UPDATE_CACHE_TTL )) && echo "$cached_ver"
+}
 
+# Асинхронно проверяет версию в репо и обновляет кеш (запускается в фоне)
+_update_fetch_bg() {
+    local tmp="/tmp/govpn_ver_check.sh"
+    curl -fsSL --max-time 10 "$REPO_URL" -o "$tmp" 2>/dev/null || return
+    head -1 "$tmp" 2>/dev/null | grep -q '#!/bin/bash' || { rm -f "$tmp"; return; }
     local new_ver; new_ver=$(grep '^VERSION=' "$tmp" 2>/dev/null | head -1 | cut -d'"' -f2)
-    echo -e "${WHITE}В репо: ${GREEN}v${new_ver:-?}${NC}\n"
+    rm -f "$tmp"
+    [[ "$new_ver" =~ ^[0-9]+\.[0-9]+ ]] || return
+    mkdir -p "$CONF_DIR"
+    echo "${new_ver}|$(date +%s)" > "$UPDATE_CACHE_FILE"
+}
 
-    if [ "$new_ver" = "$VERSION" ]; then
-        echo -e "${YELLOW}Версия совпадает (v${VERSION}).${NC}"
-        echo -e "${WHITE}Принудительно обновить (переустановить)? (y/n):${NC}"
-        read -p "> " force
-        if [[ "$force" != "y" ]]; then
-            rm -f "$tmp"; read -p "Enter..."; return
-        fi
+# Запускает фоновую проверку если кеш устарел
+_update_check_async() {
+    local cached; cached=$(_update_cached_ver)
+    [ -n "$cached" ] && return          # кеш свежий — не запрашиваем
+    _update_fetch_bg &>/dev/null &
+    disown 2>/dev/null || true
+}
+
+# Скачивает, валидирует и устанавливает новую версию
+# Аргументы: [--force] [--yes]
+cmd_update() {
+    local force=0 yes=0
+    for arg in "$@"; do
+        [[ "$arg" == "--force" ]] && force=1
+        [[ "$arg" == "--yes"   ]] && yes=1
+    done
+
+    clear
+    echo -e "\n${CYAN}━━━ Обновление GoVPN ━━━${NC}\n"
+    echo -e "  ${WHITE}Текущая версия: ${GREEN}v${VERSION}${NC}"
+    echo -e "  ${WHITE}Источник:       ${CYAN}${REPO_URL}${NC}\n"
+
+    # Скачиваем свежий скрипт
+    local tmp="/tmp/govpn_update_$$.sh"
+    echo -ne "  ${YELLOW}Загрузка...${NC} "
+    if ! curl -fsSL --max-time 30 "$REPO_URL" -o "$tmp" 2>/dev/null; then
+        echo -e "${RED}✗ Не удалось загрузить${NC}"
+        rm -f "$tmp"; [ "$yes" -eq 0 ] && read -p "  Enter..."; return 1
     fi
 
-    cp "$INSTALL_PATH" "${BACKUP_DIR}/govpn.bak.$(date +%s)" 2>/dev/null
+    # Валидация
+    if ! head -1 "$tmp" 2>/dev/null | grep -q '#!/bin/bash'; then
+        echo -e "${RED}✗ Файл некорректен (не bash)${NC}"
+        rm -f "$tmp"; [ "$yes" -eq 0 ] && read -p "  Enter..."; return 1
+    fi
+
+    local new_ver; new_ver=$(grep '^VERSION=' "$tmp" 2>/dev/null | head -1 | cut -d'"' -f2)
+    if ! [[ "$new_ver" =~ ^[0-9]+\.[0-9]+ ]]; then
+        echo -e "${RED}✗ Не удалось определить версию в скачанном файле${NC}"
+        rm -f "$tmp"; [ "$yes" -eq 0 ] && read -p "  Enter..."; return 1
+    fi
+    echo -e "${GREEN}✓${NC}"
+    echo -e "  ${WHITE}Версия в репо:  ${GREEN}v${new_ver}${NC}\n"
+
+    # Сравниваем версии
+    if [ "$force" -eq 0 ] && [ "$new_ver" = "$VERSION" ]; then
+        echo -e "  ${YELLOW}Уже установлена актуальная версия (v${VERSION})${NC}"
+        echo -ne "  Принудительно переустановить? (y/n): "
+        if [ "$yes" -eq 1 ]; then
+            echo "n"; rm -f "$tmp"; return 0
+        fi
+        read -r ans
+        if [[ "$ans" != "y" ]]; then
+            rm -f "$tmp"; return 0
+        fi
+        force=1
+    fi
+
+    # Предупреждение о даунгрейде (если новая версия меньше текущей)
+    if _ver_lt "$new_ver" "$VERSION" && [ "$force" -eq 0 ]; then
+        echo -e "  ${YELLOW}⚠ Версия в репо (v${new_ver}) старее текущей (v${VERSION})${NC}"
+        echo -ne "  Продолжить? (y/n): "
+        [ "$yes" -eq 1 ] && echo "n" && rm -f "$tmp" && return 0
+        read -r ans
+        [[ "$ans" != "y" ]] && rm -f "$tmp" && return 0
+    fi
+
+    # Бэкап текущей версии
+    mkdir -p "$BACKUP_DIR"
+    local bak="${BACKUP_DIR}/govpn.bak.$(date +%s)"
+    cp "$INSTALL_PATH" "$bak" 2>/dev/null && \
+        echo -e "  ${WHITE}Бэкап:${NC} ${CYAN}${bak}${NC}"
+
+    # Установка
     cp -f "$tmp" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
     rm -f "$tmp"
     ln -sf "$INSTALL_PATH" /usr/bin/govpn 2>/dev/null
 
-    echo -e "${GREEN}[OK] Установлена v${new_ver}${NC}"
-    log_action "UPDATE: v${VERSION} → v${new_ver}"
-    read -p "Нажмите Enter..."
+    # Обновляем кеш
+    echo "${new_ver}|$(date +%s)" > "$UPDATE_CACHE_FILE" 2>/dev/null
+
+    echo -e "\n  ${GREEN}✅ Установлена v${new_ver}${NC}"
+    log_action "UPDATE: v${VERSION} → v${new_ver} (force=${force})"
+
+    if [ "$yes" -eq 0 ]; then
+        echo ""
+        read -p "  Нажмите Enter для перезапуска..."
+    fi
     exec "$INSTALL_PATH"
+}
+
+# Сравнение версий: возвращает 0 (true) если $1 < $2
+_ver_lt() {
+    local a="$1" b="$2"
+    [ "$a" = "$b" ] && return 1
+    local lower; lower=$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)
+    [ "$lower" = "$a" ]
+}
+
+# Показывает changelog — последние N строк из REPO (секция между двумя версиями)
+_update_changelog() {
+    local tmp="/tmp/govpn_changelog_$$.sh"
+    echo -ne "${YELLOW}  Загрузка changelog...${NC} "
+    if ! curl -fsSL --max-time 15 "$REPO_URL" -o "$tmp" 2>/dev/null; then
+        echo -e "${RED}✗${NC}"; rm -f "$tmp"; return
+    fi
+    echo -e "${GREEN}✓${NC}\n"
+    # Ищем блок CHANGELOG в скрипте (между маркерами)
+    local in_log=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^#\ CHANGELOG ]]; then in_log=1; continue; fi
+        [[ $in_log -eq 1 && "$line" =~ ^#\ === ]] && break
+        [[ $in_log -eq 1 ]] && echo "  ${line#\# }"
+    done < "$tmp" | head -30
+    rm -f "$tmp"
+}
+
+_self_update() {
+    cmd_update "$@"
 }
 
 _full_uninstall() {
@@ -3371,12 +3458,15 @@ show_menu() {
         # Мониторинг системы
         local _sys_stats; _sys_stats=$(get_sys_stats)
         echo -e "  ${WHITE}SYS:  ${CYAN}${_sys_stats}${NC}"
-
-        # AWG статистика (только amnezia)
         if is_amnezia; then
             local _awg_stats; _awg_stats=$(get_awg_stats)
-            [ -n "$_awg_stats" ] && \
-                echo -e "  ${WHITE}AWG:  ${GREEN}${_awg_stats}${NC}"
+            [ -n "$_awg_stats" ] && echo -e "  ${WHITE}AWG:  ${GREEN}${_awg_stats}${NC}"
+        fi
+
+        # Уведомление о новой версии (из кеша, без задержки)
+        local _upd_cached; _upd_cached=$(_update_cached_ver)
+        if [ -n "$_upd_cached" ] && [ "$_upd_cached" != "$VERSION" ]; then
+            echo -e "  ${YELLOW}★ Доступна v${_upd_cached}${NC}  ${WHITE}→ govpn update${NC}"
         fi
 
         # Цепочка из алиасов
@@ -3498,6 +3588,9 @@ run_startup() {
     ln -sf "$INSTALL_PATH" /usr/bin/govpn 2>/dev/null
     export PATH="/usr/local/bin:$PATH"
 
+    # Фоновая проверка обновлений (обновляет кеш если устарел, без задержки)
+    _update_check_async
+
     echo ""
     echo -e "  ${GREEN}✅ Готов!${NC}  Режим: ${CYAN}${MODE_LABEL}${NC}  IP: ${GREEN}${MY_IP}${NC}"
     echo ""
@@ -3510,6 +3603,36 @@ run_startup() {
 # ═══════════════════════════════════════════════════════════════
 
 case "${1:-}" in
+    update|upgrade)
+        check_root
+        init_config
+        shift
+        cmd_update "$@"
+        ;;
+    version|-v|--version)
+        echo "GoVPN Manager v${VERSION}"
+        # Показываем кешированную версию репо если есть
+        local _cv; _cv=$(_update_cached_ver) 2>/dev/null || true
+        [ -n "$_cv" ] && [ "$_cv" != "$VERSION" ] && \
+            echo "Доступна v${_cv} → govpn update"
+        ;;
+    check-update)
+        check_root
+        init_config
+        echo -ne "Проверка версии... "
+        _update_fetch_bg
+        local _cv; _cv=$(_update_cached_ver)
+        if [ -n "$_cv" ]; then
+            if [ "$_cv" = "$VERSION" ]; then
+                echo -e "${GREEN}v${VERSION} — актуальная${NC}"
+            else
+                echo -e "${YELLOW}Доступна v${_cv}${NC} (текущая v${VERSION})"
+                echo "Обновить: govpn update"
+            fi
+        else
+            echo -e "${RED}Не удалось проверить${NC}"
+        fi
+        ;;
     rollback)
         init_config
         [ -z "${2:-}" ] && echo "Использование: govpn rollback <файл>" && exit 1
