@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.16"
+VERSION="5.17"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -201,6 +201,107 @@ is_bridge() { [[ "$MODE" == "bridge" ]]; }
 # ═══════════════════════════════════════════════════════════════
 #  WARP — ОБЩИЕ ФУНКЦИИ
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+#  МОНИТОРИНГ — системные метрики для шапки
+# ═══════════════════════════════════════════════════════════════
+
+# Форматирует байты в человекочитаемый вид (K/M/G)
+_fmt_bytes() {
+    local b=$1
+    if (( b >= 1073741824 )); then
+        printf "%.1fG" "$(echo "scale=1; $b/1073741824" | bc 2>/dev/null || echo 0)"
+    elif (( b >= 1048576 )); then
+        printf "%.1fM" "$(echo "scale=1; $b/1048576" | bc 2>/dev/null || echo 0)"
+    elif (( b >= 1024 )); then
+        printf "%.0fK" "$(echo "scale=0; $b/1024" | bc 2>/dev/null || echo 0)"
+    else
+        printf "%dB" "$b"
+    fi
+}
+
+# Возвращает строку: CPU 12%  RAM 1.2/2.0G  Disk 18G
+get_sys_stats() {
+    # CPU — берём idle из /proc/stat, два замера с паузой 0.4s
+    local cpu_line1 cpu_line2
+    cpu_line1=$(grep '^cpu ' /proc/stat 2>/dev/null)
+    sleep 0.4
+    cpu_line2=$(grep '^cpu ' /proc/stat 2>/dev/null)
+
+    local cpu_pct="?"
+    if [ -n "$cpu_line1" ] && [ -n "$cpu_line2" ]; then
+        cpu_pct=$(awk -v l1="$cpu_line1" -v l2="$cpu_line2" 'BEGIN {
+            split(l1, a); split(l2, b)
+            idle1=a[5]; idle2=b[5]
+            total1=0; total2=0
+            for(i=2;i<=8;i++){total1+=a[i]; total2+=b[i]}
+            dt=total2-total1; di=idle2-idle1
+            if(dt>0) printf "%d", int((dt-di)*100/dt+0.5)
+            else print "0"
+        }' /dev/null)
+    fi
+
+    # RAM — из /proc/meminfo (kB)
+    local mem_total mem_avail
+    mem_total=$(grep '^MemTotal:' /proc/meminfo 2>/dev/null | awk '{print $2}')
+    mem_avail=$(grep '^MemAvailable:' /proc/meminfo 2>/dev/null | awk '{print $2}')
+    local ram_str="?"
+    if [ -n "$mem_total" ] && [ -n "$mem_avail" ] && (( mem_total > 0 )); then
+        local mem_used=$(( (mem_total - mem_avail) * 1024 ))
+        local mem_tot_b=$(( mem_total * 1024 ))
+        ram_str="$(_fmt_bytes "$mem_used")/$(_fmt_bytes "$mem_tot_b")"
+    fi
+
+    # Disk — корневой раздел
+    local disk_avail="?"
+    disk_avail=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')
+    [ -n "$disk_avail" ] && disk_avail="$(_fmt_bytes "$disk_avail") free" || disk_avail="?"
+
+    echo "CPU ${cpu_pct}%  RAM ${ram_str}  Disk ${disk_avail}"
+}
+
+# Возвращает строку: 5 peers (3 active) ↓1.2M ↑0.4M
+get_awg_stats() {
+    is_amnezia || return
+    [ -z "$AWG_CONTAINER" ] && return
+
+    local iface; iface=$(_awg_iface)
+
+    # Кол-во пиров
+    local peer_total=0
+    peer_total=$(docker exec "$AWG_CONTAINER" sh -c \
+        "awg show ${iface} peers 2>/dev/null | grep -c '^' || wg show ${iface} peers 2>/dev/null | grep -c '^'" 2>/dev/null \
+        | tr -d '[:space:]')
+    [[ "$peer_total" =~ ^[0-9]+$ ]] || peer_total=0
+
+    # Активные пиры — handshake не старше 3 минут (180 секунд)
+    local now; now=$(date +%s)
+    local peer_active=0
+    while IFS= read -r ts; do
+        [[ "$ts" =~ ^[0-9]+$ ]] || continue
+        (( now - ts <= 180 )) && (( peer_active++ ))
+    done < <(docker exec "$AWG_CONTAINER" sh -c \
+        "awg show ${iface} latest-handshakes 2>/dev/null || wg show ${iface} latest-handshakes 2>/dev/null" 2>/dev/null \
+        | awk '{print $2}')
+
+    # Трафик через интерфейс (rx/tx bytes из /proc/net/dev внутри контейнера)
+    local rx_str="" tx_str=""
+    local rx tx
+    rx=$(docker exec "$AWG_CONTAINER" sh -c \
+        "cat /proc/net/dev 2>/dev/null | awk -v iface='${iface}:' '\$1==iface{print \$2}'" 2>/dev/null | tr -d '[:space:]')
+    tx=$(docker exec "$AWG_CONTAINER" sh -c \
+        "cat /proc/net/dev 2>/dev/null | awk -v iface='${iface}:' '\$1==iface{print \$10}'" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ "$rx" =~ ^[0-9]+$ ]] && [[ "$tx" =~ ^[0-9]+$ ]]; then
+        rx_str="↓$(_fmt_bytes "$rx")"
+        tx_str="↑$(_fmt_bytes "$tx")"
+    fi
+
+    local result="${peer_total} peers"
+    [ "$peer_total" -gt 0 ] && result="${result} (${peer_active} active)"
+    [ -n "$rx_str" ] && result="${result}  ${rx_str} ${tx_str}"
+    echo "$result"
+}
 
 warp_overall_status() {
     # Возвращает строку статуса для шапки
@@ -3266,6 +3367,17 @@ show_menu() {
         echo -e "${WHITE}  GoVPN Manager v${VERSION}${NC}  ${CYAN}Режим: ${MODE_LABEL}${NC}"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         echo -e "  ${WHITE}IP:   ${GREEN}${MY_IP}${NC}   ${WHITE}Iface: ${CYAN}${IFACE}${NC}"
+
+        # Мониторинг системы
+        local _sys_stats; _sys_stats=$(get_sys_stats)
+        echo -e "  ${WHITE}SYS:  ${CYAN}${_sys_stats}${NC}"
+
+        # AWG статистика (только amnezia)
+        if is_amnezia; then
+            local _awg_stats; _awg_stats=$(get_awg_stats)
+            [ -n "$_awg_stats" ] && \
+                echo -e "  ${WHITE}AWG:  ${GREEN}${_awg_stats}${NC}"
+        fi
 
         # Цепочка из алиасов
         if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
