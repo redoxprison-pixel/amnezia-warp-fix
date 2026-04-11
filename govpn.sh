@@ -2344,21 +2344,45 @@ _backups_menu() {
                 ;;
             d|D|д|Д)
                 echo ""
-                local total=${#bak_arr[@]}
-                if [ "$total" -le 5 ]; then
-                    echo -e "  ${YELLOW}Бэкапов ${total} — удалять нечего (порог: 5)${NC}"
-                else
-                    local to_del=$(( total - 5 ))
-                    echo -ne "  Удалить ${to_del} старых бэкапов? (y/n): "
-                    read -r c
+                local cnt=0
+
+                # — полные архивы .tar.gz (оставить 5 новейших)
+                local -a tgz_list=()
+                while IFS= read -r b; do [ -f "$b" ] && tgz_list+=("$b"); done \
+                    < <(ls -t "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null)
+                local tgz_total=${#tgz_list[@]}
+                if [ "$tgz_total" -gt 5 ]; then
+                    echo -e "  ${WHITE}Полные архивы:${NC} ${tgz_total} → оставить 5, удалить $(( tgz_total - 5 ))"
+                    echo -ne "  Подтвердить? (y/n): "; read -r c
                     if [[ "$c" == "y" ]]; then
-                        local cnt=0
-                        for (( idx=5; idx<total; idx++ )); do
-                            rm -f "${bak_arr[$idx]}" && (( cnt++ ))
+                        for (( idx=5; idx<tgz_total; idx++ )); do
+                            rm -f "${tgz_list[$idx]}" && (( cnt++ ))
                         done
-                        echo -e "  ${GREEN}Удалено: ${cnt}${NC}"
-                        log_action "BACKUP CLEANUP: удалено ${cnt} старых архивов"
                     fi
+                else
+                    echo -e "  ${YELLOW}Полных архивов ${tgz_total} — меньше порога (5), не трогаем${NC}"
+                fi
+
+                # — старые одиночные .bak.* (удалить все, они устарели)
+                local -a old_list=()
+                while IFS= read -r b; do [ -f "$b" ] && old_list+=("$b"); done \
+                    < <(ls -t "${BACKUP_DIR}"/*.bak.* 2>/dev/null)
+                local old_total=${#old_list[@]}
+                if [ "$old_total" -gt 0 ]; then
+                    echo -e "  ${WHITE}Старые одиночные бэкапы:${NC} ${old_total} файлов (устаревший формат)"
+                    echo -ne "  Удалить все? (y/n): "; read -r c
+                    if [[ "$c" == "y" ]]; then
+                        for b in "${old_list[@]}"; do
+                            rm -f "$b" && (( cnt++ ))
+                        done
+                    fi
+                fi
+
+                if [ "$cnt" -gt 0 ]; then
+                    echo -e "  ${GREEN}Удалено файлов: ${cnt}${NC}"
+                    log_action "BACKUP CLEANUP: удалено ${cnt} файлов"
+                else
+                    echo -e "  ${YELLOW}Ничего не удалено${NC}"
                 fi
                 read -p "  Enter..."
                 ;;
