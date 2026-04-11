@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.19"
+VERSION="5.21"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -31,6 +31,7 @@ MODE=""           # 3xui | amnezia | combo | bridge
 MODE_LABEL=""
 WARP_SOCKS_PORT="40000"
 AWG_CONTAINER=""  # активный amnezia контейнер
+HY2_RUNNING=0     # 1 если hysteria-server активен
 
 # ═══════════════════════════════════════════════════════════════
 #  УТИЛИТЫ
@@ -192,11 +193,19 @@ detect_mode() {
         MODE="bridge"
         MODE_LABEL="Bridge"
     fi
+
+    # Hysteria2 — независимо от основного режима
+    HY2_RUNNING=0
+    if systemctl is-active hysteria-server &>/dev/null 2>&1; then
+        HY2_RUNNING=1
+        MODE_LABEL="${MODE_LABEL} +Hy2"
+    fi
 }
 
 is_3xui() { [[ "$MODE" == "3xui" || "$MODE" == "combo" ]]; }
 is_amnezia() { [[ "$MODE" == "amnezia" || "$MODE" == "combo" ]]; }
 is_bridge() { [[ "$MODE" == "bridge" ]]; }
+is_hysteria2() { [ "$HY2_RUNNING" -eq 1 ]; }
 
 # ═══════════════════════════════════════════════════════════════
 #  WARP — ОБЩИЕ ФУНКЦИИ
@@ -2015,6 +2024,84 @@ _servers_menu() {
 # ═══════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════
+#  HYSTERIA2 — МЕНЮ УПРАВЛЕНИЯ
+# ═══════════════════════════════════════════════════════════════
+
+hysteria2_menu() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Hysteria2 ━━━${NC}\n"
+
+        # Статус сервиса
+        local hy2_port hy2_sni hy2_pass hy2_obfs
+        hy2_port=$(grep -oP '^listen: :\K\d+' /etc/hysteria/config.yaml 2>/dev/null || echo "?")
+        hy2_sni=$(grep -oP '(?<=url: https://)\S+' /etc/hysteria/config.yaml 2>/dev/null | head -1 || echo "?")
+        hy2_pass=$(grep -A1 'type: password' /etc/hysteria/config.yaml 2>/dev/null | grep 'password:' | awk '{print $2}' | head -1 || echo "?")
+        hy2_obfs=$(grep -A2 'type: salamander' /etc/hysteria/config.yaml 2>/dev/null | grep 'password:' | awk '{print $2}' | head -1 || echo "?")
+
+        if systemctl is-active --quiet hysteria-server; then
+            echo -e "  ${WHITE}Статус:${NC} ${GREEN}● запущен${NC}"
+        else
+            echo -e "  ${WHITE}Статус:${NC} ${RED}● остановлен${NC}"
+        fi
+        echo -e "  ${WHITE}Порт:${NC}   ${CYAN}${hy2_port}/udp${NC}"
+        echo -e "  ${WHITE}SNI:${NC}    ${CYAN}${hy2_sni}${NC}"
+        echo ""
+
+        # Ключ подключения
+        if [ -f /root/hysteria2.txt ]; then
+            local hy2_key; hy2_key=$(cat /root/hysteria2.txt 2>/dev/null)
+            echo -e "  ${WHITE}Ключ подключения:${NC}"
+            echo -e "  ${CYAN}${hy2_key}${NC}"
+            echo ""
+        fi
+
+        echo -e "  ${YELLOW}[1]${NC}  Показать QR-код"
+        echo -e "  ${YELLOW}[2]${NC}  Перезапустить сервис"
+        echo -e "  ${YELLOW}[3]${NC}  Показать лог (30 строк)"
+        echo -e "  ${YELLOW}[4]${NC}  Переустановить / изменить конфиг"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+
+        local ch; ch=$(read_choice "Выбор: ")
+        case "$ch" in
+            1)
+                if [ -f /root/hysteria2.txt ] && command -v qrencode &>/dev/null; then
+                    echo ""
+                    qrencode -t ANSIUTF8 "$(cat /root/hysteria2.txt)"
+                    read -p "  Enter..."
+                elif ! command -v qrencode &>/dev/null; then
+                    echo -e "  ${YELLOW}Установка qrencode...${NC}"
+                    apt-get install -y qrencode > /dev/null 2>&1
+                    qrencode -t ANSIUTF8 "$(cat /root/hysteria2.txt)" && read -p "  Enter..."
+                else
+                    echo -e "  ${YELLOW}/root/hysteria2.txt не найден${NC}"
+                    read -p "  Enter..."
+                fi
+                ;;
+            2)
+                echo -ne "  ${YELLOW}Перезапуск...${NC} "
+                systemctl restart hysteria-server
+                sleep 2
+                systemctl is-active --quiet hysteria-server &&                     echo -e "${GREEN}✓ запущен${NC}" || echo -e "${RED}✗ ошибка${NC}"
+                read -p "  Enter..."
+                ;;
+            3)
+                echo ""
+                journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null ||                     echo -e "${YELLOW}journalctl недоступен${NC}"
+                read -p "  Enter..."
+                ;;
+            4)
+                _install_hysteria2
+                # После переустановки обновляем HY2_RUNNING
+                systemctl is-active --quiet hysteria-server && HY2_RUNNING=1 || HY2_RUNNING=0
+                ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  МАСТЕР УСТАНОВКИ СЕРВЕРОВ
 # ═══════════════════════════════════════════════════════════════
 
@@ -2195,114 +2282,169 @@ _install_3xui() {
     read -p "  Enter..."
 }
 
-# Установка Hysteria2
+# Установка Hysteria2 (по образцу YukiKras/vless-scripts)
 _install_hysteria2() {
     clear
     echo -e "\n${CYAN}━━━ Установка Hysteria2 ━━━${NC}\n"
 
-    if command -v hysteria &>/dev/null; then
-        local ver; ver=$(hysteria version 2>/dev/null | head -1)
+    # Если уже установлен — предлагаем переустановить (удаляем старое)
+    if command -v hysteria &>/dev/null || [ -f /usr/local/bin/hysteria ]; then
+        local ver; ver=$(hysteria version 2>/dev/null | head -1 || echo "неизвестна")
         echo -e "  ${YELLOW}Hysteria2 уже установлен: ${ver}${NC}"
-        echo -ne "  Переустановить/обновить? (y/n): "; read -r c
+        echo -ne "  Переустановить? (y/n): "; read -r c
         [[ "$c" != "y" ]] && return
+        # Полная очистка
+        systemctl stop hysteria-server 2>/dev/null || true
+        systemctl disable hysteria-server 2>/dev/null || true
+        rm -f /etc/systemd/system/hysteria-server.service
+        rm -f /usr/local/bin/hysteria
+        rm -rf /etc/hysteria
+        rm -f /root/hysteria2.txt
+        systemctl daemon-reload
+        echo -e "  ${GREEN}✓ Старая версия удалена${NC}\n"
     fi
 
     # Параметры
-    local hy_port domain acme_email
-    echo -ne "  Порт Hysteria2 [443]: "; read -r inp; hy_port="${inp:-443}"
-    echo -ne "  Домен (для ACME-сертификата, или Enter для self-signed): "; read -r domain
-    if [ -n "$domain" ]; then
-        echo -ne "  Email для ACME: "; read -r acme_email
-    fi
-    echo -ne "  Пароль доступа: "; read -r hy_pass
-    [ -z "$hy_pass" ] && hy_pass=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16)
-
+    local sni_host port auth_pwd obfs_pwd
+    echo -ne "  SNI хост [web.max.ru]: "; read -r inp; sni_host="${inp:-web.max.ru}"
+    echo -ne "  Порт [443]: "; read -r inp; port="${inp:-443}"
+    auth_pwd=$(date +%s%N | md5sum | cut -c 1-16)
+    obfs_pwd=$(date +%s%N | md5sum | cut -c 1-16)
     echo ""
-    echo -e "  ${CYAN}→ Установка Hysteria2...${NC}"
-    bash <(curl -fsSL https://get.hy2.sh/) 2>&1 | tail -10
 
-    if ! command -v hysteria &>/dev/null; then
-        echo -e "  ${RED}✗ Не удалось установить Hysteria2${NC}"
+    # Зависимости
+    export DEBIAN_FRONTEND=noninteractive
+    command -v openssl &>/dev/null || apt-get install -y openssl > /dev/null 2>&1
+    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+
+    # Скачиваем бинарник напрямую с GitHub (без get.hy2.sh)
+    echo -e "  ${CYAN}→ Загрузка Hysteria2...${NC}"
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="arm"   ;;
+        *)       arch="amd64" ;;
+    esac
+
+    # Получаем последнюю версию
+    local latest_ver
+    latest_ver=$(curl -fsSL --max-time 10 \
+        "https://api.github.com/repos/apernet/hysteria/releases/latest" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null \
+        | sed 's|app/||')
+    [ -z "$latest_ver" ] && latest_ver="v2.8.1"  # fallback
+
+    local dl_url="https://github.com/apernet/hysteria/releases/download/app/${latest_ver}/hysteria-linux-${arch}"
+    echo -e "  ${WHITE}Версия: ${latest_ver}  Архитектура: ${arch}${NC}"
+
+    if ! curl -fsSL --max-time 60 "$dl_url" -o /usr/local/bin/hysteria 2>/dev/null; then
+        echo -e "  ${RED}✗ Не удалось загрузить бинарник${NC}"
         read -p "  Enter..."; return 1
     fi
+    chmod 755 /usr/local/bin/hysteria
+    echo -e "  ${GREEN}✓ Бинарник установлен${NC}"
 
-    # Генерируем конфиг
+    # Генерируем self-signed сертификат (prime256v1 как у YukiKras)
+    echo -e "  ${CYAN}→ Генерация сертификата (self-signed, SNI: ${sni_host})...${NC}"
     mkdir -p /etc/hysteria
-    local cert_block
-    if [ -n "$domain" ]; then
-        cert_block="acme:
-  domains:
-    - ${domain}
-  email: ${acme_email:-admin@${domain}}"
-    else
-        # self-signed
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-            -keyout /etc/hysteria/server.key \
-            -out /etc/hysteria/server.crt \
-            -days 3650 -nodes -subj "/CN=govpn" 2>/dev/null
-        cert_block="tls:
-  cert: /etc/hysteria/server.crt
-  key: /etc/hysteria/server.key"
-    fi
+    openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key 2>/dev/null
+    openssl req -new -x509 -days 36500 \
+        -key /etc/hysteria/private.key \
+        -out /etc/hysteria/cert.crt \
+        -subj "/CN=${sni_host}" 2>/dev/null
+    chmod 600 /etc/hysteria/cert.crt /etc/hysteria/private.key
+    echo -e "  ${GREEN}✓ Сертификат создан${NC}"
 
+    # Конфиг с obfs salamander
+    echo -e "  ${CYAN}→ Конфигурация...${NC}"
     cat > /etc/hysteria/config.yaml << EOF
-listen: :${hy_port}
+listen: :${port}
 
-${cert_block}
+tls:
+  cert: /etc/hysteria/cert.crt
+  key: /etc/hysteria/private.key
+
+obfs:
+  type: salamander
+  salamander:
+    password: ${obfs_pwd}
 
 auth:
   type: password
-  password: ${hy_pass}
+  password: ${auth_pwd}
 
 masquerade:
   type: proxy
   proxy:
-    url: https://news.ycombinator.com/
+    url: https://${sni_host}
     rewriteHost: true
+
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 33554432
+  maxConnReceiveWindow: 33554432
 EOF
 
-    # Systemd сервис (если не создан установщиком)
-    if [ ! -f /etc/systemd/system/hysteria-server.service ]; then
-        cat > /etc/systemd/system/hysteria-server.service << 'EOF'
+    # Systemd юнит
+    cat > /etc/systemd/system/hysteria-server.service << 'EOF'
 [Unit]
-Description=Hysteria2 Server
+Description=Hysteria Server Service (config.yaml)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
-Restart=always
-RestartSec=3
+Type=simple
+ExecStart=/usr/local/bin/hysteria server --config /etc/hysteria/config.yaml
+WorkingDirectory=~
+User=root
+Group=root
+Environment=HYSTERIA_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    fi
 
     systemctl daemon-reload > /dev/null 2>&1
     systemctl enable hysteria-server > /dev/null 2>&1
     systemctl restart hysteria-server > /dev/null 2>&1
     sleep 2
 
-    if systemctl is-active hysteria-server &>/dev/null 2>&1; then
-        echo -e "\n  ${GREEN}✅ Hysteria2 установлен и запущен!${NC}"
-        echo -e "  ${WHITE}Порт:${NC}     ${CYAN}${hy_port}${NC}"
-        echo -e "  ${WHITE}Пароль:${NC}   ${CYAN}${hy_pass}${NC}"
-        [ -n "$domain" ] && echo -e "  ${WHITE}Домен:${NC}    ${CYAN}${domain}${NC}"
+    if systemctl is-active --quiet hysteria-server; then
+        # Сохраняем ключ подключения
+        local hy2_key="hy2://${auth_pwd}@${MY_IP}:${port}?mport&security=tls&sni=${sni_host}&allowInsecure=true&alpn&obfs=salamander&obfs-password=${obfs_pwd}#govpn-hy2"
+        echo "$hy2_key" > /root/hysteria2.txt
+
+        echo -e "\n  ${GREEN}✅ Hysteria2 установлен и запущен!${NC}\n"
+        echo -e "  ${WHITE}Порт:${NC}    ${CYAN}${port}${NC}"
+        echo -e "  ${WHITE}SNI:${NC}     ${CYAN}${sni_host}${NC}"
+        echo -e "  ${WHITE}Пароль:${NC}  ${CYAN}${auth_pwd}${NC}"
+        echo -e "  ${WHITE}Obfs:${NC}    ${CYAN}${obfs_pwd}${NC}"
         echo ""
-        echo -e "  ${WHITE}Строка подключения (Nekoray/v2rayN):${NC}"
-        local host="${domain:-${MY_IP}}"
-        echo -e "  ${CYAN}hysteria2://${hy_pass}@${host}:${hy_port}?insecure=1#govpn-hy2${NC}"
+        echo -e "  ${WHITE}Ключ подключения:${NC}"
+        echo -e "  ${CYAN}${hy2_key}${NC}"
+        echo ""
+        echo -e "  ${WHITE}Файл:${NC} /root/hysteria2.txt"
+
+        # QR-код
+        if command -v qrencode &>/dev/null; then
+            echo ""
+            qrencode -t ANSIUTF8 "$hy2_key"
+        fi
 
         # UFW
         if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q 'active'; then
-            ufw allow "${hy_port}/udp" > /dev/null 2>&1
-            echo -e "  ${GREEN}✓ UFW: порт ${hy_port}/udp открыт${NC}"
+            ufw allow "${port}/udp" > /dev/null 2>&1
+            echo -e "  ${GREEN}✓ UFW: порт ${port}/udp открыт${NC}"
         fi
 
-        log_action "INSTALL: Hysteria2 port=${hy_port}"
+        log_action "INSTALL: Hysteria2 ver=${latest_ver} port=${port} sni=${sni_host}"
     else
         echo -e "\n  ${RED}✗ Hysteria2 не запустился${NC}"
-        echo -e "  Проверьте: journalctl -u hysteria-server -n 30"
+        echo -e "  Лог: journalctl -u hysteria-server -n 30"
     fi
 
     read -p "  Enter..."
@@ -4086,6 +4228,14 @@ show_menu() {
             [ -n "$_awg_stats" ] && echo -e "  ${WHITE}AWG:  ${GREEN}${_awg_stats}${NC}"
         fi
 
+        # Hysteria2 статус
+        if is_hysteria2; then
+            local _hy2_key=""
+            [ -f /root/hysteria2.txt ] && _hy2_key=$(cat /root/hysteria2.txt 2>/dev/null | head -1)
+            local _hy2_port; _hy2_port=$(grep -oP '^listen: :\K\d+' /etc/hysteria/config.yaml 2>/dev/null || echo "443")
+            echo -e "  ${WHITE}HY2:  ${GREEN}● :${_hy2_port}${NC}$([ -f /root/hysteria2.txt ] && echo "  ${WHITE}ключ: /root/hysteria2.txt${NC}")"
+        fi
+
         # Уведомление о новой версии (из кеша, без задержки)
         local _upd_cached; _upd_cached=$(_update_cached_ver)
         if [ -n "$_upd_cached" ] && [ "$_upd_cached" != "$VERSION" ]; then
@@ -4136,6 +4286,7 @@ show_menu() {
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e "  8)  Система и управление"
         echo -e "  9)  Установить сервер"
+        is_hysteria2 && echo -e "  ${CYAN}h)  Hysteria2 — статус / ключ${NC}"
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         ch=$(read_choice "Выбор: ")
@@ -4157,6 +4308,7 @@ show_menu() {
             7) tools_menu ;;
             8) system_menu ;;
             9) install_wizard ;;
+            h|H|р|Р) is_hysteria2 && hysteria2_menu ;;
             0)
                 clear; exit 0 ;;
         esac
