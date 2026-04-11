@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.17"
+VERSION="5.18"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2034,8 +2034,10 @@ system_menu() {
         echo ""
 
         # Бэкапы
-        local bak_count; bak_count=$(ls "$BACKUP_DIR"/*.bak.* 2>/dev/null | wc -l)
-        echo -e "  ${WHITE}Бэкапов:${NC} ${CYAN}${bak_count}${NC} в ${BACKUP_DIR}"
+        local bak_count; bak_count=$(ls "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null | wc -l)
+        local bak_last=""
+        [ "$bak_count" -gt 0 ] && bak_last=$(ls -t "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null | head -1 | xargs basename 2>/dev/null | grep -oE '[0-9]{8}-[0-9]{6}' | sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)-\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1-\2-\3 \4:\5/')
+        echo -e "  ${WHITE}Бэкапов:${NC} ${CYAN}${bak_count}${NC}$([ -n "$bak_last" ] && echo "  последний: ${bak_last}")"
         echo ""
 
         echo -e "  ${YELLOW}[1]${NC}  Бэкапы и Rollback xray"
@@ -2071,49 +2073,298 @@ system_menu() {
     done
 }
 
+# ═══════════════════════════════════════════════════════════════
+#  СИСТЕМА БЭКАПОВ
+# ═══════════════════════════════════════════════════════════════
+
+# Создаёт полный бэкап в BACKUP_DIR/govpn-backup-TIMESTAMP.tar.gz
+# Возвращает путь к созданному архиву (или пустую строку при ошибке)
+do_backup() {
+    local silent="${1:-0}"   # 1 = не печатать прогресс
+    mkdir -p "$BACKUP_DIR"
+
+    local ts; ts=$(date +%s)
+    local label; label=$(date -d "@${ts}" '+%Y%m%d-%H%M%S' 2>/dev/null || date '+%Y%m%d-%H%M%S')
+    local archive="${BACKUP_DIR}/govpn-backup-${label}.tar.gz"
+    local staging; staging=$(mktemp -d /tmp/govpn_bak_XXXXXX)
+    local ok=0
+
+    _bak_log() { [ "$silent" -eq 0 ] && echo -e "  ${CYAN}$*${NC}"; }
+
+    # — govpn скрипт
+    _bak_log "→ govpn скрипт"
+    cp "$INSTALL_PATH" "${staging}/govpn.sh" 2>/dev/null && ok=1
+
+    # — конфиг и алиасы
+    _bak_log "→ конфигурация govpn"
+    cp "$CONF_FILE"   "${staging}/config"   2>/dev/null || true
+    cp "$ALIASES_FILE" "${staging}/aliases" 2>/dev/null || true
+
+    # — x-ui.db (3X-UI)
+    if is_3xui && [ -f "/etc/x-ui/x-ui.db" ]; then
+        _bak_log "→ 3X-UI база (x-ui.db)"
+        cp /etc/x-ui/x-ui.db "${staging}/x-ui.db" 2>/dev/null && ok=1
+        [ -f "/usr/local/x-ui/bin/config.json" ] && \
+            cp /usr/local/x-ui/bin/config.json "${staging}/x-ui-config.json" 2>/dev/null || true
+    fi
+
+    # — AWG clientsTable + конфиг
+    if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
+        _bak_log "→ AWG clientsTable"
+        docker cp "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" \
+            "${staging}/awg-clientsTable" 2>/dev/null && ok=1
+        local awg_conf; awg_conf=$(_awg_conf)
+        if [ -n "$awg_conf" ]; then
+            _bak_log "→ AWG конфиг (${awg_conf##*/})"
+            docker cp "${AWG_CONTAINER}:${awg_conf}" \
+                "${staging}/awg-$(basename "$awg_conf")" 2>/dev/null || true
+        fi
+    fi
+
+    # — WARP ключи (внутри AWG контейнера)
+    if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
+        if docker exec "$AWG_CONTAINER" sh -c "[ -f '${AWG_WARP_CONF}' ]" 2>/dev/null; then
+            _bak_log "→ WARP конфиг (warp.conf)"
+            docker cp "${AWG_CONTAINER}:${AWG_WARP_CONF}" \
+                "${staging}/warp.conf" 2>/dev/null || true
+            docker cp "${AWG_CONTAINER}:${AWG_WARP_DIR}/wgcf-account.toml" \
+                "${staging}/wgcf-account.toml" 2>/dev/null || true
+        fi
+        if docker exec "$AWG_CONTAINER" sh -c "[ -f '${AWG_CLIENTS_FILE}' ]" 2>/dev/null; then
+            _bak_log "→ WARP clients.list"
+            docker cp "${AWG_CONTAINER}:${AWG_CLIENTS_FILE}" \
+                "${staging}/warp-clients.list" 2>/dev/null || true
+        fi
+    fi
+
+    # — WARP ключи (3X-UI / хостовой warp-cli)
+    if is_3xui; then
+        for f in /var/lib/cloudflare-warp/reg.json /var/lib/cloudflare-warp/mdm.xml; do
+            [ -f "$f" ] && cp "$f" "${staging}/$(basename "$f")" 2>/dev/null || true
+        done
+    fi
+
+    # Пакуем
+    if [ "$ok" -eq 1 ]; then
+        tar -czf "$archive" -C "$staging" . 2>/dev/null
+        rm -rf "$staging"
+        [ "$silent" -eq 0 ] && \
+            echo -e "\n  ${GREEN}✅ Бэкап: ${WHITE}$(basename "$archive")${NC}  $(du -sh "$archive" 2>/dev/null | cut -f1)"
+        log_action "BACKUP: $(basename "$archive")"
+        echo "$archive"
+    else
+        rm -rf "$staging"
+        [ "$silent" -eq 0 ] && echo -e "  ${RED}✗ Нечего бэкапить — нет данных${NC}"
+    fi
+}
+
+# Тихий автобэкап перед опасными операциями (вызывать одной строкой)
+_backup_auto() {
+    do_backup 1 > /dev/null 2>&1
+}
+
+# Восстановление из архива
+_backup_restore() {
+    local archive="$1"
+    [ -f "$archive" ] || { echo -e "${RED}Файл не найден: $archive${NC}"; return 1; }
+
+    local staging; staging=$(mktemp -d /tmp/govpn_restore_XXXXXX)
+    tar -xzf "$archive" -C "$staging" 2>/dev/null || {
+        rm -rf "$staging"
+        echo -e "${RED}✗ Не удалось распаковать архив${NC}"; return 1
+    }
+
+    local restored=0
+
+    # x-ui.db
+    if [ -f "${staging}/x-ui.db" ] && is_3xui; then
+        echo -ne "  Восстановить x-ui.db? (y/n): "; read -r c
+        if [[ "$c" == "y" ]]; then
+            cp /etc/x-ui/x-ui.db "${BACKUP_DIR}/x-ui.db.pre-restore.$(date +%s)" 2>/dev/null || true
+            cp "${staging}/x-ui.db" /etc/x-ui/x-ui.db
+            systemctl restart x-ui > /dev/null 2>&1
+            echo -e "  ${GREEN}✓ x-ui.db восстановлен, x-ui перезапущен${NC}"
+            (( restored++ ))
+        fi
+    fi
+
+    # x-ui config.json
+    if [ -f "${staging}/x-ui-config.json" ] && is_3xui; then
+        local cfg="/usr/local/x-ui/bin/config.json"
+        [ -f "$cfg" ] && { echo -ne "  Восстановить config.json? (y/n): "; read -r c
+            if [[ "$c" == "y" ]]; then
+                cp "${staging}/x-ui-config.json" "$cfg"
+                systemctl restart x-ui > /dev/null 2>&1
+                echo -e "  ${GREEN}✓ config.json восстановлен${NC}"
+                (( restored++ ))
+            fi
+        }
+    fi
+
+    # AWG clientsTable
+    if [ -f "${staging}/awg-clientsTable" ] && is_amnezia && [ -n "$AWG_CONTAINER" ]; then
+        echo -ne "  Восстановить AWG clientsTable? (y/n): "; read -r c
+        if [[ "$c" == "y" ]]; then
+            docker exec "$AWG_CONTAINER" sh -c \
+                "cp /opt/amnezia/awg/clientsTable /opt/amnezia/awg/clientsTable.pre-restore.\$(date +%s) 2>/dev/null || true"
+            docker cp "${staging}/awg-clientsTable" \
+                "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" 2>/dev/null
+            echo -e "  ${GREEN}✓ clientsTable восстановлен${NC}"
+            (( restored++ ))
+        fi
+    fi
+
+    # WARP конфиг
+    if [ -f "${staging}/warp.conf" ] && is_amnezia && [ -n "$AWG_CONTAINER" ]; then
+        echo -ne "  Восстановить warp.conf? (y/n): "; read -r c
+        if [[ "$c" == "y" ]]; then
+            docker exec "$AWG_CONTAINER" sh -c "mkdir -p '${AWG_WARP_DIR}'" 2>/dev/null
+            docker cp "${staging}/warp.conf" "${AWG_CONTAINER}:${AWG_WARP_CONF}" 2>/dev/null
+            [ -f "${staging}/wgcf-account.toml" ] && \
+                docker cp "${staging}/wgcf-account.toml" \
+                    "${AWG_CONTAINER}:${AWG_WARP_DIR}/wgcf-account.toml" 2>/dev/null || true
+            echo -e "  ${GREEN}✓ warp.conf восстановлен${NC}"
+            (( restored++ ))
+        fi
+    fi
+
+    # govpn скрипт
+    if [ -f "${staging}/govpn.sh" ]; then
+        echo -ne "  Восстановить govpn скрипт? (y/n): "; read -r c
+        if [[ "$c" == "y" ]]; then
+            cp "${staging}/govpn.sh" "$INSTALL_PATH"
+            chmod +x "$INSTALL_PATH"
+            echo -e "  ${GREEN}✓ govpn восстановлен (перезапуск...)${NC}"
+            rm -rf "$staging"
+            log_action "ROLLBACK: $archive (${restored} компонентов)"
+            sleep 1; exec "$INSTALL_PATH"
+        fi
+    fi
+
+    rm -rf "$staging"
+
+    if [ "$restored" -gt 0 ]; then
+        echo -e "\n  ${GREEN}Восстановлено компонентов: ${restored}${NC}"
+        log_action "ROLLBACK: $archive (${restored} компонентов)"
+    else
+        echo -e "  ${YELLOW}Ничего не восстановлено${NC}"
+    fi
+}
+
 _backups_menu() {
-    clear
-    echo -e "\n${CYAN}━━━ Бэкапы и Rollback ━━━${NC}\n"
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Бэкапы и восстановление ━━━${NC}\n"
 
-    local baks; baks=$(ls -t "$BACKUP_DIR"/*.bak.* 2>/dev/null)
-    if [ -z "$baks" ]; then
-        echo -e "${YELLOW}Бэкапов нет.${NC}"
-        read -p "Enter..."; return
-    fi
+        # Список архивов
+        local -a bak_arr=()
+        while IFS= read -r b; do
+            [ -f "$b" ] && bak_arr+=("$b")
+        done < <(ls -t "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null)
 
-    local -a bak_arr=()
-    local i=1
-    while IFS= read -r b; do
-        local ts; ts=$(basename "$b" | grep -oE '[0-9]{10,}$')
-        local dt; dt=$(date -d "@${ts}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$ts")
-        local size; size=$(du -sh "$b" 2>/dev/null | cut -f1)
-        echo -e "  ${YELLOW}[$i]${NC} ${dt}  ${WHITE}$(basename "$b")${NC}  ${size}"
-        bak_arr+=("$b")
-        ((i++))
-    done <<< "$baks"
+        # Старые одиночные бэкапы (обратная совместимость)
+        local -a old_arr=()
+        while IFS= read -r b; do
+            [ -f "$b" ] && old_arr+=("$b")
+        done < <(ls -t "${BACKUP_DIR}"/*.bak.* 2>/dev/null)
 
-    echo -e "  ${YELLOW}[0]${NC} Назад"
-    echo ""
-    read -p "Rollback (номер или 0): " ch
-    [[ "$ch" == "0" || -z "$ch" ]] && return
-    [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#bak_arr[@]} )) || return
+        if [ ${#bak_arr[@]} -eq 0 ] && [ ${#old_arr[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}Бэкапов ещё нет.${NC}\n"
+        else
+            echo -e "  ${WHITE}Полные архивы:${NC}"
+            if [ ${#bak_arr[@]} -eq 0 ]; then
+                echo -e "  ${YELLOW}  нет${NC}"
+            else
+                local i=1
+                for b in "${bak_arr[@]}"; do
+                    local ts; ts=$(basename "$b" | grep -oE '[0-9]{8}-[0-9]{6}')
+                    local dt="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2}"
+                    local sz; sz=$(du -sh "$b" 2>/dev/null | cut -f1)
+                    echo -e "  ${YELLOW}[$i]${NC}  ${dt}  ${WHITE}$(basename "$b")${NC}  ${CYAN}${sz}${NC}"
+                    (( i++ ))
+                done
+            fi
 
-    local bak="${bak_arr[$((ch-1))]}"
-    read -p "$(echo -e "${YELLOW}Восстановить из ${bak}? (y/n): ${NC}")" c
-    [[ "$c" != "y" ]] && return
+            if [ ${#old_arr[@]} -gt 0 ]; then
+                echo -e "\n  ${WHITE}Старые бэкапы (отдельные файлы):${NC}"
+                local j=$(( ${#bak_arr[@]} + 1 ))
+                for b in "${old_arr[@]}"; do
+                    local ts; ts=$(basename "$b" | grep -oE '[0-9]{10,}$')
+                    local dt; dt=$(date -d "@${ts}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$ts")
+                    local sz; sz=$(du -sh "$b" 2>/dev/null | cut -f1)
+                    echo -e "  ${YELLOW}[$j]${NC}  ${dt}  ${WHITE}$(basename "$b")${NC}  ${CYAN}${sz}${NC}"
+                    bak_arr+=("$b")
+                    (( j++ ))
+                done
+            fi
+            echo ""
+        fi
 
-    if [[ "$bak" == *"x-ui.db"* ]]; then
-        cp "$bak" /etc/x-ui/x-ui.db
-        systemctl restart x-ui > /dev/null 2>&1
-        echo -e "${GREEN}[OK] x-ui.db восстановлен.${NC}"
-    elif [[ "$bak" == *"config.json"* ]]; then
-        local cfg_path="/usr/local/x-ui/bin/config.json"
-        [ -f "$cfg_path" ] && cp "$bak" "$cfg_path"
-        systemctl restart x-ui > /dev/null 2>&1
-        echo -e "${GREEN}[OK] config.json восстановлен.${NC}"
-    fi
-    log_action "ROLLBACK: $bak"
-    read -p "Нажмите Enter..."
+        echo -e "  ${GREEN}[c]${NC}  Создать бэкап сейчас"
+        echo -e "  ${YELLOW}[r]${NC}  Восстановить из бэкапа (выбрать номер)"
+        echo -e "  ${RED}[d]${NC}  Удалить старые (оставить 5 последних)"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+
+        case "$ch" in
+            c|C|с|С)
+                echo ""
+                do_backup 0
+                read -p "  Enter..."
+                ;;
+            r|R|р|Р)
+                if [ ${#bak_arr[@]} -eq 0 ]; then
+                    echo -e "  ${YELLOW}Нет бэкапов для восстановления${NC}"
+                    read -p "  Enter..."; continue
+                fi
+                echo -ne "\n  Номер бэкапа для восстановления: "
+                read -r ch2
+                [[ "$ch2" =~ ^[0-9]+$ ]] && (( ch2 >= 1 && ch2 <= ${#bak_arr[@]} )) || continue
+                local chosen="${bak_arr[$((ch2-1))]}"
+                echo ""
+                if [[ "$chosen" == *.tar.gz ]]; then
+                    _backup_restore "$chosen"
+                else
+                    # Старый формат — одиночный файл
+                    read -p "  Восстановить $(basename "$chosen")? (y/n): " c
+                    [[ "$c" != "y" ]] && continue
+                    if [[ "$chosen" == *"x-ui.db"* ]]; then
+                        cp "$chosen" /etc/x-ui/x-ui.db
+                        systemctl restart x-ui > /dev/null 2>&1
+                        echo -e "  ${GREEN}✓ x-ui.db восстановлен${NC}"
+                    elif [[ "$chosen" == *"config.json"* ]]; then
+                        cp "$chosen" /usr/local/x-ui/bin/config.json 2>/dev/null
+                        systemctl restart x-ui > /dev/null 2>&1
+                        echo -e "  ${GREEN}✓ config.json восстановлен${NC}"
+                    fi
+                    log_action "ROLLBACK: $chosen"
+                fi
+                read -p "  Enter..."
+                ;;
+            d|D|д|Д)
+                echo ""
+                local total=${#bak_arr[@]}
+                if [ "$total" -le 5 ]; then
+                    echo -e "  ${YELLOW}Бэкапов ${total} — удалять нечего (порог: 5)${NC}"
+                else
+                    local to_del=$(( total - 5 ))
+                    echo -ne "  Удалить ${to_del} старых бэкапов? (y/n): "
+                    read -r c
+                    if [[ "$c" == "y" ]]; then
+                        local cnt=0
+                        for (( idx=5; idx<total; idx++ )); do
+                            rm -f "${bak_arr[$idx]}" && (( cnt++ ))
+                        done
+                        echo -e "  ${GREEN}Удалено: ${cnt}${NC}"
+                        log_action "BACKUP CLEANUP: удалено ${cnt} старых архивов"
+                    fi
+                fi
+                read -p "  Enter..."
+                ;;
+            0|"") return ;;
+        esac
+    done
 }
 
 _check_conflicts() {
@@ -2750,6 +3001,9 @@ PersistentKeepalive = 25"
     echo "$client_conf" > "${CONF_DIR}/awg_clients/${bare}.conf"
     chmod 600 "${CONF_DIR}/awg_clients/${bare}.conf"
 
+    # Полный бэкап перед изменением
+    _backup_auto
+
     # Бэкап clientsTable ПЕРЕД изменением
     docker exec "$AWG_CONTAINER" sh -c \
         "cp /opt/amnezia/awg/clientsTable /opt/amnezia/awg/clientsTable.bak.\$(date +%s) 2>/dev/null || true"
@@ -2856,6 +3110,10 @@ _awg_del_peer() {
 
     read -p "$(echo -e "${RED}Удалить ${del_name:-$del_ip}? (y/n): ${NC}")" c
     [ "$c" != "y" ] && return
+
+    # Полный бэкап перед удалением
+    echo -ne "  ${YELLOW}Создаю бэкап...${NC} "
+    _backup_auto && echo -e "${GREEN}✓${NC}" || echo -e "${YELLOW}(пропущен)${NC}"
 
     # Найти pubkey через awk (надёжно)
     local del_pubkey
@@ -3603,6 +3861,16 @@ run_startup() {
 # ═══════════════════════════════════════════════════════════════
 
 case "${1:-}" in
+    backup)
+        check_root
+        init_config
+        detect_interface
+        get_my_ip
+        detect_mode
+        echo -e "\n${CYAN}━━━ Создание бэкапа ━━━${NC}\n"
+        result=$(do_backup 0)
+        [ -n "$result" ] && echo -e "\n  Путь: ${CYAN}${result}${NC}" || exit 1
+        ;;
     update|upgrade)
         check_root
         init_config
