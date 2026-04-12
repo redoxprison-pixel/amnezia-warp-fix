@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.24"
+VERSION="5.25"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2935,7 +2935,9 @@ system_menu() {
         echo -e "  ${YELLOW}[3]${NC}  Перезапустить x-ui"
         echo -e "  ${YELLOW}[4]${NC}  Перезапустить WARP"
         echo -e "  ${YELLOW}[5]${NC}  Обновить скрипт"
+        echo -e "  ${YELLOW}[9]${NC}  Установить сервер"
         echo -e "  ${RED}[6]${NC}  Полное удаление"
+        echo -e "  ${YELLOW}[7]${NC}  Диагностика зависимостей"
         echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -2954,6 +2956,8 @@ system_menu() {
                 sleep 3; _3xui_warp_running && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Не подключился${NC}"
                 read -p "Enter..." ;;
             5) _self_update ;;
+            7) _check_deps_full ;;
+            9) install_wizard ;;
             6) _full_uninstall ;;
             r|R)
                 read -p "$(echo -e "${RED}Перезагрузить сервер? (y/n): ${NC}")" c
@@ -3279,6 +3283,161 @@ _backups_menu() {
             0|"") return ;;
         esac
     done
+}
+
+_check_deps_full() {
+    clear
+    echo -e "\n${CYAN}━━━ Диагностика зависимостей ━━━${NC}\n"
+
+    local ok=0 warn=0 fail=0
+    local need_fix=()
+
+    _dep_check() {
+        local name="$1" check_cmd="$2" fix_cmd="$3" fix_label="$4"
+        echo -ne "  ${WHITE}${name}:${NC} "
+        if eval "$check_cmd" &>/dev/null 2>&1; then
+            local ver; ver=$(eval "$check_cmd" 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d.]+' | head -1)
+            echo -e "${GREEN}✓${NC}${ver:+  ${ver}}"
+            (( ok++ ))
+        else
+            echo -e "${RED}✗ не найден${NC}"
+            (( fail++ ))
+            [ -n "$fix_cmd" ] && need_fix+=("${name}|${fix_cmd}|${fix_label}")
+        fi
+    }
+
+    _dep_warn() {
+        local name="$1" check_cmd="$2" note="$3"
+        echo -ne "  ${WHITE}${name}:${NC} "
+        if eval "$check_cmd" &>/dev/null 2>&1; then
+            echo -e "${GREEN}✓${NC}"
+            (( ok++ ))
+        else
+            echo -e "${YELLOW}⚠ ${note}${NC}"
+            (( warn++ ))
+        fi
+    }
+
+    echo -e "  ${CYAN}── Обязательные ──────────────────────${NC}"
+    _dep_check "curl"      "curl --version"         "apt-get install -y curl"      "установить curl"
+    _dep_check "python3"   "python3 --version"      "apt-get install -y python3"   "установить python3"
+    _dep_check "iptables"  "iptables --version"     "apt-get install -y iptables"  "установить iptables"
+    _dep_check "docker"    "docker --version"       ""                             ""
+
+    echo ""
+    echo -e "  ${CYAN}── AWG (amnezia) ─────────────────────${NC}"
+    if is_amnezia; then
+        _dep_check "wgcf"   "wgcf --version"  \
+            "arch=\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); curl -fsSL https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_\${arch} -o /usr/local/bin/wgcf && chmod +x /usr/local/bin/wgcf" \
+            "скачать wgcf"
+        _dep_warn "python3-yaml" "python3 -c 'import yaml'" "нужен для управления пользователями (apt-get install -y python3-yaml)"
+        _dep_warn "qrencode"  "command -v qrencode"  "нужен для QR-кодов (apt-get install -y qrencode)"
+        # Контейнер
+        echo -ne "  ${WHITE}AWG контейнер:${NC} "
+        if [ -n "$AWG_CONTAINER" ] && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${AWG_CONTAINER}$"; then
+            echo -e "${GREEN}✓ ${AWG_CONTAINER}${NC}"
+            (( ok++ ))
+        else
+            echo -e "${RED}✗ не запущен${NC}"
+            (( fail++ ))
+        fi
+    else
+        echo -e "  ${WHITE}(режим не amnezia — пропуск)${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}── 3X-UI ─────────────────────────────${NC}"
+    if is_3xui; then
+        echo -ne "  ${WHITE}x-ui сервис:${NC} "
+        systemctl is-active x-ui &>/dev/null 2>&1 && \
+            echo -e "${GREEN}✓ активен${NC}" && (( ok++ )) || \
+            { echo -e "${RED}✗ не запущен${NC}"; (( fail++ )); }
+        echo -ne "  ${WHITE}x-ui.db:${NC} "
+        [ -f /etc/x-ui/x-ui.db ] && \
+            echo -e "${GREEN}✓${NC}  $(du -sh /etc/x-ui/x-ui.db 2>/dev/null | cut -f1)" && (( ok++ )) || \
+            { echo -e "${RED}✗ не найден${NC}"; (( fail++ )); }
+        _dep_warn "sqlite3" "command -v sqlite3" "нужен для некоторых операций (apt-get install -y sqlite3)"
+    else
+        echo -e "  ${WHITE}(режим не 3xui — пропуск)${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}── Инструменты ───────────────────────${NC}"
+    echo -ne "  ${WHITE}RealiTLScanner:${NC} "
+    if [ -f /usr/local/bin/RealiTLScanner ]; then
+        echo -e "${GREEN}✓${NC}"
+        (( ok++ ))
+    else
+        echo -e "${YELLOW}⚠ не установлен${NC}  (скачивается при первом использовании)"
+        (( warn++ ))
+    fi
+
+    _dep_warn "openssl"   "command -v openssl"  "нужен для сертификатов (apt-get install -y openssl)"
+    _dep_warn "wireguard" "command -v wg-quick" "нужен для WARP (apt-get install -y wireguard-tools)"
+    _dep_warn "ufw"       "command -v ufw"      "опционально (apt-get install -y ufw)"
+
+    echo ""
+    echo -e "  ${CYAN}── WARP ──────────────────────────────${NC}"
+    if is_amnezia; then
+        echo -ne "  ${WHITE}WARP в AWG:${NC} "
+        _awg_warp_running 2>/dev/null && \
+            echo -e "${GREEN}✓ активен${NC}" && (( ok++ )) || \
+            echo -e "${YELLOW}⚠ не настроен${NC}" && (( warn++ )) || true
+    fi
+    if is_3xui; then
+        echo -ne "  ${WHITE}warp-cli:${NC} "
+        command -v warp-cli &>/dev/null && \
+            { _3xui_warp_running && echo -e "${GREEN}✓ подключён${NC}" || echo -e "${YELLOW}⚠ установлен, не подключён${NC}"; } && \
+            (( ok++ )) || { echo -e "${YELLOW}⚠ не установлен${NC}"; (( warn++ )); }
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}── Сеть ──────────────────────────────${NC}"
+    echo -ne "  ${WHITE}Внешний IP:${NC} "
+    [ -n "$MY_IP" ] && echo -e "${GREEN}${MY_IP}${NC}" && (( ok++ )) || \
+        { echo -e "${RED}✗ не определён${NC}"; (( fail++ )); }
+
+    echo -ne "  ${WHITE}IP forwarding:${NC} "
+    [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] && \
+        echo -e "${GREEN}✓${NC}" && (( ok++ )) || \
+        echo -e "${YELLOW}⚠ выключен${NC}" && (( warn++ )) || true
+
+    # Итог
+    echo ""
+    echo -e "  ${MAGENTA}══════════════════════════════════════${NC}"
+    echo -e "  ${GREEN}✓ OK: ${ok}${NC}  ${YELLOW}⚠ Warn: ${warn}${NC}  ${RED}✗ Fail: ${fail}${NC}"
+
+    # Автофикс
+    if [ ${#need_fix[@]} -gt 0 ]; then
+        echo ""
+        echo -e "  ${YELLOW}Можно исправить автоматически:${NC}"
+        local i=1
+        for item in "${need_fix[@]}"; do
+            local nm="${item%%|*}" lb="${item##*|}"
+            echo -e "  ${YELLOW}[$i]${NC}  ${nm}: ${lb}"
+            (( i++ ))
+        done
+        echo -e "  ${YELLOW}[a]${NC}  Исправить всё"
+        echo ""
+        read -p "  Выбор (Enter = пропустить): " fix_ch
+        if [[ "$fix_ch" == "a" || "$fix_ch" == "A" ]]; then
+            for item in "${need_fix[@]}"; do
+                local nm="${item%%|*}" cmd; cmd=$(echo "$item" | cut -d'|' -f2)
+                echo -ne "  Установка ${nm}... "
+                export DEBIAN_FRONTEND=noninteractive
+                eval "$cmd" > /dev/null 2>&1 && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+            done
+        elif [[ "$fix_ch" =~ ^[0-9]+$ ]] && (( fix_ch >= 1 && fix_ch <= ${#need_fix[@]} )); then
+            local item="${need_fix[$((fix_ch-1))]}"
+            local nm="${item%%|*}" cmd; cmd=$(echo "$item" | cut -d'|' -f2)
+            echo -ne "  Установка ${nm}... "
+            export DEBIAN_FRONTEND=noninteractive
+            eval "$cmd" > /dev/null 2>&1 && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+        fi
+    fi
+
+    echo ""
+    read -p "  Enter..."
 }
 
 _check_conflicts() {
@@ -4686,7 +4845,6 @@ show_menu() {
         echo -e "  7)  Серверы, скорость, тесты"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e "  8)  Система и управление"
-        echo -e "  9)  Установить сервер"
         # h) Hysteria2 скрыт
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
@@ -4708,7 +4866,6 @@ show_menu() {
             6) iptables_menu ;;
             7) tools_menu ;;
             8) system_menu ;;
-            9) install_wizard ;;
             # h|H|р|Р) is_hysteria2 && hysteria2_menu ;;
             0)
                 clear; exit 0 ;;
