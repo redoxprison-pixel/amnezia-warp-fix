@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.25"
+VERSION="5.27"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2904,10 +2904,362 @@ install_wizard() {
     done
 }
 
+# ═══════════════════════════════════════════════════════════════
+#  ДОМЕНЫ И SSL
+# ═══════════════════════════════════════════════════════════════
+
+# Определяет текущий домен сервера (для шапки system_menu)
+_domain_detect_short() {
+    # 1. cdn-one.org (x-ui-pro автодомен по IP)
+    local cdn_one_domain
+    cdn_one_domain=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | grep 'cdn-one\.org' | head -1)
+    if [ -n "$cdn_one_domain" ]; then
+        local exp days_left
+        exp=$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/${cdn_one_domain}/cert.pem" 2>/dev/null | cut -d= -f2)
+        days_left=$(( ( $(date -d "$exp" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+        if [ "$days_left" -gt 30 ]; then
+            echo -e "${GREEN}${cdn_one_domain}${NC}  ${WHITE}(x-ui-pro, SSL, ${days_left}д)${NC}"
+        elif [ "$days_left" -gt 0 ]; then
+            echo -e "${YELLOW}${cdn_one_domain}${NC}  ${WHITE}(x-ui-pro, SSL, ${days_left}д — скоро истекает)${NC}"
+        else
+            echo -e "${RED}${cdn_one_domain}${NC}  ${WHITE}(x-ui-pro, SSL истёк!)${NC}"
+        fi
+        return
+    fi
+
+    # 2. Let's Encrypt (любой другой домен)
+    local le_domain
+    le_domain=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1)
+    if [ -n "$le_domain" ]; then
+        local exp days_left
+        exp=$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/${le_domain}/cert.pem" 2>/dev/null | cut -d= -f2)
+        days_left=$(( ( $(date -d "$exp" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+        [ "$days_left" -gt 30 ] &&             echo -e "${GREEN}${le_domain}${NC}  ${WHITE}(LE SSL, ${days_left}д)${NC}" ||             echo -e "${YELLOW}${le_domain}${NC}  ${WHITE}(LE SSL, ${days_left}д — скоро истекает)${NC}"
+        return
+    fi
+
+    # 3. nginx конфиги (без SSL)
+    local nginx_domain
+    nginx_domain=$(grep -rh 'server_name' /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null |         grep -v '#\|localhost\|_\|default' | grep -oP 'server_name\s+\K\S+' |         grep '\.' | grep -v 'cdn-one' | head -1)
+    [ -n "$nginx_domain" ] && { echo -e "${YELLOW}${nginx_domain}${NC}  ${WHITE}(nginx, без SSL)${NC}"; return; }
+
+    # 4. x-ui конфиг
+    local xui_domain
+    xui_domain=$(grep -oP '"domain":\s*"\K[^"]+' /usr/local/x-ui/bin/config.json 2>/dev/null | head -1)
+    [ -n "$xui_domain" ] && { echo -e "${YELLOW}${xui_domain}${NC}  ${WHITE}(x-ui конфиг)${NC}"; return; }
+
+    echo -e "${YELLOW}не настроен${NC}"
+}
+
+# Полное определение состояния домена
+_domain_detect_full() {
+    echo -e "\n${CYAN}━━━ Анализ домена ━━━${NC}\n"
+
+    # x-ui-pro (cdn-one.org автодомен)
+    local xui_pro_domain
+    xui_pro_domain=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | grep 'cdn-one\.org' | head -1)
+    if [ -n "$xui_pro_domain" ]; then
+        echo -e "  ${CYAN}Схема: x-ui-pro (cdn-one.org)${NC}"
+        echo -e "  ${WHITE}Домен панели:${NC}   ${GREEN}https://${xui_pro_domain}${NC}"
+        local reality_d
+        reality_d=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | grep 'cdn-one\.org' | grep -- '-' | head -1)
+        [ -n "$reality_d" ] && echo -e "  ${WHITE}Домен Reality:${NC}  ${GREEN}${reality_d}${NC}"
+        echo -e "  ${WHITE}Привязка:${NC}       ${WHITE}автоматически к IP ${MY_IP}${NC}"
+        echo -e "  ${GREEN}✓ Домен настроен через x-ui-pro — менять ничего не нужно${NC}"
+        echo -e "  ${WHITE}При смене IP домен обновится автоматически (${MY_IP}.cdn-one.org)${NC}"
+        echo ""
+    fi
+
+    # Let's Encrypt
+    echo -e "  ${WHITE}Let's Encrypt сертификаты:${NC}"
+    if [ -d /etc/letsencrypt/live ]; then
+        local found=0
+        for domain_dir in /etc/letsencrypt/live/*/; do
+            local d; d=$(basename "$domain_dir")
+            [[ "$d" == "README" ]] && continue
+            local cert="${domain_dir}cert.pem"
+            if [ -f "$cert" ]; then
+                local exp days_left
+                exp=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)
+                days_left=$(( ( $(date -d "$exp" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+                if [ "$days_left" -gt 30 ]; then
+                    echo -e "    ${GREEN}✓ ${d}${NC}  истекает через ${days_left} дней"
+                elif [ "$days_left" -gt 0 ]; then
+                    echo -e "    ${YELLOW}⚠ ${d}${NC}  истекает через ${days_left} дней — нужно продлить"
+                else
+                    echo -e "    ${RED}✗ ${d}${NC}  сертификат истёк!"
+                fi
+                # Проверяем резолвинг
+                local resolved_ip
+                resolved_ip=$(dig +short "$d" 2>/dev/null | tail -1 || nslookup "$d" 2>/dev/null | grep 'Address:' | tail -1 | awk '{print $2}')
+                if [ "$resolved_ip" = "$MY_IP" ]; then
+                    echo -e "    ${GREEN}✓ DNS резолвится в ${MY_IP}${NC}"
+                elif [ -n "$resolved_ip" ]; then
+                    echo -e "    ${YELLOW}⚠ DNS: ${resolved_ip} (сервер: ${MY_IP})${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ DNS не резолвится${NC}"
+                fi
+                (( found++ ))
+            fi
+        done
+        [ "$found" -eq 0 ] && echo -e "    ${YELLOW}сертификатов нет${NC}"
+    else
+        echo -e "    ${YELLOW}Let's Encrypt не установлен${NC}"
+    fi
+
+    # nginx
+    echo -e "\n  ${WHITE}nginx:${NC}"
+    if command -v nginx &>/dev/null; then
+        local nginx_status
+        nginx_status=$(systemctl is-active nginx 2>/dev/null)
+        echo -e "    Статус: $([ "$nginx_status" = "active" ] && echo -e "${GREEN}● запущен${NC}" || echo -e "${YELLOW}● остановлен${NC}")"
+        local sites
+        sites=$(ls /etc/nginx/sites-enabled/ 2>/dev/null | grep -v default)
+        [ -n "$sites" ] && echo -e "    Сайты: ${CYAN}${sites}${NC}" || echo -e "    Сайтов нет"
+    else
+        echo -e "    ${YELLOW}не установлен${NC}"
+    fi
+
+    # certbot
+    echo -e "\n  ${WHITE}certbot:${NC}"
+    if command -v certbot &>/dev/null; then
+        echo -e "    ${GREEN}✓ установлен${NC}  $(certbot --version 2>&1 | head -1)"
+    else
+        echo -e "    ${YELLOW}не установлен${NC}"
+    fi
+}
+
+# Устанавливает SSL сертификат через Let's Encrypt
+_domain_setup_ssl() {
+    local domain="$1"
+
+    echo -e "\n${CYAN}━━━ Настройка SSL для ${domain} ━━━${NC}\n"
+
+    # Проверяем резолвинг
+    echo -ne "  ${CYAN}→ Проверка DNS...${NC} "
+    local resolved_ip
+    resolved_ip=$(dig +short "$domain" 2>/dev/null | tail -1 || \
+        nslookup "$domain" 2>/dev/null | grep 'Address:' | tail -1 | awk '{print $2}')
+    if [ "$resolved_ip" != "$MY_IP" ]; then
+        echo -e "${RED}✗${NC}"
+        echo -e "  ${RED}Домен ${domain} резолвится в ${resolved_ip:-???}, а не в ${MY_IP}${NC}"
+        echo -e "  ${WHITE}Сначала настройте DNS: A-запись ${domain} → ${MY_IP}${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ ${resolved_ip}${NC}"
+
+    # Устанавливаем certbot если нет
+    if ! command -v certbot &>/dev/null; then
+        echo -e "  ${CYAN}→ Установка certbot...${NC}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get install -y certbot python3-certbot-nginx > /dev/null 2>&1 || \
+        apt-get install -y certbot > /dev/null 2>&1
+    fi
+
+    # Устанавливаем nginx если нет
+    if ! command -v nginx &>/dev/null; then
+        echo -e "  ${CYAN}→ Установка nginx...${NC}"
+        apt-get install -y nginx > /dev/null 2>&1
+        systemctl enable nginx > /dev/null 2>&1
+    fi
+
+    # Базовый nginx конфиг для верификации
+    local nginx_conf="/etc/nginx/sites-available/${domain}"
+    cat > "$nginx_conf" << EOF
+server {
+    listen 80;
+    server_name ${domain};
+    root /var/www/html;
+    index index.html;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+EOF
+    ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/${domain}" 2>/dev/null
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null
+    nginx -t > /dev/null 2>&1 && systemctl reload nginx > /dev/null 2>&1
+
+    # Получаем сертификат
+    echo -ne "  ${CYAN}→ Получение сертификата Let's Encrypt...${NC} "
+    local email="${1}@govpn.local"
+    if certbot certonly --nginx -d "$domain" \
+        --non-interactive --agree-tos \
+        --email "admin@${domain}" \
+        --redirect 2>/dev/null; then
+        echo -e "${GREEN}✓${NC}"
+    else
+        # Fallback: standalone (останавливаем nginx временно)
+        echo -e "${YELLOW}nginx метод не сработал, пробую standalone...${NC}"
+        systemctl stop nginx 2>/dev/null
+        if certbot certonly --standalone -d "$domain" \
+            --non-interactive --agree-tos \
+            --email "admin@${domain}" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC}"
+            systemctl start nginx 2>/dev/null
+        else
+            echo -e "${RED}✗${NC}"
+            systemctl start nginx 2>/dev/null
+            echo -e "  ${RED}Не удалось получить сертификат.${NC}"
+            echo -e "  ${WHITE}Убедитесь что порт 80 открыт и домен резолвится в ${MY_IP}${NC}"
+            return 1
+        fi
+    fi
+
+    # Обновляем nginx с SSL
+    cat > "$nginx_conf" << EOF
+server {
+    listen 80;
+    server_name ${domain};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${domain};
+
+    ssl_certificate     /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
+    # Заглушка (красивая страница вместо пустого сервера)
+    root /var/www/${domain};
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+
+    # Создаём заглушку
+    mkdir -p "/var/www/${domain}"
+    _domain_create_stub "/var/www/${domain}" "$domain"
+
+    nginx -t > /dev/null 2>&1 && systemctl reload nginx > /dev/null 2>&1
+
+    # Автообновление сертификата
+    if ! crontab -l 2>/dev/null | grep -q 'certbot renew'; then
+        (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+        echo -e "  ${GREEN}✓ Автообновление сертификата настроено (ежедневно в 3:00)${NC}"
+    fi
+
+    echo -e "\n  ${GREEN}✅ SSL настроен!${NC}"
+    echo -e "  ${WHITE}Домен:${NC} ${CYAN}https://${domain}${NC}"
+    log_action "DOMAIN: SSL настроен для ${domain}"
+}
+
+# Создаёт красивую заглушку
+_domain_create_stub() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << EOF
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${domain}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0f0f10; color: #e5e5e7; min-height: 100vh;
+         display: flex; align-items: center; justify-content: center; }
+  .card { background: #1c1c1e; border: 1px solid #2c2c2e; border-radius: 16px;
+          padding: 48px; max-width: 420px; text-align: center; }
+  .icon { font-size: 48px; margin-bottom: 24px; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+  p  { color: #8e8e93; font-size: 15px; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#128274;</div>
+    <h1>${domain}</h1>
+    <p>Сервер работает в штатном режиме.</p>
+  </div>
+</body>
+</html>
+EOF
+}
+
+# Главное меню доменов
+domain_menu() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Домен и SSL ━━━${NC}\n"
+        _domain_detect_full
+        echo ""
+
+        # Адаптивные пункты
+        local has_xui_pro=0
+        ls /etc/letsencrypt/live/ 2>/dev/null | grep -q 'cdn-one\.org' && has_xui_pro=1
+        local has_cert=0
+        [ -n "$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README)" ] && has_cert=1
+
+        [ "$has_xui_pro" -eq 0 ] && echo -e "  ${YELLOW}[1]${NC}  Настроить домен + SSL (Let's Encrypt)"
+        [ "$has_cert" -eq 1 ]    && echo -e "  ${YELLOW}[2]${NC}  Сменить / добавить домен"
+        [ "$has_cert" -eq 1 ]    && echo -e "  ${YELLOW}[3]${NC}  Продлить сертификат вручную"
+        [ "$has_cert" -eq 1 ]    && echo -e "  ${YELLOW}[4]${NC}  Обновить заглушку"
+        [ "$has_xui_pro" -eq 1 ] && echo -e "  ${WHITE}[i]${NC}  Домен cdn-one.org управляется x-ui-pro автоматически"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        case "$ch" in
+            1|2)
+                echo -ne "\n  Введите домен (например vpn.example.com): "
+                read -r domain
+                [ -z "$domain" ] && continue
+                # Предупреждение о клиентах
+                local old_domain
+                old_domain=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1)
+                if [ -n "$old_domain" ]; then
+                    echo -e "\n  ${YELLOW}Внимание!${NC}"
+                    echo -e "  ${WHITE}Текущий домен: ${old_domain}${NC}"
+                    echo -e "  ${WHITE}• Клиенты AWG — подключаются по IP, смена домена их НЕ затронет${NC}"
+                    echo -e "  ${WHITE}• Клиенты 3X-UI на IP — тоже НЕ затронет${NC}"
+                    echo -e "  ${RED}• Клиенты 3X-UI с доменом в ссылке — потеряют доступ до обновления ключей${NC}"
+                    echo -ne "  Продолжить? (y/n): "; read -r c
+                    [[ "$c" != "y" ]] && continue
+                fi
+                _domain_setup_ssl "$domain"
+                read -p "  Enter..."
+                ;;
+            3)
+                echo -e "\n  ${CYAN}→ Принудительное продление...${NC}"
+                certbot renew --force-renewal --quiet 2>&1 | tail -5
+                systemctl reload nginx 2>/dev/null
+                echo -e "  ${GREEN}✓ Готово${NC}"
+                read -p "  Enter..."
+                ;;
+            4)
+                local domain_dir
+                domain_dir=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1)
+                if [ -n "$domain_dir" ]; then
+                    _domain_create_stub "/var/www/${domain_dir}" "$domain_dir"
+                    echo -e "  ${GREEN}✓ Заглушка обновлена${NC}"
+                else
+                    echo -e "  ${YELLOW}Домен не найден${NC}"
+                fi
+                read -p "  Enter..."
+                ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+
 system_menu() {
     while true; do
         clear
-        echo -e "\n${CYAN}━━━ Система ━━━${NC}\n"
+        echo -e "\n${CYAN}━━━ Система и управление ━━━${NC}\n"
 
         # Системная информация
         local cpu_count load_avg mem_info disk_info uptime_str
@@ -2921,53 +3273,84 @@ system_menu() {
         echo -e "  ${WHITE}CPU:${NC}     ${GREEN}${cpu_count} ядер${NC}  Load: ${GREEN}${load_avg}${NC}"
         echo -e "  ${WHITE}RAM:${NC}     ${GREEN}${mem_info}${NC}"
         echo -e "  ${WHITE}Диск /:${NC} ${GREEN}${disk_info}${NC}"
-        echo ""
 
-        # Бэкапы
-        local bak_count; bak_count=$(ls "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null | wc -l)
-        local bak_last=""
-        [ "$bak_count" -gt 0 ] && bak_last=$(ls -t "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null | head -1 | xargs basename 2>/dev/null | grep -oE '[0-9]{8}-[0-9]{6}' | sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)-\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1-\2-\3 \4:\5/')
+        # Бэкапы — кол-во и дата последнего
+        local bak_count bak_last=""
+        bak_count=$(ls "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null | wc -l)
+        [ "$bak_count" -gt 0 ] && bak_last=$(ls -t "${BACKUP_DIR}"/govpn-backup-*.tar.gz 2>/dev/null | head -1 | \
+            xargs basename 2>/dev/null | grep -oE '[0-9]{8}-[0-9]{6}' | \
+            sed 's/\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)-\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1-\2-\3 \4:\5/')
         echo -e "  ${WHITE}Бэкапов:${NC} ${CYAN}${bak_count}${NC}$([ -n "$bak_last" ] && echo "  последний: ${bak_last}")"
-        echo ""
 
-        echo -e "  ${YELLOW}[1]${NC}  Бэкапы и Rollback xray"
-        echo -e "  ${YELLOW}[2]${NC}  Проверка конфликтов"
-        echo -e "  ${YELLOW}[3]${NC}  Перезапустить x-ui"
-        echo -e "  ${YELLOW}[4]${NC}  Перезапустить WARP"
-        echo -e "  ${YELLOW}[5]${NC}  Обновить скрипт"
+        # Домен
+        local domain_info; domain_info=$(_domain_detect_short)
+        echo -e "  ${WHITE}Домен:${NC}   ${domain_info}"
+
+        echo ""
+        echo -e " ${CYAN}── Обслуживание ──────────────────────${NC}"
+        echo -e "  ${YELLOW}[1]${NC}  Бэкапы и восстановление"
+        echo -e "  ${YELLOW}[2]${NC}  Обновить скрипт"
+        echo -e "  ${YELLOW}[3]${NC}  Диагностика зависимостей"
+        echo -e "  ${YELLOW}[4]${NC}  Проверка конфликтов"
+        echo ""
+        echo -e " ${CYAN}── Сервисы ───────────────────────────${NC}"
+        is_3xui   && echo -e "  ${YELLOW}[5]${NC}  Перезапустить x-ui"
+        is_3xui   && echo -e "  ${YELLOW}[6]${NC}  Перезапустить WARP (3X-UI)"
+        is_amnezia && echo -e "  ${YELLOW}[7]${NC}  Перезапустить AWG контейнер"
+        echo ""
+        echo -e " ${CYAN}── Сервер ────────────────────────────${NC}"
+        echo -e "  ${YELLOW}[8]${NC}  Домен и SSL"
         echo -e "  ${YELLOW}[9]${NC}  Установить сервер"
-        echo -e "  ${RED}[6]${NC}  Полное удаление"
-        echo -e "  ${YELLOW}[7]${NC}  Диагностика зависимостей"
         echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
+        echo ""
+        echo -e " ${CYAN}── Опасная зона ──────────────────────${NC}"
+        echo -e "  ${RED}[x]${NC}  Полное удаление GoVPN"
+        echo ""
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
-        ch=$(read_choice "Выбор: ")
+
+        local ch; ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _backups_menu ;;
-            2) _check_conflicts ;;
-            3)
-                echo -e "${YELLOW}Перезапуск x-ui...${NC}"
-                systemctl restart x-ui 2>/dev/null && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Ошибка${NC}"
-                read -p "Enter..." ;;
-            4)
-                echo -e "${YELLOW}Перезапуск WARP...${NC}"
+            2) _self_update ;;
+            3) _check_deps_full ;;
+            4) _check_conflicts ;;
+            5)
+                is_3xui || continue
+                echo -ne "  ${YELLOW}Перезапуск x-ui...${NC} "
+                systemctl restart x-ui 2>/dev/null && echo -e "${GREEN}✓ OK${NC}" || echo -e "${RED}✗ Ошибка${NC}"
+                read -p "  Enter..."
+                ;;
+            6)
+                is_3xui || continue
+                echo -ne "  ${YELLOW}Перезапуск WARP...${NC} "
                 systemctl restart warp-svc 2>/dev/null
                 sleep 2; warp-cli --accept-tos connect > /dev/null 2>&1
-                sleep 3; _3xui_warp_running && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Не подключился${NC}"
-                read -p "Enter..." ;;
-            5) _self_update ;;
-            7) _check_deps_full ;;
+                sleep 3
+                _3xui_warp_running && echo -e "${GREEN}✓ подключён${NC}" || echo -e "${RED}✗ не подключился${NC}"
+                read -p "  Enter..."
+                ;;
+            7)
+                is_amnezia || continue
+                echo -ne "  ${YELLOW}Перезапуск ${AWG_CONTAINER}...${NC} "
+                docker restart "$AWG_CONTAINER" > /dev/null 2>&1 && \
+                    echo -e "${GREEN}✓ OK${NC}" || echo -e "${RED}✗ Ошибка${NC}"
+                read -p "  Enter..."
+                ;;
+            8) domain_menu ;;
             9) install_wizard ;;
-            6) _full_uninstall ;;
             r|R)
-                read -p "$(echo -e "${RED}Перезагрузить сервер? (y/n): ${NC}")" c
-                [[ "$c" == "y" ]] && reboot ;;
+                read -p "$(echo -e "  ${RED}Перезагрузить сервер? (y/n): ${NC}")" c
+                [[ "$c" == "y" ]] && reboot
+                ;;
+            x|X)
+                _full_uninstall
+                ;;
             0|"") return ;;
         esac
     done
 }
 
-# ═══════════════════════════════════════════════════════════════
 #  СИСТЕМА БЭКАПОВ
 # ═══════════════════════════════════════════════════════════════
 
