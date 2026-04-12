@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.22"
+VERSION="5.23"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2051,7 +2051,9 @@ _hy2_user_uri() {
     port=$(grep -oP '^listen: :\K[0-9]+' /etc/hysteria/config.yaml 2>/dev/null || echo "443")
     sni=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('masquerade',{}).get('proxy',{}).get('url','').replace('https://',''))" 2>/dev/null || echo "")
     obfs_pass=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('obfs',{}).get('salamander',{}).get('password',''))" 2>/dev/null || echo "")
-    local uri="hy2://${password}@${MY_IP}:${port}?security=tls&sni=${sni}&allowInsecure=true"
+    # Чистый URI без пустых параметров (insecure=1 вместо allowInsecure=true для совместимости)
+    local uri="hy2://${password}@${MY_IP}:${port}?insecure=1"
+    [ -n "$sni" ] && uri="${uri}&sni=${sni}"
     [ -n "$obfs_pass" ] && uri="${uri}&obfs=salamander&obfs-password=${obfs_pass}"
     uri="${uri}#${username}"
     echo "$uri"
@@ -2623,7 +2625,7 @@ EOF
 
     if systemctl is-active --quiet hysteria-server; then
         # Сохраняем ключ подключения
-        local hy2_key="hy2://${auth_pwd}@${MY_IP}:${port}?mport&security=tls&sni=${sni_host}&allowInsecure=true&alpn&obfs=salamander&obfs-password=${obfs_pwd}#govpn-hy2"
+                local hy2_key="hy2://${auth_pwd}@${MY_IP}:${port}?insecure=1&sni=${sni_host}&obfs=salamander&obfs-password=${obfs_pwd}#govpn-hy2"
         echo "$hy2_key" > /root/hysteria2.txt
 
         echo -e "\n  ${GREEN}✅ Hysteria2 установлен и запущен!${NC}\n"
