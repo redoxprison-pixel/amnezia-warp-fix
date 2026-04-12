@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.23"
+VERSION="5.24"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -195,11 +195,11 @@ detect_mode() {
     fi
 
     # Hysteria2 — независимо от основного режима
-    HY2_RUNNING=0
-    if systemctl is-active hysteria-server &>/dev/null 2>&1; then
-        HY2_RUNNING=1
-        MODE_LABEL="${MODE_LABEL} +Hy2"
-    fi
+    # Hysteria2 detection disabled (QUIC blocked by ISP)
+    # if systemctl is-active hysteria-server &>/dev/null 2>&1; then
+    #     HY2_RUNNING=1
+    #     MODE_LABEL="${MODE_LABEL} +Hy2"
+    # fi
 }
 
 is_3xui() { [[ "$MODE" == "3xui" || "$MODE" == "combo" ]]; }
@@ -2257,7 +2257,9 @@ hysteria2_menu() {
         echo -e "\n${CYAN}━━━ Hysteria2 ━━━${NC}\n"
         local hy2_port hy2_sni
         hy2_port=$(grep -oP '^listen: :\K[0-9]+' /etc/hysteria/config.yaml 2>/dev/null || echo "?")
-        hy2_sni=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('masquerade',{}).get('proxy',{}).get('url','?').replace('https://','')" 2>/dev/null || echo "?")
+        hy2_sni=$(python3 -c "import yaml; c=yaml.safe_load(open('/etc/hysteria/config.yaml')); print(c.get('masquerade',{}).get('proxy',{}).get('url','?').replace('https://',''))" 2>/dev/null || echo "?")
+
+        # Статус сервиса
         if systemctl is-active --quiet hysteria-server; then
             echo -e "  ${WHITE}Статус:${NC} ${GREEN}● запущен${NC}"
         else
@@ -2265,6 +2267,16 @@ hysteria2_menu() {
         fi
         echo -e "  ${WHITE}Порт:${NC}   ${CYAN}${hy2_port}/udp${NC}"
         echo -e "  ${WHITE}SNI:${NC}    ${CYAN}${hy2_sni}${NC}"
+
+        # WARP статус
+        if _hy2_warp_running; then
+            local wip; wip=$(_hy2_warp_ip)
+            echo -e "  ${WHITE}WARP:${NC}   ${GREEN}● ${wip:-подключён}${NC}"
+        else
+            echo -e "  ${WHITE}WARP:${NC}   ${YELLOW}● не настроен${NC}"
+        fi
+
+        # H-UI статус
         local hui_info
         if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^h-ui$'; then
             local hp; hp=$(docker inspect h-ui 2>/dev/null | python3 -c "import json,sys,re; c=json.load(sys.stdin); cmd=' '.join(c[0].get('Config',{}).get('Cmd',[])); m=re.search(r'-p (\d+)',cmd); print(m.group(1) if m else '8081')" 2>/dev/null || echo "8081")
@@ -2274,13 +2286,18 @@ hysteria2_menu() {
         fi
         echo -e "  ${WHITE}H-UI:${NC}   ${hui_info}"
         echo ""
+
         [ -f /root/hysteria2.txt ] && echo -e "  ${WHITE}Ключ (default):${NC}\n  ${CYAN}$(cat /root/hysteria2.txt)${NC}\n"
+
         echo -e "  ${YELLOW}[1]${NC}  QR-код (default ключ)"
         echo -e "  ${YELLOW}[2]${NC}  Управление пользователями"
         echo -e "  ${YELLOW}[3]${NC}  Установить / открыть H-UI"
-        echo -e "  ${YELLOW}[4]${NC}  Перезапустить сервис"
-        echo -e "  ${YELLOW}[5]${NC}  Лог (30 строк)"
-        echo -e "  ${YELLOW}[6]${NC}  Переустановить / изменить конфиг"
+        echo -e "  ${YELLOW}[4]${NC}  Настроить WARP"
+        echo -e "  ${YELLOW}[5]${NC}  Перезапустить сервис"
+        echo -e "  ${YELLOW}[6]${NC}  Лог (30 строк)"
+        echo -e "  ${YELLOW}[7]${NC}  Создать бэкап"
+        echo -e "  ${YELLOW}[8]${NC}  Переустановить / изменить конфиг"
+        echo -e "  ${RED}[x]${NC}  Удалить Hysteria2"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -2293,25 +2310,55 @@ hysteria2_menu() {
                 ;;
             2) _hy2_users_menu ;;
             3) _install_hui ;;
-            4)
+            4) _hy2_install_warp ;;
+            5)
                 echo -ne "  ${YELLOW}Перезапуск...${NC} "
                 systemctl restart hysteria-server; sleep 2
                 systemctl is-active --quiet hysteria-server && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
                 read -p "  Enter..."
                 ;;
-            5)
-                echo ""; journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null || echo -e "${YELLOW}journalctl недоступен${NC}"
+            6)
+                echo ""; journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null || \
+                    echo -e "${YELLOW}journalctl недоступен${NC}"
                 read -p "  Enter..."
                 ;;
-            6)
+            7)
+                echo -e "\n  ${CYAN}Создание бэкапа...${NC}"
+                do_backup 0
+                read -p "  Enter..."
+                ;;
+            8)
                 _install_hysteria2
                 systemctl is-active --quiet hysteria-server && HY2_RUNNING=1 || HY2_RUNNING=0
+                ;;
+            x|X)
+                echo -ne "\n  ${RED}Удалить Hysteria2 полностью? (y/n): ${NC}"; read -r c
+                [[ "$c" != "y" ]] && continue
+                echo -e "  ${CYAN}Создаю бэкап перед удалением...${NC}"
+                do_backup 1 > /dev/null 2>&1
+                systemctl stop hysteria-server 2>/dev/null || true
+                systemctl disable hysteria-server 2>/dev/null || true
+                systemctl stop hysteria-warp 2>/dev/null || true
+                systemctl disable hysteria-warp 2>/dev/null || true
+                wg-quick down "$HY2_WARP_IFACE" 2>/dev/null || true
+                rm -f /etc/systemd/system/hysteria-server.service
+                rm -f /etc/systemd/system/hysteria-warp.service
+                rm -f /usr/local/bin/hysteria
+                rm -rf /etc/hysteria
+                rm -f /etc/wireguard/${HY2_WARP_IFACE}.conf
+                rm -f /root/hysteria2.txt /root/hysteria2_*.txt
+                systemctl daemon-reload > /dev/null 2>&1
+                HY2_RUNNING=0
+                log_action "UNINSTALL: Hysteria2"
+                echo -e "  ${GREEN}✓ Hysteria2 удалён${NC}"
+                read -p "  Enter..."
+                return
                 ;;
             0|"") return ;;
         esac
     done
 }
-# ═══════════════════════════════════════════════════════════════
+
 #  МАСТЕР УСТАНОВКИ СЕРВЕРОВ
 # ═══════════════════════════════════════════════════════════════
 
@@ -2661,13 +2708,173 @@ EOF
 }
 
 # Главное меню установщика
+# ═══════════════════════════════════════════════════════════════
+#  HYSTERIA2 — WARP ИНТЕГРАЦИЯ (хостовой уровень)
+# ═══════════════════════════════════════════════════════════════
+
+HY2_WARP_CONF="/etc/hysteria/warp.conf"
+HY2_WARP_IFACE="warp-hy2"
+
+_hy2_install_wgcf() {
+    if command -v wgcf &>/dev/null; then
+        echo -e "  ${GREEN}✓ wgcf уже установлен${NC}  $(wgcf --version 2>/dev/null)"
+        return 0
+    fi
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *) echo -e "  ${RED}✗ Архитектура не поддерживается${NC}"; return 1 ;;
+    esac
+    echo -ne "  ${CYAN}→ Загрузка wgcf...${NC} "
+    local url="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/wgcf_${WGCF_VER}_linux_${arch}"
+    if curl -fsSL --max-time 30 "$url" -o /usr/local/bin/wgcf 2>/dev/null && [ -s /usr/local/bin/wgcf ]; then
+        chmod +x /usr/local/bin/wgcf
+        echo -e "${GREEN}✓${NC}"; return 0
+    else
+        echo -e "${RED}✗${NC}"; return 1
+    fi
+}
+
+_hy2_create_warp_conf() {
+    mkdir -p /etc/hysteria
+    cd /tmp || return 1
+    rm -f wgcf-account.toml wgcf-profile.conf
+    echo -ne "  ${CYAN}→ Регистрация WARP аккаунта...${NC} "
+    yes | wgcf register --accept-tos > /dev/null 2>&1
+    [ -f /tmp/wgcf-account.toml ] || { echo -e "${RED}✗${NC}"; return 1; }
+    yes | wgcf generate > /dev/null 2>&1
+    [ -f /tmp/wgcf-profile.conf ] || { echo -e "${RED}✗${NC}"; return 1; }
+    echo -e "${GREEN}✓${NC}"
+    cp /tmp/wgcf-profile.conf "$HY2_WARP_CONF"
+    sed -i "s|^\(Address = [0-9.\/]*\),.*|\1|g" "$HY2_WARP_CONF"
+    sed -i "s|AllowedIPs = 0\.0\.0\.0/0, ::/0|AllowedIPs = 0.0.0.0/0|g" "$HY2_WARP_CONF"
+    sed -i "s|AllowedIPs = ::/0.*|AllowedIPs = 0.0.0.0/0|g" "$HY2_WARP_CONF"
+    sed -i "s|^DNS = .*|# DNS disabled|g" "$HY2_WARP_CONF"
+    sed -i "/^\[Interface\]/a Table = off" "$HY2_WARP_CONF"
+    chmod 600 "$HY2_WARP_CONF"
+    mv /tmp/wgcf-account.toml /etc/hysteria/ 2>/dev/null || true
+    return 0
+}
+
+_hy2_warp_up() {
+    command -v wg-quick &>/dev/null || apt-get install -y wireguard-tools > /dev/null 2>&1
+    cp "$HY2_WARP_CONF" "/etc/wireguard/${HY2_WARP_IFACE}.conf" 2>/dev/null
+    wg-quick down "$HY2_WARP_IFACE" > /dev/null 2>&1 || true
+    echo -ne "  ${CYAN}→ Поднимаю WARP туннель...${NC} "
+    if wg-quick up "$HY2_WARP_IFACE" > /dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC}"; return 0
+    else
+        echo -e "${RED}✗${NC}"; return 1
+    fi
+}
+
+_hy2_apply_warp_routing() {
+    ip route add default dev "$HY2_WARP_IFACE" table 101 2>/dev/null || \
+        ip route replace default dev "$HY2_WARP_IFACE" table 101 2>/dev/null || true
+    ip rule del fwmark 0x65 table 101 2>/dev/null || true
+    ip rule add fwmark 0x65 table 101 priority 101
+    echo -e "  ${GREEN}✓ Маршрутизация настроена${NC}  (fwmark 0x65 → ${HY2_WARP_IFACE})"
+    # Добавляем outbound в конфиг Hysteria2
+    python3 /tmp/hy2_warp_outbound.py 2>/dev/null || true
+}
+
+_hy2_warp_running() {
+    ip link show "$HY2_WARP_IFACE" &>/dev/null 2>&1
+}
+
+_hy2_warp_ip() {
+    curl -s --interface "$HY2_WARP_IFACE" --connect-timeout 5 https://api4.ipify.org 2>/dev/null | tr -d '[:space:]'
+}
+
+_hy2_warp_persist() {
+    cat > /etc/systemd/system/hysteria-warp.service << EOF
+[Unit]
+Description=WARP tunnel for Hysteria2
+Before=hysteria-server.service
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wg-quick up ${HY2_WARP_IFACE}
+ExecStop=/usr/bin/wg-quick down ${HY2_WARP_IFACE}
+ExecStartPost=/bin/sh -c 'ip route add default dev ${HY2_WARP_IFACE} table 101 2>/dev/null || true; ip rule add fwmark 0x65 table 101 priority 101 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl enable hysteria-warp > /dev/null 2>&1
+    systemctl start hysteria-warp > /dev/null 2>&1
+}
+
+_hy2_warp_write_helper() {
+    cat > /tmp/hy2_warp_outbound.py << 'PYEOF'
+import yaml, sys
+p = '/etc/hysteria/config.yaml'
+try:
+    with open(p) as f:
+        cfg = yaml.safe_load(f)
+    outbounds = cfg.get('outbounds', [])
+    if not any(o.get('name') == 'warp' for o in outbounds):
+        outbounds.insert(0, {'name': 'warp', 'type': 'direct', 'direct': {'bindDevice': 'warp-hy2'}})
+        cfg['outbounds'] = outbounds
+    with open(p, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    print("ok")
+except Exception as e:
+    print(f"err:{e}", file=sys.stderr); sys.exit(1)
+PYEOF
+}
+
+_hy2_install_warp() {
+    clear
+    echo -e "\n${CYAN}━━━ WARP для Hysteria2 ━━━${NC}\n"
+    if _hy2_warp_running; then
+        local wip; wip=$(_hy2_warp_ip)
+        echo -e "  ${GREEN}✓ WARP уже активен${NC}  IP: ${GREEN}${wip:-подключён}${NC}"
+        echo -ne "\n  Переустановить? (y/n): "; read -r c
+        [[ "$c" != "y" ]] && return
+        systemctl stop hysteria-warp 2>/dev/null || true
+        wg-quick down "$HY2_WARP_IFACE" > /dev/null 2>&1 || true
+        ip rule del fwmark 0x65 table 101 2>/dev/null || true
+        ip route flush table 101 2>/dev/null || true
+    fi
+    _hy2_install_wgcf || { read -p "  Enter..."; return 1; }
+    _hy2_create_warp_conf || { read -p "  Enter..."; return 1; }
+    _hy2_warp_up || { read -p "  Enter..."; return 1; }
+    echo -ne "  ${CYAN}→ Маршрутизация...${NC} "
+    _hy2_warp_write_helper
+    _hy2_apply_warp_routing
+    echo -ne "  ${CYAN}→ Проверка WARP IP...${NC} "
+    sleep 2
+    local wip; wip=$(_hy2_warp_ip)
+    if [ -n "$wip" ] && [ "$wip" != "$MY_IP" ]; then
+        echo -e "${GREEN}✓  ${wip}${NC}"
+    else
+        echo -e "${YELLOW}? ${wip:-не получен}${NC}"
+    fi
+    echo -ne "  ${CYAN}→ Автостарт...${NC} "
+    _hy2_warp_persist && echo -e "${GREEN}✓${NC}"
+    echo -ne "  ${CYAN}→ Перезапуск Hysteria2...${NC} "
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl restart hysteria-server > /dev/null 2>&1
+    sleep 2
+    systemctl is-active --quiet hysteria-server && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
+    log_action "HY2: WARP установлен, iface=${HY2_WARP_IFACE}, IP=${wip}"
+    echo -e "\n  ${GREEN}✅ WARP для Hysteria2 активен!${NC}"
+    echo -e "  ${WHITE}IP через WARP:${NC} ${CYAN}${wip}${NC}"
+    read -p "  Enter..."
+}
+
 install_wizard() {
     while true; do
         clear
         echo -e "\n${CYAN}━━━ Установка сервера ━━━${NC}\n"
 
-        # Показываем что уже установлено
-        local status_awg="" status_xui="" status_hy2=""
+        local status_awg="" status_xui=""
 
         if command -v docker &>/dev/null; then
             local awg_ct; awg_ct=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i 'amnezia-awg' | head -1)
@@ -2681,27 +2888,17 @@ install_wizard() {
             status_xui=" ${GREEN}● запущен${NC}" || \
             status_xui=" ${YELLOW}● не установлен${NC}"
 
-        systemctl is-active hysteria-server &>/dev/null 2>&1 && \
-            status_hy2=" ${GREEN}● запущен${NC}" || \
-            status_hy2=" ${YELLOW}● не установлен${NC}"
+        # Hysteria2 статус скрыт
 
         echo -e "  ${YELLOW}[1]${NC}  AmneziaWG (Docker)     ${status_awg}"
         echo -e "  ${YELLOW}[2]${NC}  3X-UI / 3X-UI Pro      ${status_xui}"
-        echo -e "  ${YELLOW}[3]${NC}  Hysteria2              ${status_hy2}"
-        echo -e "  ${YELLOW}[d]${NC}  Только Docker"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
 
         case "$ch" in
-            1)        _install_amnezia_awg ;;
-            2)        _install_3xui ;;
-            3)        _install_hysteria2 ;;
-            d|D|д|Д)
-                echo ""
-                _install_docker
-                read -p "  Enter..."
-                ;;
+            1) _install_amnezia_awg ;;
+            2) _install_3xui ;;
             0|"") return ;;
         esac
     done
@@ -4438,13 +4635,7 @@ show_menu() {
             [ -n "$_awg_stats" ] && echo -e "  ${WHITE}AWG:  ${GREEN}${_awg_stats}${NC}"
         fi
 
-        # Hysteria2 статус
-        if is_hysteria2; then
-            local _hy2_key=""
-            [ -f /root/hysteria2.txt ] && _hy2_key=$(cat /root/hysteria2.txt 2>/dev/null | head -1)
-            local _hy2_port; _hy2_port=$(grep -oP '^listen: :\K\d+' /etc/hysteria/config.yaml 2>/dev/null || echo "443")
-            echo -e "  ${WHITE}HY2:  ${GREEN}● :${_hy2_port}${NC}$([ -f /root/hysteria2.txt ] && echo "  ${WHITE}ключ: /root/hysteria2.txt${NC}")"
-        fi
+        # Hysteria2 статус скрыт (протокол заблокирован ТСПУ)
 
         # Уведомление о новой версии (из кеша, без задержки)
         local _upd_cached; _upd_cached=$(_update_cached_ver)
@@ -4496,7 +4687,7 @@ show_menu() {
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e "  8)  Система и управление"
         echo -e "  9)  Установить сервер"
-        is_hysteria2 && echo -e "  ${CYAN}h)  Hysteria2 — статус / ключ${NC}"
+        # h) Hysteria2 скрыт
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         ch=$(read_choice "Выбор: ")
@@ -4518,7 +4709,7 @@ show_menu() {
             7) tools_menu ;;
             8) system_menu ;;
             9) install_wizard ;;
-            h|H|р|Р) is_hysteria2 && hysteria2_menu ;;
+            # h|H|р|Р) is_hysteria2 && hysteria2_menu ;;
             0)
                 clear; exit 0 ;;
         esac
