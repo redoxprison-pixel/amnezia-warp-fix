@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.30"
+VERSION="5.31"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -452,6 +452,19 @@ try:
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
+    cat > /tmp/xui_select_inbounds.py << 'PYEOF2'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    exclude = {"2", "6"}
+    for ib in d.get("obj", []):
+        if str(ib["id"]) not in exclude:
+            print("{}|{}|{}|{}".format(
+                ib["id"], ib.get("remark",""), ib.get("protocol",""), ib.get("port","")))
+except Exception as e:
+    sys.stderr.write("ERR:{}\n".format(e))
+PYEOF2
 }
 
 
@@ -496,20 +509,11 @@ for ib in d.get('obj',[]):
 
 # Показывает меню выбора inbound'ов
 _3xui_select_inbounds() {
-    local cookie="$1" mode="$2"  # mode: add|del
-    local json; json=$(_3xui_get_inbounds "$cookie")
-
-    # Исключаем WS (id=2) и Socks5 (id=6) — не нужны для клиентских профилей
-    local EXCLUDE_IDS="2 6"
-
-    python3 << PYEOF
-import json
-d=json.loads('''${json}''')
-exclude=set(str(x) for x in [2,6])
-for ib in d.get('obj',[]):
-    if str(ib['id']) not in exclude:
-        print(f"{ib['id']}|{ib.get('remark','')}|{ib.get('protocol','')}|{ib.get('port','')}")
-PYEOF
+    local cookie="$1"
+    local jf; jf=$(mktemp)
+    _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
+    python3 /tmp/xui_select_inbounds.py "$jf" 2>/dev/null
+    rm -f "$jf"
 }
 
 # Добавляет клиента в один inbound через API
@@ -577,20 +581,53 @@ _3xui_sub_link() {
 
 _3xui_clients_menu() {
     _3xui_load_config
-    _3xui_write_helpers  # создаём вспомогательные python скрипты
+    _3xui_write_helpers
+
+    # Выбор сервера (алиас) если их несколько
+    local target_server="local"
+    if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+        echo -e "\n${CYAN}━━━ Выберите сервер ━━━${NC}\n"
+        echo -e "  ${YELLOW}[0]${NC}  Текущий (${MY_IP})"
+        local ai=1
+        local -a aliases_list=()
+        while IFS= read -r aline; do
+            [ -z "$aline" ] || [[ "$aline" == \#* ]] && continue
+            local aip="${aline%%=*}" aname="${aline##*=}"
+            aname="${aname%%|*}"
+            echo -e "  ${YELLOW}[$ai]${NC}  ${aname} (${aip})"
+            aliases_list+=("$aip|$aname")
+            (( ai++ ))
+        done < "$ALIASES_FILE"
+        echo ""
+        read -p "  Выбор (0 = текущий): " srv_ch < /dev/tty
+        if [[ "$srv_ch" =~ ^[1-9][0-9]*$ ]] && (( srv_ch < ai )); then
+            target_server="${aliases_list[$((srv_ch-1))]}"
+        fi
+    fi
+
     local cookie
     cookie=$(_3xui_auth)
     if [ -z "$cookie" ]; then
         echo -e "  ${RED}✗ Не удалось авторизоваться в 3X-UI${NC}"
-        read -p "  Enter..."
+        read -p "  Enter..." < /dev/tty
         return 1
     fi
 
     while true; do
         clear
-        echo -e "\n${CYAN}━━━ 3X-UI — клиенты ━━━${NC}\n"
+        echo -e "\n${CYAN}━━━ 3X-UI — клиенты ━━━${NC}"
 
-        # Загружаем клиентов (через файл чтобы не занимать stdin)
+        # Подписка
+        _3xui_load_config
+        local sub_url
+        if [ -n "$XUI_SUB_DOMAIN" ]; then
+            sub_url="https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}"
+        else
+            sub_url="http://${MY_IP}:${XUI_SUB_PORT}${XUI_SUB_PATH}"
+        fi
+        echo -e "  ${WHITE}Подписки:${NC} ${CYAN}${sub_url}<subId>${NC}\n"
+
+        # Загружаем клиентов
         local -a clients=()
         local _cf; _cf=$(mktemp)
         _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
@@ -602,17 +639,18 @@ _3xui_clients_menu() {
         if [ ${#clients[@]} -eq 0 ]; then
             echo -e "  ${YELLOW}Клиентов не найдено${NC}\n"
         else
+            # Заголовок таблицы с выравниванием
+            printf "  \e[97m%-4s %-22s %-20s %-10s %s\e[0m\n" "№" "Email" "SubId" "Статус" "Трафик↑/↓"
+            echo -e "  ${CYAN}──────────────────────────────────────────────────────────${NC}"
             local i=1
-            printf "  ${WHITE}%-3s %-20s %-18s %-6s %-12s${NC}\n" "№" "Email" "SubId" "Статус" "Трафик↑/↓"
-            echo -e "  ${CYAN}────────────────────────────────────────────────────${NC}"
             for c in "${clients[@]}"; do
                 IFS='|' read -r email sub_id inbounds enable up down <<< "$c"
-                local status_col
+                local status_col up_fmt down_fmt
                 [ "$enable" = "on" ] && status_col="${GREEN}● вкл${NC}" || status_col="${RED}● выкл${NC}"
-                local up_fmt; up_fmt=$(_fmt_bytes "$up")
-                local down_fmt; down_fmt=$(_fmt_bytes "$down")
-                printf "  ${YELLOW}[%d]${NC} %-20s %-18s %b  %s/%s\n" \
-                    "$i" "${email:0:19}" "${sub_id:0:17}" "$status_col" "$up_fmt" "$down_fmt"
+                up_fmt=$(_fmt_bytes "$up")
+                down_fmt=$(_fmt_bytes "$down")
+                printf "  ${YELLOW}[%-2d]${NC} %-22s %-20s %b %-4s %s/%s\n" \
+                    "$i" "${email:0:21}" "${sub_id:0:19}" "$status_col" "" "$up_fmt" "$down_fmt"
                 (( i++ ))
             done
             echo ""
@@ -623,22 +661,19 @@ _3xui_clients_menu() {
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
 
-        case "$ch" in
-            [0-9]*)
-                # Выбор клиента по номеру
-                if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#clients[@]} )); then
-                    _3xui_client_profile "${clients[$((ch-1))]}" "$cookie"
-                fi
-                ;;
-            a|A|а|А)
-                _3xui_add_client_menu "$cookie"
-                # Обновляем cookie после возможного истечения сессии
-                cookie=$(_3xui_auth)
-                ;;
-            0|"") return ;;
-        esac
+        # Проверяем 0 и пустую строку ПЕРВЫМИ
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
+        if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#clients[@]} )); then
+            _3xui_client_profile "${clients[$((ch-1))]}" "$cookie"
+            cookie=$(_3xui_auth)
+        elif [[ "$ch" == "a" || "$ch" == "A" || "$ch" == "а" || "$ch" == "А" ]]; then
+            _3xui_add_client_menu "$cookie"
+            cookie=$(_3xui_auth)
+        fi
     done
 }
+
 
 # Профиль конкретного клиента
 _3xui_client_profile() {
@@ -726,42 +761,55 @@ _3xui_add_client_menu() {
     clear
     echo -e "\n${CYAN}━━━ Добавить клиента ━━━${NC}\n"
 
-    echo -ne "  Email (имя клиента): "; read -r email
+    echo -ne "  Имя клиента (email): "; read -r email < /dev/tty
     [ -z "$email" ] && return
 
     # Проверяем уникальность
-    local existing; existing=$(_3xui_parse_clients "$cookie" | grep "^${email}|")
+    local _cf; _cf=$(mktemp)
+    _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
+    local existing; existing=$(grep "^${email}|" "$_cf" 2>/dev/null)
+    rm -f "$_cf"
     if [ -n "$existing" ]; then
         echo -e "  ${RED}✗ Клиент '${email}' уже существует${NC}"
-        read -p "  Enter..."; return
+        read -p "  Enter..." < /dev/tty; return
     fi
 
     local uuid sub_id
     uuid=$(_gen_uuid)
     sub_id=$(_gen_subid)
 
-    # Выбор inbound'ов
-    echo -e "\n  ${WHITE}Выберите протоколы:${NC}\n"
+    # Загружаем список доступных inbound'ов
     local -a available_ibs=()
-    local _sf1; _sf1=$(mktemp)
-    _3xui_select_inbounds "$cookie" > "$_sf1" 2>/dev/null
+    local _sf; _sf=$(mktemp)
+    _3xui_select_inbounds "$cookie" > "$_sf" 2>/dev/null
     while IFS= read -r line; do
-        [ -n "$line" ] && available_ibs+=("$line")
-    done < "$_sf1"
-    rm -f "$_sf1"
+        [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && available_ibs+=("$line")
+    done < "$_sf"
+    rm -f "$_sf"
 
+    if [ ${#available_ibs[@]} -eq 0 ]; then
+        echo -e "  ${RED}✗ Нет доступных inbound'ов${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    # Показываем список протоколов
+    echo -e "\n  ${WHITE}Доступные протоколы:${NC}\n"
     local i=1
     for ib in "${available_ibs[@]}"; do
         IFS='|' read -r ib_id ib_name ib_proto ib_port <<< "$ib"
-        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name} (${ib_proto}:${ib_port})"
+        # Очищаем emoji из названия для читаемости
+        local clean_name; clean_name=$(echo "$ib_name" | sed 's/[^[:print:]]//g' | xargs)
+        echo -e "  ${YELLOW}[$i]${NC}  ${clean_name:-id=$ib_id}  ${CYAN}(${ib_proto}:${ib_port})${NC}"
         (( i++ ))
     done
-    echo -e "  ${GREEN}[a]${NC}  Все сразу"
     echo ""
-    echo -ne "  Выбор (номера через пробел или 'a'): "; read -r sel
+    echo -e "  ${GREEN}[a]${NC}  Все сразу (рекомендуется)"
+    echo ""
+    echo -e "  ${WHITE}Введите номер(а) через пробел или 'a' для всех:${NC}"
+    echo -ne "  → "; read -r sel < /dev/tty
 
-    local selected_ids=()
-    if [[ "$sel" == "a" || "$sel" == "A" ]]; then
+    local -a selected_ids=()
+    if [[ "$sel" == "a" || "$sel" == "A" || "$sel" == "а" || "$sel" == "А" ]]; then
         for ib in "${available_ibs[@]}"; do
             selected_ids+=("${ib%%|*}")
         done
@@ -773,7 +821,10 @@ _3xui_add_client_menu() {
         done
     fi
 
-    [ ${#selected_ids[@]} -eq 0 ] && { echo -e "  ${YELLOW}Ничего не выбрано${NC}"; read -p "  Enter..."; return; }
+    if [ ${#selected_ids[@]} -eq 0 ]; then
+        echo -e "\n  ${YELLOW}Ничего не выбрано — нажмите 'a' для всех или номер протокола${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
 
     echo ""
     local success=0 fail=0
@@ -785,21 +836,25 @@ _3xui_add_client_menu() {
             echo -e "${GREEN}✓${NC}"
             (( success++ ))
         else
-            echo -e "${RED}✗${NC}  $(echo "$res" | grep -oP '"msg":"[^"]*"' | head -1)"
+            local err_msg; err_msg=$(echo "$res" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null)
+            echo -e "${RED}✗${NC}  ${err_msg}"
             (( fail++ ))
         fi
     done
 
     if [ "$success" -gt 0 ]; then
         local sub_link; sub_link=$(_3xui_sub_link "$sub_id")
-        echo -e "\n  ${GREEN}✅ Клиент ${email} добавлен в ${success} inbound(ов)${NC}"
-        echo -e "  ${WHITE}Подписка:${NC} ${CYAN}${sub_link}${NC}"
-        command -v qrencode &>/dev/null && { echo ""; qrencode -t ANSIUTF8 "$sub_link"; }
+        echo -e "\n  ${GREEN}✅ Клиент ${email} добавлен (${success} протокол(ов))${NC}"
+        echo -e "  ${WHITE}Ссылка подписки:${NC}\n  ${CYAN}${sub_link}${NC}"
+        echo ""
+        command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+        command -v qrencode &>/dev/null && qrencode -t ANSIUTF8 "$sub_link"
         log_action "3XUI: добавлен клиент ${email}, subId=${sub_id}"
     fi
-    [ "$fail" -gt 0 ] && echo -e "  ${YELLOW}⚠ ${fail} inbound(ов) не обновилось${NC}"
-    read -p "  Enter..."
+    [ "$fail" -gt 0 ] && echo -e "  ${YELLOW}⚠ ${fail} протокол(ов) не добавилось${NC}"
+    read -p "  Enter..." < /dev/tty
 }
+
 
 # Добавить inbound к существующему клиенту
 _3xui_add_inbound_to_client() {
@@ -3118,6 +3173,21 @@ _install_3xui() {
         local xui_port
         xui_port=$(grep -oP '(?<="port":)\d+' /usr/local/x-ui/bin/config.json 2>/dev/null || echo "2053")
         echo -e "  ${WHITE}Панель:${NC} ${CYAN}http://${MY_IP}:${xui_port}${NC}"
+
+        # Предлагаем сохранить пароль в govpn конфиг
+        echo ""
+        echo -e "  ${WHITE}Введите пароль от панели 3X-UI (для govpn управления):${NC}"
+        echo -e "  ${CYAN}(Это тот пароль что вы задали при установке)${NC}"
+        echo -ne "  Пароль: "
+        local xui_pass_save
+        read -r -s xui_pass_save < /dev/tty
+        echo ""
+        if [ -n "$xui_pass_save" ]; then
+            sed -i "/^XUI_PASS=/d" /etc/govpn/config 2>/dev/null
+            echo "XUI_PASS=${xui_pass_save}" >> /etc/govpn/config
+            echo -e "  ${GREEN}✓ Пароль сохранён в /etc/govpn/config${NC}"
+        fi
+
         log_action "INSTALL: 3X-UI"
         echo -e "\n  ${YELLOW}Перезапустите govpn для определения нового режима.${NC}"
     else
