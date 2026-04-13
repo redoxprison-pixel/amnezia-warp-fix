@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.28"
+VERSION="5.29"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -332,7 +332,7 @@ _3xui_load_config() {
     XUI_DB="/etc/x-ui/x-ui.db"
     XUI_PORT=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='webPort';" 2>/dev/null || echo "17331")
     XUI_PATH=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='webBasePath';" 2>/dev/null || echo "/")
-    XUI_PATH="${XUI_PATH%/}"  # убираем trailing slash
+    XUI_PATH="${XUI_PATH%/}"
     XUI_BASE="https://127.0.0.1:${XUI_PORT}${XUI_PATH}"
     XUI_SUB_PORT=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null || echo "")
     XUI_SUB_PATH=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPath';" 2>/dev/null || echo "")
@@ -343,53 +343,47 @@ _3xui_load_config() {
 _3xui_auth() {
     _3xui_load_config
     local user pass
+    # Пароль хранится в таблице users, не в settings
     user=$(sqlite3 "$XUI_DB" "SELECT username FROM users LIMIT 1;" 2>/dev/null)
-    pass=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='webPassword';" 2>/dev/null)
+    # Пробуем из govpn конфига (сохранённый при первом вводе)
+    pass=$(grep "^XUI_PASS=" /etc/govpn/config 2>/dev/null | cut -d= -f2-)
 
-    # Если пароль не в settings — пробуем из переменной окружения или конфига govpn
+    if [ -z "$user" ]; then
+        echo -e "  ${RED}✗ x-ui база недоступна${NC}" >&2
+        return 1
+    fi
+
+    # Запрашиваем пароль если нет в конфиге
     if [ -z "$pass" ]; then
-        pass=$(grep '^XUI_PASS=' /etc/govpn/config 2>/dev/null | cut -d= -f2-)
-    fi
-
-    if [ -z "$user" ] || [ -z "$pass" ]; then
-        echo -e "  ${RED}✗ Не удалось получить учётные данные 3X-UI${NC}"
-        echo -e "  ${WHITE}Введите пароль от панели:${NC}"
-        read -r -s pass
-        echo ""
+        echo -e "
+  ${WHITE}Введите пароль от панели 3X-UI (${user}):${NC}" >&2
+        read -r -s pass < /dev/tty
+        echo "" >&2
         [ -z "$pass" ] && return 1
-        # Сохраняем в конфиг
-        grep -q '^XUI_PASS=' /etc/govpn/config 2>/dev/null && \
-            sed -i "s|^XUI_PASS=.*|XUI_PASS=${pass}|" /etc/govpn/config || \
-            echo "XUI_PASS=${pass}" >> /etc/govpn/config
+        echo "XUI_PASS=${pass}" >> /etc/govpn/config
     fi
 
-    local headers_file; headers_file=$(mktemp)
-    curl -sk -X POST "${XUI_BASE}/login" \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
-        -D "$headers_file" > /dev/null 2>&1
+    local hf; hf=$(mktemp)
+    curl -sk -X POST "${XUI_BASE}/login"         -H "Content-Type: application/json"         -d "{"username":"${user}","password":"${pass}"}"         -D "$hf" -o /dev/null 2>/dev/null
 
     local cookie
-    cookie=$(grep -ioP '3x-ui=\S+(?=;)' "$headers_file" 2>/dev/null | head -1)
-    rm -f "$headers_file"
+    cookie=$(grep -ioP "3x-ui=\S+(?=;)" "$hf" 2>/dev/null | head -1)
+    rm -f "$hf"
 
     if [ -z "$cookie" ]; then
-        # Пробуем запросить пароль заново
-        echo -e "  ${RED}✗ Ошибка авторизации. Введите пароль от панели 3X-UI:${NC} "
-        read -r -s pass
-        echo ""
+        # Пароль неверный — удаляем из конфига и просим снова
+        sed -i "/^XUI_PASS=/d" /etc/govpn/config 2>/dev/null
+        echo -e "  ${RED}✗ Неверный пароль. Попробуйте ещё раз:${NC}" >&2
+        read -r -s pass < /dev/tty
+        echo "" >&2
         [ -z "$pass" ] && return 1
-        sed -i "s|^XUI_PASS=.*|XUI_PASS=${pass}|" /etc/govpn/config 2>/dev/null || \
-            echo "XUI_PASS=${pass}" >> /etc/govpn/config
+        echo "XUI_PASS=${pass}" >> /etc/govpn/config
 
-        headers_file=$(mktemp)
-        curl -sk -X POST "${XUI_BASE}/login" \
-            -H "Content-Type: application/json" \
-            -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
-            -D "$headers_file" > /dev/null 2>&1
-        cookie=$(grep -ioP '3x-ui=\S+(?=;)' "$headers_file" 2>/dev/null | head -1)
-        rm -f "$headers_file"
-        [ -z "$cookie" ] && return 1
+        hf=$(mktemp)
+        curl -sk -X POST "${XUI_BASE}/login"             -H "Content-Type: application/json"             -d "{"username":"${user}","password":"${pass}"}"             -D "$hf" -o /dev/null 2>/dev/null
+        cookie=$(grep -ioP "3x-ui=\S+(?=;)" "$hf" 2>/dev/null | head -1)
+        rm -f "$hf"
+        [ -z "$cookie" ] && { echo -e "  ${RED}✗ Авторизация не удалась${NC}" >&2; return 1; }
     fi
 
     echo "$cookie"
@@ -414,40 +408,51 @@ _3xui_get_inbounds() {
     _3xui_api GET "/panel/api/inbounds/list" "" "$cookie"
 }
 
-# Парсит клиентов из всех inbound'ов, возвращает строки: email|subId|inbound_id|enable|up|down
+# Парсит клиентов из всех inbound'ов
 _3xui_parse_clients() {
     local cookie="$1"
     local json; json=$(_3xui_get_inbounds "$cookie")
     [ -z "$json" ] && return 1
-    python3 << PYEOF
+    local jf; jf=$(mktemp)
+    printf '%s' "$json" > "$jf"
+    python3 /tmp/xui_parse.py "$jf" 2>/dev/null
+    rm -f "$jf"
+}
+
+# Записывает вспомогательный python скрипт для парсинга клиентов
+_3xui_write_helpers() {
+    cat > /tmp/xui_parse.py << 'PYEOF'
 import json, sys
 try:
-    d = json.loads('''${json}''')
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
     seen = {}
-    for ib in d.get('obj', []):
-        ib_id = ib['id']
-        ib_remark = ib.get('remark','')
+    for ib in d.get("obj", []):
+        ib_id = str(ib["id"])
         try:
-            settings = json.loads(ib.get('settings','{}'))
-        except:
+            settings = json.loads(ib.get("settings", "{}"))
+        except Exception:
             settings = {}
-        for c in settings.get('clients', []):
-            email = c.get('email','')
-            sub_id = c.get('subId','')
-            enable = 'on' if c.get('enable', True) else 'off'
-            up = ib.get('up', 0)
-            down = ib.get('down', 0)
+        for c in settings.get("clients", []):
+            email = c.get("email", "")
+            sub_id = c.get("subId", "")
+            enable = "on" if c.get("enable", True) else "off"
+            up = ib.get("up", 0)
+            down = ib.get("down", 0)
             key = sub_id if sub_id else email
             if key not in seen:
-                seen[key] = {'email': email, 'subId': sub_id, 'inbounds': [], 'enable': enable, 'up': up, 'down': down}
-            seen[key]['inbounds'].append(str(ib_id))
-    for k, v in seen.items():
-        ibs = ','.join(v['inbounds'])
-        print(f"{v['email']}|{v['subId']}|{ibs}|{v['enable']}|{v['up']}|{v['down']}")
+                seen[key] = {"email": email, "subId": sub_id, "inbounds": [], "enable": enable, "up": up, "down": down}
+            if ib_id not in seen[key]["inbounds"]:
+                seen[key]["inbounds"].append(ib_id)
+    for v in seen.values():
+        print("{}|{}|{}|{}|{}|{}".format(
+            v["email"], v["subId"], ",".join(v["inbounds"]),
+            v["enable"], v["up"], v["down"]))
 except Exception as e:
-    print(f"ERR:{e}", file=sys.stderr)
+    sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
 }
+
 
 # Форматирует байты в читаемый вид
 _fmt_bytes() {
@@ -571,6 +576,7 @@ _3xui_sub_link() {
 
 _3xui_clients_menu() {
     _3xui_load_config
+    _3xui_write_helpers  # создаём вспомогательные python скрипты
     local cookie
     cookie=$(_3xui_auth)
     if [ -z "$cookie" ]; then
@@ -583,11 +589,14 @@ _3xui_clients_menu() {
         clear
         echo -e "\n${CYAN}━━━ 3X-UI — клиенты ━━━${NC}\n"
 
-        # Загружаем клиентов
+        # Загружаем клиентов (через файл чтобы не занимать stdin)
         local -a clients=()
+        local _cf; _cf=$(mktemp)
+        _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
         while IFS= read -r line; do
             [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && clients+=("$line")
-        done < <(_3xui_parse_clients "$cookie")
+        done < "$_cf"
+        rm -f "$_cf"
 
         if [ ${#clients[@]} -eq 0 ]; then
             echo -e "  ${YELLOW}Клиентов не найдено${NC}\n"
@@ -733,9 +742,12 @@ _3xui_add_client_menu() {
     # Выбор inbound'ов
     echo -e "\n  ${WHITE}Выберите протоколы:${NC}\n"
     local -a available_ibs=()
+    local _sf1; _sf1=$(mktemp)
+    _3xui_select_inbounds "$cookie" > "$_sf1" 2>/dev/null
     while IFS= read -r line; do
         [ -n "$line" ] && available_ibs+=("$line")
-    done < <(_3xui_select_inbounds "$cookie")
+    done < "$_sf1"
+    rm -f "$_sf1"
 
     local i=1
     for ib in "${available_ibs[@]}"; do
@@ -814,13 +826,15 @@ for ib in d.get('obj',[]):
 
     # Показываем inbound'ы которых ещё нет
     local -a available=()
+    local _sf2; _sf2=$(mktemp)
+    _3xui_select_inbounds "$cookie" > "$_sf2" 2>/dev/null
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         local ib_id="${line%%|*}"
-        # Пропускаем уже добавленные
         [[ ",$current_inbounds," == *",$ib_id,"* ]] && continue
         available+=("$line")
-    done < <(_3xui_select_inbounds "$cookie")
+    done < "$_sf2"
+    rm -f "$_sf2"
 
     if [ ${#available[@]} -eq 0 ]; then
         echo -e "  ${YELLOW}Клиент уже во всех доступных inbound'ах${NC}"
