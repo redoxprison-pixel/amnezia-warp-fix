@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.29"
+VERSION="5.30"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -340,54 +340,55 @@ _3xui_load_config() {
 }
 
 # Авторизация — возвращает cookie значение
+# Авторизация — возвращает cookie значение
 _3xui_auth() {
     _3xui_load_config
     local user pass
-    # Пароль хранится в таблице users, не в settings
     user=$(sqlite3 "$XUI_DB" "SELECT username FROM users LIMIT 1;" 2>/dev/null)
-    # Пробуем из govpn конфига (сохранённый при первом вводе)
     pass=$(grep "^XUI_PASS=" /etc/govpn/config 2>/dev/null | cut -d= -f2-)
 
-    if [ -z "$user" ]; then
-        echo -e "  ${RED}✗ x-ui база недоступна${NC}" >&2
-        return 1
-    fi
+    [ -z "$user" ] && { echo -e "  ${RED}✗ x-ui база недоступна${NC}" >&2; return 1; }
 
-    # Запрашиваем пароль если нет в конфиге
     if [ -z "$pass" ]; then
-        echo -e "
-  ${WHITE}Введите пароль от панели 3X-UI (${user}):${NC}" >&2
+        echo -e "\n  ${WHITE}Введите пароль от панели 3X-UI:${NC}" >&2
         read -r -s pass < /dev/tty
         echo "" >&2
         [ -z "$pass" ] && return 1
         echo "XUI_PASS=${pass}" >> /etc/govpn/config
     fi
 
-    local hf; hf=$(mktemp)
-    curl -sk -X POST "${XUI_BASE}/login"         -H "Content-Type: application/json"         -d "{"username":"${user}","password":"${pass}"}"         -D "$hf" -o /dev/null 2>/dev/null
-
+    # Логин через файл данных — избегаем проблем с кавычками в JSON
     local cookie
-    cookie=$(grep -ioP "3x-ui=\S+(?=;)" "$hf" 2>/dev/null | head -1)
-    rm -f "$hf"
+    cookie=$(_3xui_login_request "$user" "$pass")
 
     if [ -z "$cookie" ]; then
-        # Пароль неверный — удаляем из конфига и просим снова
         sed -i "/^XUI_PASS=/d" /etc/govpn/config 2>/dev/null
-        echo -e "  ${RED}✗ Неверный пароль. Попробуйте ещё раз:${NC}" >&2
+        echo -e "  ${RED}✗ Неверный пароль. Введите пароль:${NC}" >&2
         read -r -s pass < /dev/tty
         echo "" >&2
         [ -z "$pass" ] && return 1
         echo "XUI_PASS=${pass}" >> /etc/govpn/config
-
-        hf=$(mktemp)
-        curl -sk -X POST "${XUI_BASE}/login"             -H "Content-Type: application/json"             -d "{"username":"${user}","password":"${pass}"}"             -D "$hf" -o /dev/null 2>/dev/null
-        cookie=$(grep -ioP "3x-ui=\S+(?=;)" "$hf" 2>/dev/null | head -1)
-        rm -f "$hf"
+        cookie=$(_3xui_login_request "$user" "$pass")
         [ -z "$cookie" ] && { echo -e "  ${RED}✗ Авторизация не удалась${NC}" >&2; return 1; }
     fi
 
     echo "$cookie"
 }
+
+# Выполняет HTTP логин и возвращает cookie
+_3xui_login_request() {
+    local user="$1" pass="$2"
+    local hf df
+    hf=$(mktemp); df=$(mktemp)
+    printf '{"username":"%s","password":"%s"}' "$user" "$pass" > "$df"
+    curl -sk -X POST "${XUI_BASE}/login" \
+        -H 'Content-Type: application/json' \
+        -d "@${df}" \
+        -D "$hf" -o /dev/null 2>/dev/null
+    grep -ioP '3x-ui=\S+(?=;)' "$hf" 2>/dev/null | head -1
+    rm -f "$hf" "$df"
+}
+
 
 # API запрос с авторизацией
 _3xui_api() {
