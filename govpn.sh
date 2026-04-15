@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.35"
+VERSION="5.36"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -341,6 +341,10 @@ _3xui_load_config() {
     XUI_SUB_PORT=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null || echo "")
     XUI_SUB_PATH=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPath';" 2>/dev/null || echo "")
     XUI_SUB_DOMAIN=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null || echo "")
+    # Если subDomain пустой — проверяем через nginx конфиги
+    if [ -z "$XUI_SUB_DOMAIN" ]; then
+        XUI_SUB_DOMAIN=$(grep -rh 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null |             grep -v '#\|localhost\|_\|default' | grep -oP 'server_name\s+\K\S+' |             grep '\.' | head -1 || echo "")
+    fi
     XUI_USER=$(sqlite3 "$XUI_DB" "SELECT username FROM users LIMIT 1;" 2>/dev/null || echo "")
 }
 
@@ -486,23 +490,29 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    exclude = {"2", "6"}
     show_all = len(sys.argv) > 2 and sys.argv[2] == "all"
     for ib in d.get("obj", []):
-        if str(ib["id"]) not in exclude:
-            enabled = ib.get("enable", True)
-            if not show_all and not enabled:
-                continue
-            raw = ib.get("remark", "")
-            name = ""
-            for c in raw:
-                cp = ord(c)
-                if 0x20 <= cp < 0x2000 and c.isprintable():
-                    name += c
-            name = name.strip() or "id={}".format(ib["id"])
-            status = "on" if enabled else "off"
-            print("{}|{}|{}|{}|{}".format(
-                ib["id"], name, ib.get("protocol",""), ib.get("port",""), status))
+        proto = ib.get("protocol", "")
+        raw_remark = ib.get("remark", "").lower()
+        # Исключаем по протоколу: mixed=Socks, ws=WebSocket
+        if proto in ("mixed", "ws"):
+            continue
+        # Исключаем по названию если содержит socks
+        if "socks" in raw_remark:
+            continue
+        enabled = ib.get("enable", True)
+        if not show_all and not enabled:
+            continue
+        raw = ib.get("remark", "")
+        name = ""
+        for c in raw:
+            cp = ord(c)
+            if 0x20 <= cp < 0x2000 and c.isprintable():
+                name += c
+        name = name.strip() or "id={}".format(ib["id"])
+        status = "on" if enabled else "off"
+        print("{}|{}|{}|{}|{}".format(
+            ib["id"], name, ib.get("protocol",""), ib.get("port",""), status))
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
@@ -695,10 +705,8 @@ _3xui_clients_menu() {
         fi
     }
 
-    # Начальный выбор если есть несколько серверов
     local has_aliases=0
     [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ] && has_aliases=1
-    [ "$has_aliases" -eq 1 ] && _3xui_switch_server
 
     # Проверяем пароль
     if ! grep -q "^XUI_PASS=" /etc/govpn/config 2>/dev/null; then
@@ -825,6 +833,21 @@ _3xui_clients_list_menu() {
         else
             sub_url="${RED}не настроено${NC}"
         fi
+        # Автофикс subDomain если пустой
+        if [ -z "$XUI_SUB_DOMAIN" ] && [ -f /etc/x-ui/x-ui.db ]; then
+            local nginx_domain
+            nginx_domain=$(grep -rh 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null |                 grep -oP 'server_name\s+\K\S+' | grep '\.' | grep -v 'localhost\|_' | head -1)
+            if [ -n "$nginx_domain" ]; then
+                echo -e "  ${YELLOW}⚠ subDomain пустой — подписки идут через IP.${NC}"
+                echo -ne "  ${WHITE}Исправить на ${nginx_domain}? (y/n): ${NC}"
+                read -r fix_c < /dev/tty
+                if [ "$fix_c" = "y" ]; then
+                    sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value='${nginx_domain}' WHERE key='subDomain';" 2>/dev/null &&                     systemctl restart x-ui > /dev/null 2>&1 &&                     sleep 1 &&                     _3xui_load_config
+                    echo -e "  ${GREEN}✓ subDomain = ${nginx_domain}${NC}"
+                    sub_url="${GREEN}https://${nginx_domain}${XUI_SUB_PATH}${NC}"
+                fi
+            fi
+        fi
         echo -e "  ${WHITE}Подписки:${NC} ${sub_url}<subId>\n"
 
         # Загружаем клиентов
@@ -890,31 +913,80 @@ _3xui_client_profile() {
     local client_str="$1" cookie="$2"
     IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$client_str"
 
+    # Получаем ограничения из первого inbound'а
+    _get_client_limits() {
+        local jf; jf=$(mktemp)
+        _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
+        local first_ib="${inbounds%%,*}"
+        local first_email
+        first_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${first_ib}:" | cut -d: -f2-)
+        [ -z "$first_email" ] && first_email="$email"
+        python3 - "$jf" "$first_ib" "$first_email" << 'PYEOF'
+import json, sys
+from datetime import datetime
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    for ib in d.get("obj", []):
+        if str(ib["id"]) == sys.argv[2]:
+            s = json.loads(ib.get("settings", "{}"))
+            for c in s.get("clients", []):
+                if c.get("email") == sys.argv[3]:
+                    total_gb = c.get("totalGB", 0)
+                    expiry = c.get("expiryTime", 0)
+                    limit_ip = c.get("limitIp", 0)
+                    reset = c.get("reset", 0)
+                    gb_str = "{:.1f} GB".format(total_gb/1073741824) if total_gb > 0 else "∞"
+                    if expiry > 0:
+                        dt = datetime.fromtimestamp(expiry/1000)
+                        exp_str = dt.strftime("%d.%m.%Y")
+                    else:
+                        exp_str = "∞"
+                    ip_str = str(limit_ip) if limit_ip > 0 else "∞"
+                    print("{}|{}|{}|{}|{}".format(
+                        gb_str, exp_str, ip_str,
+                        total_gb, expiry))
+                    break
+except Exception as e:
+    sys.stderr.write("ERR:{}\n".format(e))
+    print("∞|∞|∞|0|0")
+PYEOF
+        rm -f "$jf"
+    }
+
     while true; do
         clear
         echo -e "\n${CYAN}━━━ Клиент: ${email} ━━━${NC}\n"
-        echo -e "  ${WHITE}Email:${NC}    ${CYAN}${email}${NC}"
         echo -e "  ${WHITE}SubId:${NC}    ${CYAN}${sub_id}${NC}"
         echo -e "  ${WHITE}Статус:${NC}   $([ "$enable" = "on" ] && echo -e "${GREEN}● активен${NC}" || echo -e "${RED}● отключён${NC}")"
         local up_f down_f
         up_f=$(_fmt_bytes "$up"); down_f=$(_fmt_bytes "$down")
         echo -e "  ${WHITE}Трафик:${NC}   ↑${up_f} / ↓${down_f}"
 
+        # Ограничения
+        local limits_str; limits_str=$(_get_client_limits)
+        IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
+        echo -e "  ${WHITE}Лимит ГБ:${NC} ${CYAN}${lim_gb}${NC}"
+        echo -e "  ${WHITE}Истекает:${NC} ${CYAN}${lim_exp}${NC}"
+        echo -e "  ${WHITE}IP лимит:${NC} ${CYAN}${lim_ip}${NC}"
+
         echo -e "\n  ${WHITE}Протоколы:${NC}"
         IFS=',' read -ra ib_arr <<< "$inbounds"
         for ib_id in "${ib_arr[@]}"; do
             local ib_nm; ib_nm=$(_3xui_inbound_name "$ib_id" "$cookie")
-            echo -e "    ${CYAN}• ${ib_nm} (id=${ib_id})${NC}"
+            echo -e "    ${CYAN}• ${ib_nm:-id=$ib_id}${NC}"
         done
 
         local sub_link; sub_link=$(_3xui_sub_link "$sub_id")
         echo -e "\n  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
 
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${GREEN}[2]${NC}  Добавить протокол"
-        echo -e "  ${RED}[3]${NC}  Удалить протокол"
-        echo -e "  ${RED}[4]${NC}  Удалить клиента полностью"
-        echo -e "  ${YELLOW}[5]${NC}  Сбросить трафик"
+        echo -e "  ${YELLOW}[2]${NC}  Установить лимит ГБ"
+        echo -e "  ${YELLOW}[3]${NC}  Установить срок действия"
+        echo -e "  ${GREEN}[4]${NC}  Добавить протокол"
+        echo -e "  ${RED}[5]${NC}  Удалить протокол"
+        echo -e "  ${RED}[6]${NC}  Удалить клиента полностью"
+        echo -e "  ${YELLOW}[7]${NC}  Сбросить трафик"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -926,19 +998,60 @@ _3xui_client_profile() {
                 echo ""; qrencode -t ANSIUTF8 "$sub_link"
                 read -p "  Enter..." < /dev/tty ;;
             2)
+                echo -e "\n  ${WHITE}Лимит трафика:${NC}"
+                echo -e "  Текущий: ${CYAN}${lim_gb}${NC}"
+                echo -e "  Введите новый лимит в ГБ (0 = без лимита):"
+                echo -ne "  → "; read -r new_gb < /dev/tty
+                [[ "$new_gb" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo -e "  ${RED}✗ Неверный формат${NC}"; read -p "  Enter..." < /dev/tty; continue; }
+                local new_gb_bytes
+                new_gb_bytes=$(python3 -c "print(int(float('$new_gb') * 1073741824))" 2>/dev/null)
+                _3xui_update_client_field "$inbounds" "$emails_map" "totalGB" "$new_gb_bytes" "$cookie"
+                ;;
+            3)
+                echo -e "\n  ${WHITE}Срок действия:${NC}"
+                echo -e "  Текущий: ${CYAN}${lim_exp}${NC}"
+                echo -e "  Варианты:"
+                echo -e "  ${YELLOW}[1]${NC}  30 дней"
+                echo -e "  ${YELLOW}[2]${NC}  90 дней"
+                echo -e "  ${YELLOW}[3]${NC}  180 дней"
+                echo -e "  ${YELLOW}[4]${NC}  1 год"
+                echo -e "  ${YELLOW}[5]${NC}  Без ограничений"
+                echo -e "  ${YELLOW}[6]${NC}  Указать дату (ДД.ММ.ГГГГ)"
+                echo -ne "  → "; read -r exp_ch < /dev/tty
+                local new_expiry=0
+                case "$exp_ch" in
+                    1) new_expiry=$(python3 -c "import time; print(int((time.time()+30*86400)*1000))");;
+                    2) new_expiry=$(python3 -c "import time; print(int((time.time()+90*86400)*1000))");;
+                    3) new_expiry=$(python3 -c "import time; print(int((time.time()+180*86400)*1000))");;
+                    4) new_expiry=$(python3 -c "import time; print(int((time.time()+365*86400)*1000))");;
+                    5) new_expiry=0;;
+                    6)
+                        echo -ne "  Дата (ДД.ММ.ГГГГ): "; read -r dstr < /dev/tty
+                        new_expiry=$(python3 -c "
+from datetime import datetime
+try:
+    dt=datetime.strptime('$dstr','%d.%m.%Y')
+    print(int(dt.timestamp()*1000))
+except: print(0)
+" 2>/dev/null)
+                        ;;
+                    *) continue;;
+                esac
+                _3xui_update_client_field "$inbounds" "$emails_map" "expiryTime" "$new_expiry" "$cookie"
+                ;;
+            4)
                 _3xui_add_inbound_to_client "$email" "$sub_id" "$inbounds" "$cookie"
                 return ;;
-            3)
+            5)
                 _3xui_del_inbound_from_client "$email" "$inbounds" "$cookie"
                 return ;;
-            4)
+            6)
                 echo -ne "\n  ${RED}Удалить ${email} из всех inbound'ов? (y/n): ${NC}"
                 read -r c < /dev/tty
                 [[ "$c" != "y" ]] && continue
                 IFS=',' read -ra ib_arr <<< "$inbounds"
                 local ok=0
                 for ib_id in "${ib_arr[@]}"; do
-                    # Получаем точный email для этого inbound из emails_map
                     local exact_email
                     exact_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
                     [ -z "$exact_email" ] && exact_email="$email"
@@ -949,8 +1062,7 @@ _3xui_client_profile() {
                 log_action "3XUI: удалён ${email}"
                 read -p "  Enter..." < /dev/tty
                 return ;;
-            5)
-                # Сбрасываем трафик по всем email из emails_map
+            7)
                 local first_exact
                 first_exact=$(echo "$emails_map" | tr ';' '\n' | head -1 | cut -d: -f2-)
                 [ -z "$first_exact" ] && first_exact="$email"
@@ -961,6 +1073,62 @@ _3xui_client_profile() {
         esac
     done
 }
+
+# Обновляет поле клиента во всех inbound'ах
+_3xui_update_client_field() {
+    local inbounds="$1" emails_map="$2" field="$3" value="$4" cookie="$5"
+    local jf; jf=$(mktemp)
+    _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
+
+    IFS=',' read -ra ib_arr <<< "$inbounds"
+    local ok=0
+    for ib_id in "${ib_arr[@]}"; do
+        local exact_email
+        exact_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+
+        # Строим новый объект клиента с обновлённым полем
+        local new_settings
+        new_settings=$(python3 - "$jf" "$ib_id" "$exact_email" "$field" "$value" << 'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    ib_id, email, field, value = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+    for ib in d.get("obj", []):
+        if str(ib["id"]) == ib_id:
+            s = json.loads(ib.get("settings", "{}"))
+            for c in s.get("clients", []):
+                if c.get("email") == email:
+                    # Преобразуем значение
+                    try: c[field] = int(value)
+                    except: c[field] = value
+                    print(json.dumps({"id": int(ib_id), "settings": json.dumps(s)}))
+                    break
+            break
+except Exception as e:
+    sys.stderr.write("ERR:{}\n".format(e))
+PYEOF
+        )
+        if [ -n "$new_settings" ]; then
+            # Получаем UUID клиента для правильного API пути
+            local client_uuid
+            client_uuid=$(python3 /tmp/xui_getid.py "$jf" "$ib_id" "$exact_email" 2>/dev/null)
+            if [ -n "$client_uuid" ]; then
+                local res; res=$(_3xui_api POST "/panel/api/inbounds/${ib_id}/updateClient/${client_uuid}" "$new_settings" "$cookie")
+                echo "$res" | grep -q '"success":true' && (( ok++ ))
+            fi
+        fi
+    done
+    rm -f "$jf"
+
+    if [ "$ok" -gt 0 ]; then
+        echo -e "  ${GREEN}✓ Обновлено в ${ok} протокол(ах)${NC}"
+    else
+        echo -e "  ${RED}✗ Не удалось обновить${NC}"
+    fi
+    read -p "  Enter..." < /dev/tty
+}
+
 
 # Добавить нового клиента
 # Суффиксы для уникальных email по inbound
