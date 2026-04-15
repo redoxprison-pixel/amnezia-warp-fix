@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.40"
+VERSION="5.41"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -926,8 +926,9 @@ _3xui_add_inbound_to_client() {
     for idx in "${selected_idx[@]}"; do
         local ib="${available[$idx]}"
         IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-        # Считаем глобальный индекс для суффикса
-        local global_idx=$(( idx + ${#current_inbounds//[^,]/} + 1 ))
+        # Считаем глобальный индекс для суффикса (по кол-ву уже занятых inbound'ов)
+        local _comma_cnt; _comma_cnt=$(echo "$current_inbounds" | tr -cd ',' | wc -c)
+        local global_idx=$(( idx + _comma_cnt + 1 ))
         local new_email; new_email=$(_3xui_email_for_inbound "$base_email" "$global_idx")
         echo -ne "  ${CYAN}→ ${ib_name} [${new_email}]...${NC} "
         local res; res=$(_3xui_add_client_to_inbound "$ib_id" "$new_email" "$uuid" "$sub_id" "$cookie")
@@ -1167,6 +1168,7 @@ PYEOF
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
         echo -e "  ${YELLOW}[2]${NC}  Установить лимит ГБ"
         echo -e "  ${YELLOW}[3]${NC}  Установить срок действия"
+        echo -e "  ${YELLOW}[8]${NC}  Переименовать клиента"
         echo -e "  ${GREEN}[4]${NC}  Добавить протокол"
         echo -e "  ${RED}[5]${NC}  Удалить протокол"
         echo -e "  ${RED}[6]${NC}  Удалить клиента полностью"
@@ -1262,6 +1264,69 @@ except: print(0)
                 echo -e "  ${GREEN}✓ Трафик сброшен (${ok} записей)${NC}"
                 real_up=0; real_down=0
                 read -p "  Enter..." < /dev/tty ;;
+            8)
+                # Переименование клиента
+                echo -e "\n  ${WHITE}Текущее имя:${NC} ${CYAN}${email}${NC}"
+                echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_base < /dev/tty
+                [ -z "$new_base" ] && continue
+                # Проверяем что имя свободно
+                local _cf2; _cf2=$(mktemp)
+                _3xui_parse_clients "$cookie" > "$_cf2" 2>/dev/null
+                local _exists; _exists=$(grep "^${new_base}|" "$_cf2" 2>/dev/null)
+                rm -f "$_cf2"
+                if [ -n "$_exists" ]; then
+                    echo -e "  ${RED}✗ Имя '${new_base}' уже занято${NC}"
+                    read -p "  Enter..." < /dev/tty; continue
+                fi
+                # Переименовываем в каждом inbound через SQLite
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                local ren_ok=0
+                for ib_id in "${ib_arr[@]}"; do
+                    local ex_em new_em
+                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                    [ -z "$ex_em" ] && continue
+                    # Суффикс = всё что после base email
+                    local old_base="${email}"
+                    local sfx="${ex_em#$old_base}"
+                    new_em="${new_base}${sfx}"
+                    local ren_result
+                    ren_result=$(python3 - "$ib_id" "$ex_em" "$new_em" << 'PYEOF'
+import json, sys, subprocess
+ib_id, old_email, new_email = sys.argv[1], sys.argv[2], sys.argv[3]
+DB = "/etc/x-ui/x-ui.db"
+try:
+    r = subprocess.run(["sqlite3", DB,
+        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
+        capture_output=True, text=True, timeout=3)
+    s = json.loads(r.stdout.strip())
+    for c in s.get("clients", []):
+        if c.get("email") == old_email:
+            c["email"] = new_email
+            break
+    ns = json.dumps(s).replace("'", "''")
+    r2 = subprocess.run(["sqlite3", DB,
+        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
+        capture_output=True, text=True, timeout=3)
+    subprocess.run(["sqlite3", DB,
+        "UPDATE client_traffics SET email='{}' WHERE email='{}';".format(new_email, old_email)],
+        capture_output=True, text=True, timeout=3)
+    print("ok" if r2.returncode == 0 else "err")
+except Exception as e:
+    print("err:" + str(e))
+PYEOF
+                    )
+                    [ "$ren_result" = "ok" ] && (( ren_ok++ ))
+                done
+                if [ "$ren_ok" -gt 0 ]; then
+                    _3xui_restart_xray "$cookie"
+                    echo -e "  ${GREEN}✓ Переименован: ${email} → ${new_base} (${ren_ok} протокол(ов))${NC}"
+                    log_action "3XUI: переименован ${email} → ${new_base}"
+                    read -p "  Enter..." < /dev/tty
+                    return
+                else
+                    echo -e "  ${RED}✗ Не удалось переименовать${NC}"
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
         esac
     done
 }
