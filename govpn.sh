@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.34"
+VERSION="5.35"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -634,61 +634,78 @@ _3xui_clients_menu() {
     _3xui_load_config
     _3xui_write_helpers
 
-    # Выбор сервера если есть несколько в алиасах
+    # ── Выбор сервера ─────────────────────────────────────────
+    local SERVER_LABEL="Текущий"
+    local SERVER_IP="$MY_IP"
     local SSH_TUNNEL_PID="" SSH_TUNNEL_PORT=""
-    if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+
+    _3xui_switch_server() {
+        # Сбрасываем старый туннель если был
+        if [ -n "$SSH_TUNNEL_PID" ]; then
+            kill "$SSH_TUNNEL_PID" 2>/dev/null
+            SSH_TUNNEL_PID=""
+            XUI_BASE="https://127.0.0.1:${XUI_PORT}${XUI_PATH}"
+        fi
+
         clear
-        echo -e "
-${CYAN}━━━ Выберите сервер 3X-UI ━━━${NC}
-"
-        echo -e "  ${YELLOW}[0]${NC}  Текущий (${MY_IP})"
+        echo -e "\n${CYAN}━━━ Выберите сервер ━━━${NC}\n"
+        echo -e "  ${YELLOW}[0]${NC}  ${MY_IP} (текущий)"
         local ai=1
         local -a alias_entries=()
-        while IFS= read -r aline; do
-            [[ -z "$aline" || "$aline" == \#* ]] && continue
-            local aip="${aline%%=*}" ainfo="${aline##*=}"
-            local aname="${ainfo%%|*}"
-            # Показываем только если это не текущий IP
-            [ "$aip" = "$MY_IP" ] && continue
-            echo -e "  ${YELLOW}[$ai]${NC}  ${aname} (${aip})"
-            alias_entries+=("${aip}|${aname}")
-            (( ai++ ))
-        done < "$ALIASES_FILE"
+        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+            while IFS= read -r aline; do
+                [[ -z "$aline" || "$aline" == \#* ]] && continue
+                local aip="${aline%%=*}" ainfo="${aline##*=}"
+                local aname="${ainfo%%|*}"
+                [ "$aip" = "$MY_IP" ] && continue
+                echo -e "  ${YELLOW}[$ai]${NC}  ${aname} (${aip})"
+                alias_entries+=("${aip}|${aname}")
+                (( ai++ ))
+            done < "$ALIASES_FILE"
+        fi
         echo ""
         local srv_ch
-        read -p "  Выбор (0 = текущий): " srv_ch < /dev/tty
+        read -p "  Выбор: " srv_ch < /dev/tty
 
         if [[ "$srv_ch" =~ ^[1-9][0-9]*$ ]] && (( srv_ch < ai )); then
-            local target_entry="${alias_entries[$((srv_ch-1))]}"
-            local target_ip="${target_entry%%|*}"
-            local target_name="${target_entry##*|}"
-
-            # SSH туннель к удалённому серверу
+            local target="${alias_entries[$((srv_ch-1))]}"
+            local tip="${target%%|*}" tname="${target##*|}"
+            echo -ne "  ${CYAN}→ SSH туннель к ${tname}...${NC} "
             local tport=$(( 17000 + RANDOM % 1000 ))
-            echo -e "
-  ${CYAN}→ SSH туннель к ${target_name} (${target_ip})...${NC}"
-            ssh -f -N -L "${tport}:127.0.0.1:${XUI_PORT}"                 -o StrictHostKeyChecking=no                 -o ConnectTimeout=5                 -o ServerAliveInterval=30                 "root@${target_ip}" 2>/dev/null
+            ssh -f -N -L "${tport}:127.0.0.1:${XUI_PORT}" \
+                -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "root@${tip}" 2>/dev/null
             if [ $? -eq 0 ]; then
-                SSH_TUNNEL_PID=$(pgrep -f "ssh.*${tport}:127.0.0.1:${XUI_PORT}.*${target_ip}" | head -1)
+                SSH_TUNNEL_PID=$(pgrep -f "ssh.*${tport}:127.0.0.1:${XUI_PORT}.*${tip}" | head -1)
                 SSH_TUNNEL_PORT="$tport"
-                # Перенаправляем API на туннель
                 XUI_BASE="https://127.0.0.1:${tport}${XUI_PATH}"
-                echo -e "  ${GREEN}✓ Туннель установлен${NC}"
-                sleep 1
+                SERVER_LABEL="$tname"
+                SERVER_IP="$tip"
+                echo -e "${GREEN}✓${NC}"
+                # Перечитываем конфиг для нового сервера
+                _3xui_load_config
             else
-                echo -e "  ${RED}✗ SSH недоступен. Используется текущий сервер.${NC}"
+                echo -e "${RED}✗ SSH недоступен${NC}"
                 sleep 2
             fi
+        else
+            SERVER_LABEL="Текущий"
+            SERVER_IP="$MY_IP"
+            XUI_BASE="https://127.0.0.1:${XUI_PORT}${XUI_PATH}"
         fi
-    fi
+    }
+
+    # Начальный выбор если есть несколько серверов
+    local has_aliases=0
+    [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ] && has_aliases=1
+    [ "$has_aliases" -eq 1 ] && _3xui_switch_server
 
     # Проверяем пароль
     if ! grep -q "^XUI_PASS=" /etc/govpn/config 2>/dev/null; then
-        echo -e "
-  ${YELLOW}Пароль панели 3X-UI не настроен.${NC}"
+        echo -e "\n  ${YELLOW}Пароль панели 3X-UI не настроен.${NC}"
         _3xui_save_password || {
             [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
-            read -p "  Enter..." < /dev/tty; return
+            return
         }
     fi
 
@@ -696,67 +713,164 @@ ${CYAN}━━━ Выберите сервер 3X-UI ━━━${NC}
     cookie=$(_3xui_auth)
     if [ -z "$cookie" ]; then
         [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
-        read -p "  Enter..." < /dev/tty; return 1
+        return 1
     fi
 
-    # Закрываем туннель при выходе
-    trap '[ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null; trap - RETURN' RETURN
+    # ── Основной цикл: выбор inbound ──────────────────────────
+    while true; do
+        clear
+        # Шапка с сервером
+        echo -e "\n${CYAN}━━━ 3X-UI — выбор протокола ━━━${NC}"
+        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${SERVER_LABEL} (${SERVER_IP})${NC}"
+        [ "$has_aliases" -eq 1 ] && \
+            echo -e "  ${CYAN}[s]${NC}  Сменить сервер"
+        echo ""
+
+        # Загружаем активные inbound'ы
+        local -a ibs=()
+        local _sf; _sf=$(mktemp)
+        _3xui_select_inbounds "$cookie" > "$_sf" 2>/dev/null
+        while IFS= read -r line; do
+            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && ibs+=("$line")
+        done < "$_sf"
+        rm -f "$_sf"
+
+        if [ ${#ibs[@]} -eq 0 ]; then
+            echo -e "  ${RED}✗ Нет активных протоколов${NC}"
+            read -p "  Enter..." < /dev/tty
+            [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
+            return
+        fi
+
+        echo -e "  ${WHITE}Выберите протокол:${NC}\n"
+        # Получаем кол-во клиентов через API
+        local _jf; _jf=$(mktemp)
+        _3xui_get_inbounds "$cookie" > "$_jf" 2>/dev/null
+        local i=1
+        for ib in "${ibs[@]}"; do
+            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+            local cnt
+            cnt=$(python3 -c "
+import json,sys
+try:
+    with open('$_jf') as f: d=json.load(f)
+    for ib in d.get('obj',[]):
+        if str(ib['id'])=='$ib_id':
+            s=json.loads(ib.get('settings','{}'))
+            print(len(s.get('clients',[])))
+            break
+except: print(0)
+" 2>/dev/null || echo 0)
+            printf "  ${YELLOW}[%d]${NC}  %-22s ${CYAN}%s:%s${NC}  %s клиентов\n" \
+                "$i" "$ib_name" "$ib_proto" "$ib_port" "$cnt"
+            (( i++ ))
+        done
+        rm -f "$_jf"
+        echo ""
+        echo -e "  ${GREEN}[a]${NC}  Все клиенты (из всех протоколов)"
+        echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
+        echo -e "  ${YELLOW}[p]${NC}  Сменить пароль панели"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+
+        local ch; ch=$(read_choice "Выбор: ")
+        [ "$ch" = "0" ] || [ -z "$ch" ] && {
+            [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
+            return
+        }
+
+        if [[ "$ch" == "s" || "$ch" == "S" || "$ch" == "ы" || "$ch" == "Ы" ]]; then
+            _3xui_switch_server
+            cookie=$(_3xui_auth)
+            continue
+        elif [[ "$ch" == "i" || "$ch" == "I" ]]; then
+            _3xui_toggle_inbounds_menu "$cookie"
+            cookie=$(_3xui_auth)
+            continue
+        elif [[ "$ch" == "p" || "$ch" == "P" ]]; then
+            _3xui_save_password
+            cookie=$(_3xui_auth)
+            continue
+        elif [[ "$ch" == "a" || "$ch" == "A" || "$ch" == "а" || "$ch" == "А" ]]; then
+            _3xui_clients_list_menu "" "Все протоколы" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
+            cookie=$(_3xui_auth)
+        elif [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#ibs[@]} )); then
+            local ib="${ibs[$((ch-1))]}"
+            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+            _3xui_clients_list_menu "$ib_id" "${ib_name} (${ib_proto}:${ib_port})" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
+            cookie=$(_3xui_auth)
+        fi
+    done
+}
+
+# Список клиентов конкретного inbound'а (или всех)
+_3xui_clients_list_menu() {
+    local filter_ib="$1"    # id inbound'а или "" для всех
+    local ib_label="$2"     # название для шапки
+    local cookie="$3"
+    local srv_label="$4" srv_ip="$5"
 
     while true; do
         clear
-        echo -e "\n${CYAN}━━━ 3X-UI — клиенты ━━━${NC}"
+        echo -e "\n${CYAN}━━━ Клиенты: ${ib_label} ━━━${NC}"
+        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${srv_label} (${srv_ip})${NC}\n"
 
+        # Подписка
         _3xui_load_config
         local sub_url
         if [ -n "$XUI_SUB_DOMAIN" ]; then
-            sub_url="${GREEN}https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}<subId>${NC}"
+            sub_url="${GREEN}https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}${NC}"
         elif [ -n "$XUI_SUB_PORT" ]; then
-            sub_url="${YELLOW}http://${MY_IP}:${XUI_SUB_PORT}${XUI_SUB_PATH}<subId>${NC}  (IP виден!)"
+            sub_url="${YELLOW}http://${srv_ip}:${XUI_SUB_PORT}${XUI_SUB_PATH}${NC}  ${RED}(IP виден!)${NC}"
         else
             sub_url="${RED}не настроено${NC}"
         fi
-        echo -e "  ${WHITE}Подписки:${NC} ${sub_url}\n"
+        echo -e "  ${WHITE}Подписки:${NC} ${sub_url}<subId>\n"
 
         # Загружаем клиентов
         local -a clients=()
         local _cf; _cf=$(mktemp)
         _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
-        while IFS= read -r line; do
-            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && clients+=("$line")
-        done < "$_cf"
+
+        if [ -n "$filter_ib" ]; then
+            # Фильтруем по конкретному inbound'у
+            while IFS= read -r line; do
+                [ -n "$line" ] && ! [[ "$line" == ERR:* ]] || continue
+                IFS='|' read -r _e _s inbounds _rest <<< "$line"
+                [[ ",$inbounds," == *",$filter_ib,"* ]] && clients+=("$line")
+            done < "$_cf"
+        else
+            while IFS= read -r line; do
+                [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && clients+=("$line")
+            done < "$_cf"
+        fi
         rm -f "$_cf"
 
         if [ ${#clients[@]} -eq 0 ]; then
-            echo -e "  ${YELLOW}Клиентов не найдено${NC}\n"
+            echo -e "  ${YELLOW}Клиентов нет${NC}\n"
         else
-            # Заголовок — фиксированные ширины без emoji
-            printf "  \033[97m%-4s  %-20s  %-18s  %-7s  %s\033[0m\n" \
+            printf "  \033[97m%-4s  %-22s  %-18s  %-7s  %s\033[0m\n" \
                 "№" "Email" "SubId" "Статус" "Трафик↑/↓"
-            echo -e "  ${CYAN}$(printf '─%.0s' {1..60})${NC}"
+            echo -e "  ${CYAN}$(printf '─%.0s' {1..62})${NC}"
             local i=1
             for c in "${clients[@]}"; do
                 IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$c"
-                # Убираем спецсимволы из email для выравнивания
-                local clean_email; clean_email=$(printf '%s' "$email" | tr -cd '[:print:]' | cut -c1-20)
-                local clean_sub; clean_sub=$(printf '%s' "$sub_id" | cut -c1-18)
-                local st up_f down_f
+                local clean_email clean_sub st up_f down_f
+                clean_email=$(printf '%s' "$email" | tr -cd '[:print:]' | cut -c1-21)
+                clean_sub=$(printf '%s' "$sub_id" | cut -c1-18)
                 [ "$enable" = "on" ] && st="${GREEN}вкл${NC}" || st="${RED}выкл${NC}"
-                up_f=$(_fmt_bytes "$up")
-                down_f=$(_fmt_bytes "$down")
-                printf "  ${YELLOW}[%-2d]${NC}  %-20s  %-18s  %b%-4s  %s/%s\n" \
-                    "$i" "$clean_email" "$clean_sub" "$st" "" "$up_f" "$down_f"
+                up_f=$(_fmt_bytes "$up"); down_f=$(_fmt_bytes "$down")
+                printf "  ${YELLOW}[%-2d]${NC}  %-22s  %-18s  %b    %s/%s\n" \
+                    "$i" "$clean_email" "$clean_sub" "$st" "$up_f" "$down_f"
                 (( i++ ))
             done
             echo ""
         fi
 
         echo -e "  ${GREEN}[a]${NC}  Добавить клиента"
-        echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
-        echo -e "  ${YELLOW}[p]${NC}  Сменить пароль панели"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
-
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
 
         if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#clients[@]} )); then
@@ -765,15 +879,11 @@ ${CYAN}━━━ Выберите сервер 3X-UI ━━━${NC}
         elif [[ "$ch" == "a" || "$ch" == "A" || "$ch" == "а" || "$ch" == "А" ]]; then
             _3xui_add_client_menu "$cookie"
             cookie=$(_3xui_auth)
-        elif [[ "$ch" == "i" || "$ch" == "I" || "$ch" == "ш" || "$ch" == "Ш" ]]; then
-            _3xui_toggle_inbounds_menu "$cookie"
-            cookie=$(_3xui_auth)
-        elif [[ "$ch" == "p" || "$ch" == "P" || "$ch" == "з" || "$ch" == "З" ]]; then
-            _3xui_save_password
-            cookie=$(_3xui_auth)
         fi
     done
 }
+
+
 
 # Профиль клиента
 _3xui_client_profile() {
