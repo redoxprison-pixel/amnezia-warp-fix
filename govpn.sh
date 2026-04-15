@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.36"
+VERSION="5.37"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -433,16 +433,29 @@ _3xui_get_inbounds() {
 # Пишет вспомогательные python скрипты
 _3xui_write_helpers() {
     cat > /tmp/xui_parse.py << 'PYEOF'
-import json, sys, re
+import json, sys, re, subprocess
 
 def strip_suffix(email):
-    """Убирает суффиксы (-_•) (•_-) (•_•) (-_-) и подобные"""
     return re.sub(r'\([^)]*[_\-•.][^)]*\)\s*$', '', email).strip()
+
+def get_traffic(email):
+    try:
+        r = subprocess.run(
+            ['sqlite3', '/etc/x-ui/x-ui.db',
+             "SELECT up, down FROM client_traffics WHERE email='{}' LIMIT 1;".format(email)],
+            capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split('|')
+            if len(parts) == 2:
+                return int(parts[0] or 0), int(parts[1] or 0)
+    except Exception:
+        pass
+    return 0, 0
 
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    seen = {}  # key=subId -> data
+    seen = {}
     for ib in d.get("obj", []):
         ib_id = str(ib["id"])
         try:
@@ -453,34 +466,23 @@ try:
             email = c.get("email", "")
             sub_id = c.get("subId", "")
             enable = "on" if c.get("enable", True) else "off"
-            up = ib.get("up", 0)
-            down = ib.get("down", 0)
-            # Группируем по subId (уникальный для клиента)
-            # Если subId пустой — используем базовый email без суффикса
             base = strip_suffix(email)
             key = sub_id if sub_id else base
             if key not in seen:
-                seen[key] = {
-                    "display_email": base or email,
-                    "subId": sub_id,
-                    "inbounds": [],
-                    "emails": {},   # ib_id -> email (для удаления)
-                    "enable": enable,
-                    "up": up,
-                    "down": down
-                }
+                seen[key] = {"display_email": base or email, "subId": sub_id,
+                             "inbounds": [], "emails": {}, "enable": enable,
+                             "up": 0, "down": 0}
             if ib_id not in seen[key]["inbounds"]:
                 seen[key]["inbounds"].append(ib_id)
                 seen[key]["emails"][ib_id] = email
-            # Суммируем трафик только один раз (берём макс по inbound)
-            seen[key]["up"] = max(seen[key]["up"], up)
-            seen[key]["down"] = max(seen[key]["down"], down)
+                up, dn = get_traffic(email)
+                seen[key]["up"] += up
+                seen[key]["down"] += dn
     for v in seen.values():
-        # emails_map: "ib_id:email,ib_id:email,..."
-        emails_map = ";".join("{}:{}".format(k, v2) for k, v2 in v["emails"].items())
+        emap = ";".join("{}:{}".format(k, v2) for k, v2 in v["emails"].items())
         print("{}|{}|{}|{}|{}|{}|{}".format(
             v["display_email"], v["subId"], ",".join(v["inbounds"]),
-            v["enable"], v["up"], v["down"], emails_map))
+            v["enable"], v["up"], v["down"], emap))
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
@@ -727,11 +729,21 @@ _3xui_clients_menu() {
     # ── Основной цикл: выбор inbound ──────────────────────────
     while true; do
         clear
-        # Шапка с сервером
+        # Шапка с сервером и списком доступных
         echo -e "\n${CYAN}━━━ 3X-UI — выбор протокола ━━━${NC}"
         echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${SERVER_LABEL} (${SERVER_IP})${NC}"
-        [ "$has_aliases" -eq 1 ] && \
-            echo -e "  ${CYAN}[s]${NC}  Сменить сервер"
+        # Показываем другие доступные серверы
+        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+            local _other_srv=""
+            while IFS= read -r aline; do
+                [[ -z "$aline" || "$aline" == \#* ]] && continue
+                local _aip="${aline%%=*}" _ainfo="${aline##*=}"
+                local _aname="${_ainfo%%|*}"
+                [ "$_aip" = "$SERVER_IP" ] && continue
+                _other_srv="${_other_srv}${_aname}(${_aip})  "
+            done < "$ALIASES_FILE"
+            [ -n "$_other_srv" ] && echo -e "  ${WHITE}Другие:${NC}  ${CYAN}${_other_srv}${NC}  ${YELLOW}[s]${NC} сменить"
+        fi
         echo ""
 
         # Загружаем активные inbound'ы
@@ -959,8 +971,24 @@ PYEOF
         echo -e "\n${CYAN}━━━ Клиент: ${email} ━━━${NC}\n"
         echo -e "  ${WHITE}SubId:${NC}    ${CYAN}${sub_id}${NC}"
         echo -e "  ${WHITE}Статус:${NC}   $([ "$enable" = "on" ] && echo -e "${GREEN}● активен${NC}" || echo -e "${RED}● отключён${NC}")"
+        # Трафик из SQLite по всем email'ам клиента
+        local real_up=0 real_down=0
+        local _emails_list
+        _emails_list=$(echo "$emails_map" | tr ';' '\n' | cut -d: -f2-)
+        while IFS= read -r _em; do
+            [ -z "$_em" ] && continue
+            local _row
+            _row=$(sqlite3 /etc/x-ui/x-ui.db "SELECT up, down FROM client_traffics WHERE email='${_em}' LIMIT 1;" 2>/dev/null)
+            if [ -n "$_row" ]; then
+                local _u _d
+                _u=$(echo "$_row" | cut -d'|' -f1)
+                _d=$(echo "$_row" | cut -d'|' -f2)
+                real_up=$(( real_up + ${_u:-0} ))
+                real_down=$(( real_down + ${_d:-0} ))
+            fi
+        done <<< "$_emails_list"
         local up_f down_f
-        up_f=$(_fmt_bytes "$up"); down_f=$(_fmt_bytes "$down")
+        up_f=$(_fmt_bytes "$real_up"); down_f=$(_fmt_bytes "$real_down")
         echo -e "  ${WHITE}Трафик:${NC}   ↑${up_f} / ↓${down_f}"
 
         # Ограничения
@@ -1081,53 +1109,75 @@ _3xui_update_client_field() {
     _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
 
     IFS=',' read -ra ib_arr <<< "$inbounds"
-    local ok=0
+    local ok=0 fail=0
     for ib_id in "${ib_arr[@]}"; do
         local exact_email
         exact_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+        [ -z "$exact_email" ] && continue
 
-        # Строим новый объект клиента с обновлённым полем
-        local new_settings
-        new_settings=$(python3 - "$jf" "$ib_id" "$exact_email" "$field" "$value" << 'PYEOF'
+        # Получаем UUID клиента
+        local client_uuid
+        client_uuid=$(python3 /tmp/xui_getid.py "$jf" "$ib_id" "$exact_email" 2>/dev/null)
+        [ -z "$client_uuid" ] && { (( fail++ )); continue; }
+
+        # Строим обновлённый объект — settings как JSON-строка внутри объекта
+        local payload
+        payload=$(python3 - "$jf" "$ib_id" "$exact_email" "$client_uuid" "$field" "$value" << 'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    ib_id, email, field, value = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+    ib_id, email, uuid, field, value = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
     for ib in d.get("obj", []):
         if str(ib["id"]) == ib_id:
             s = json.loads(ib.get("settings", "{}"))
             for c in s.get("clients", []):
-                if c.get("email") == email:
-                    # Преобразуем значение
-                    try: c[field] = int(value)
-                    except: c[field] = value
-                    print(json.dumps({"id": int(ib_id), "settings": json.dumps(s)}))
+                if c.get("email") == email and c.get("id") == uuid:
+                    try:
+                        c[field] = int(value)
+                    except (ValueError, TypeError):
+                        c[field] = value
+                    # settings должен быть JSON-строкой
+                    payload = {"id": int(ib_id), "settings": json.dumps(s)}
+                    print(json.dumps(payload))
                     break
             break
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
         )
-        if [ -n "$new_settings" ]; then
-            # Получаем UUID клиента для правильного API пути
-            local client_uuid
-            client_uuid=$(python3 /tmp/xui_getid.py "$jf" "$ib_id" "$exact_email" 2>/dev/null)
-            if [ -n "$client_uuid" ]; then
-                local res; res=$(_3xui_api POST "/panel/api/inbounds/${ib_id}/updateClient/${client_uuid}" "$new_settings" "$cookie")
-                echo "$res" | grep -q '"success":true' && (( ok++ ))
+
+        if [ -n "$payload" ]; then
+            local df; df=$(mktemp)
+            printf '%s' "$payload" > "$df"
+            local res
+            res=$(curl -sk -X POST \
+                -H "Cookie: $cookie" \
+                -H 'Content-Type: application/json' \
+                -d "@${df}" \
+                "${XUI_BASE}/panel/api/inbounds/${ib_id}/updateClient/${client_uuid}" 2>/dev/null)
+            rm -f "$df"
+            if echo "$res" | grep -q '"success":true'; then
+                (( ok++ ))
+            else
+                local msg; msg=$(echo "$res" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null)
+                echo -e "  ${YELLOW}⚠ ${ib_id}: ${msg}${NC}"
+                (( fail++ ))
             fi
+        else
+            (( fail++ ))
         fi
     done
     rm -f "$jf"
 
     if [ "$ok" -gt 0 ]; then
         echo -e "  ${GREEN}✓ Обновлено в ${ok} протокол(ах)${NC}"
-    else
-        echo -e "  ${RED}✗ Не удалось обновить${NC}"
     fi
+    [ "$fail" -gt 0 ] && echo -e "  ${RED}✗ Не удалось обновить ${fail} протокол(ов)${NC}"
     read -p "  Enter..." < /dev/tty
 }
+
+
 
 
 # Добавить нового клиента
