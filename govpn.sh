@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.37"
+VERSION="5.39"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -606,576 +606,145 @@ else: print('{:.1f}G'.format(b/1073741824))
 }
 
 # Добавляет клиента в inbound
+# ── Вспомогательная: перезапуск xray после изменений в БД
+_3xui_restart_xray() {
+    # x-ui-pro использует API для перезапуска xray
+    curl -sk -X POST \
+        -H "Cookie: $1" \
+        "${XUI_BASE}/panel/api/server/restartXrayService" \
+        -H 'Content-Type: application/json' \
+        -d '{}' > /dev/null 2>&1 || true
+}
+
+# ── Добавляет клиента через API addClient (работает в этой версии)
 _3xui_add_client_to_inbound() {
     local ib_id="$1" email="$2" uuid="$3" sub_id="$4" cookie="$5"
-    local data
-    data=$(python3 -c "
-import json
-c={'id':'${uuid}','email':'${email}','subId':'${sub_id}','enable':True,
-   'flow':'xtls-rprx-vision','limitIp':0,'totalGB':0,'expiryTime':0,
-   'reset':0,'tgId':'','comment':''}
-print(json.dumps({'id':${ib_id},'settings':json.dumps({'clients':[c]})}))
-" 2>/dev/null)
-    _3xui_api POST "/panel/api/inbounds/addClient" "$data" "$cookie"
+    local df; df=$(mktemp)
+    python3 - "$ib_id" "$email" "$uuid" "$sub_id" > "$df" << 'PYEOF'
+import json, sys
+ib_id, email, uuid, sub_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+c = {"id": uuid, "email": email, "subId": sub_id, "enable": True,
+     "flow": "xtls-rprx-vision", "limitIp": 0, "totalGB": 0,
+     "expiryTime": 0, "reset": 0, "tgId": "", "comment": ""}
+print(json.dumps({"id": int(ib_id), "settings": json.dumps({"clients": [c]})}))
+PYEOF
+    local res
+    res=$(curl -sk -X POST -H "Cookie: $cookie" \
+        -H 'Content-Type: application/json' \
+        -d "@${df}" \
+        "${XUI_BASE}/panel/api/inbounds/addClient" 2>/dev/null)
+    rm -f "$df"
+    echo "$res"
 }
 
-# Удаляет клиента из inbound по email
+# ── Удаляет клиента через SQLite напрямую
 _3xui_del_client_from_inbound() {
     local ib_id="$1" email="$2" cookie="$3"
-    local jf; jf=$(mktemp)
-    _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
-    local uuid
-    uuid=$(python3 - "$jf" "$ib_id" "$email" << 'PYEOF'
-import json,sys
-with open(sys.argv[1]) as f: d=json.load(f)
-for ib in d.get("obj",[]):
-    if str(ib["id"])==sys.argv[2]:
-        s=json.loads(ib.get("settings","{}"))
-        for c in s.get("clients",[]):
-            if c.get("email")==sys.argv[3]: print(c.get("id","")); break
+    local result
+    result=$(python3 - "$ib_id" "$email" << 'PYEOF'
+import json, sys, subprocess
+ib_id, email = sys.argv[1], sys.argv[2]
+DB = "/etc/x-ui/x-ui.db"
+try:
+    # Читаем текущие настройки inbound
+    r = subprocess.run(['sqlite3', DB,
+        f"SELECT settings FROM inbounds WHERE id={ib_id};"],
+        capture_output=True, text=True, timeout=3)
+    if r.returncode != 0 or not r.stdout.strip():
+        print("ERR:inbound not found"); sys.exit(1)
+    settings = json.loads(r.stdout.strip())
+    clients = settings.get("clients", [])
+    new_clients = [c for c in clients if c.get("email") != email]
+    if len(new_clients) == len(clients):
+        print("ERR:client not found"); sys.exit(1)
+    settings["clients"] = new_clients
+    new_settings = json.dumps(settings)
+    # Экранируем для SQLite
+    new_settings_escaped = new_settings.replace("'", "''")
+    r2 = subprocess.run(['sqlite3', DB,
+        f"UPDATE inbounds SET settings='{new_settings_escaped}' WHERE id={ib_id};"],
+        capture_output=True, text=True, timeout=3)
+    if r2.returncode == 0:
+        print('{"success":true,"msg":"deleted"}')
+    else:
+        print("ERR:" + r2.stderr)
+except Exception as e:
+    print("ERR:" + str(e))
 PYEOF
     )
-    rm -f "$jf"
-    [ -z "$uuid" ] && return 1
-    _3xui_api POST "/panel/api/inbounds/${ib_id}/delClient/${uuid}" "" "$cookie"
+    # После изменения БД перезапускаем xray
+    echo "$result" | grep -q '"success":true' && \
+        _3xui_restart_xray "$cookie" &
+    echo "$result"
 }
 
-# ─── Главное меню клиентов ─────────────────────────────────────
-
-_3xui_clients_menu() {
-    _3xui_load_config
-    _3xui_write_helpers
-
-    # ── Выбор сервера ─────────────────────────────────────────
-    local SERVER_LABEL="Текущий"
-    local SERVER_IP="$MY_IP"
-    local SSH_TUNNEL_PID="" SSH_TUNNEL_PORT=""
-
-    _3xui_switch_server() {
-        # Сбрасываем старый туннель если был
-        if [ -n "$SSH_TUNNEL_PID" ]; then
-            kill "$SSH_TUNNEL_PID" 2>/dev/null
-            SSH_TUNNEL_PID=""
-            XUI_BASE="https://127.0.0.1:${XUI_PORT}${XUI_PATH}"
-        fi
-
-        clear
-        echo -e "\n${CYAN}━━━ Выберите сервер ━━━${NC}\n"
-        echo -e "  ${YELLOW}[0]${NC}  ${MY_IP} (текущий)"
-        local ai=1
-        local -a alias_entries=()
-        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
-            while IFS= read -r aline; do
-                [[ -z "$aline" || "$aline" == \#* ]] && continue
-                local aip="${aline%%=*}" ainfo="${aline##*=}"
-                local aname="${ainfo%%|*}"
-                [ "$aip" = "$MY_IP" ] && continue
-                echo -e "  ${YELLOW}[$ai]${NC}  ${aname} (${aip})"
-                alias_entries+=("${aip}|${aname}")
-                (( ai++ ))
-            done < "$ALIASES_FILE"
-        fi
-        echo ""
-        local srv_ch
-        read -p "  Выбор: " srv_ch < /dev/tty
-
-        if [[ "$srv_ch" =~ ^[1-9][0-9]*$ ]] && (( srv_ch < ai )); then
-            local target="${alias_entries[$((srv_ch-1))]}"
-            local tip="${target%%|*}" tname="${target##*|}"
-            echo -ne "  ${CYAN}→ SSH туннель к ${tname}...${NC} "
-            local tport=$(( 17000 + RANDOM % 1000 ))
-            ssh -f -N -L "${tport}:127.0.0.1:${XUI_PORT}" \
-                -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-                "root@${tip}" 2>/dev/null
-            if [ $? -eq 0 ]; then
-                SSH_TUNNEL_PID=$(pgrep -f "ssh.*${tport}:127.0.0.1:${XUI_PORT}.*${tip}" | head -1)
-                SSH_TUNNEL_PORT="$tport"
-                XUI_BASE="https://127.0.0.1:${tport}${XUI_PATH}"
-                SERVER_LABEL="$tname"
-                SERVER_IP="$tip"
-                echo -e "${GREEN}✓${NC}"
-                # Перечитываем конфиг для нового сервера
-                _3xui_load_config
-            else
-                echo -e "${RED}✗ SSH недоступен${NC}"
-                sleep 2
-            fi
-        else
-            SERVER_LABEL="Текущий"
-            SERVER_IP="$MY_IP"
-            XUI_BASE="https://127.0.0.1:${XUI_PORT}${XUI_PATH}"
-        fi
-    }
-
-    local has_aliases=0
-    [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ] && has_aliases=1
-
-    # Проверяем пароль
-    if ! grep -q "^XUI_PASS=" /etc/govpn/config 2>/dev/null; then
-        echo -e "\n  ${YELLOW}Пароль панели 3X-UI не настроен.${NC}"
-        _3xui_save_password || {
-            [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
-            return
-        }
-    fi
-
-    local cookie
-    cookie=$(_3xui_auth)
-    if [ -z "$cookie" ]; then
-        [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
-        return 1
-    fi
-
-    # ── Основной цикл: выбор inbound ──────────────────────────
-    while true; do
-        clear
-        # Шапка с сервером и списком доступных
-        echo -e "\n${CYAN}━━━ 3X-UI — выбор протокола ━━━${NC}"
-        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${SERVER_LABEL} (${SERVER_IP})${NC}"
-        # Показываем другие доступные серверы
-        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
-            local _other_srv=""
-            while IFS= read -r aline; do
-                [[ -z "$aline" || "$aline" == \#* ]] && continue
-                local _aip="${aline%%=*}" _ainfo="${aline##*=}"
-                local _aname="${_ainfo%%|*}"
-                [ "$_aip" = "$SERVER_IP" ] && continue
-                _other_srv="${_other_srv}${_aname}(${_aip})  "
-            done < "$ALIASES_FILE"
-            [ -n "$_other_srv" ] && echo -e "  ${WHITE}Другие:${NC}  ${CYAN}${_other_srv}${NC}  ${YELLOW}[s]${NC} сменить"
-        fi
-        echo ""
-
-        # Загружаем активные inbound'ы
-        local -a ibs=()
-        local _sf; _sf=$(mktemp)
-        _3xui_select_inbounds "$cookie" > "$_sf" 2>/dev/null
-        while IFS= read -r line; do
-            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && ibs+=("$line")
-        done < "$_sf"
-        rm -f "$_sf"
-
-        if [ ${#ibs[@]} -eq 0 ]; then
-            echo -e "  ${RED}✗ Нет активных протоколов${NC}"
-            read -p "  Enter..." < /dev/tty
-            [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
-            return
-        fi
-
-        echo -e "  ${WHITE}Выберите протокол:${NC}\n"
-        # Получаем кол-во клиентов через API
-        local _jf; _jf=$(mktemp)
-        _3xui_get_inbounds "$cookie" > "$_jf" 2>/dev/null
-        local i=1
-        for ib in "${ibs[@]}"; do
-            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-            local cnt
-            cnt=$(python3 -c "
-import json,sys
-try:
-    with open('$_jf') as f: d=json.load(f)
-    for ib in d.get('obj',[]):
-        if str(ib['id'])=='$ib_id':
-            s=json.loads(ib.get('settings','{}'))
-            print(len(s.get('clients',[])))
-            break
-except: print(0)
-" 2>/dev/null || echo 0)
-            printf "  ${YELLOW}[%d]${NC}  %-22s ${CYAN}%s:%s${NC}  %s клиентов\n" \
-                "$i" "$ib_name" "$ib_proto" "$ib_port" "$cnt"
-            (( i++ ))
-        done
-        rm -f "$_jf"
-        echo ""
-        echo -e "  ${GREEN}[a]${NC}  Все клиенты (из всех протоколов)"
-        echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
-        echo -e "  ${YELLOW}[p]${NC}  Сменить пароль панели"
-        echo -e "  ${YELLOW}[0]${NC}  Назад"
-        echo ""
-
-        local ch; ch=$(read_choice "Выбор: ")
-        [ "$ch" = "0" ] || [ -z "$ch" ] && {
-            [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
-            return
-        }
-
-        if [[ "$ch" == "s" || "$ch" == "S" || "$ch" == "ы" || "$ch" == "Ы" ]]; then
-            _3xui_switch_server
-            cookie=$(_3xui_auth)
-            continue
-        elif [[ "$ch" == "i" || "$ch" == "I" ]]; then
-            _3xui_toggle_inbounds_menu "$cookie"
-            cookie=$(_3xui_auth)
-            continue
-        elif [[ "$ch" == "p" || "$ch" == "P" ]]; then
-            _3xui_save_password
-            cookie=$(_3xui_auth)
-            continue
-        elif [[ "$ch" == "a" || "$ch" == "A" || "$ch" == "а" || "$ch" == "А" ]]; then
-            _3xui_clients_list_menu "" "Все протоколы" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
-            cookie=$(_3xui_auth)
-        elif [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#ibs[@]} )); then
-            local ib="${ibs[$((ch-1))]}"
-            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-            _3xui_clients_list_menu "$ib_id" "${ib_name} (${ib_proto}:${ib_port})" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
-            cookie=$(_3xui_auth)
-        fi
-    done
-}
-
-# Список клиентов конкретного inbound'а (или всех)
-_3xui_clients_list_menu() {
-    local filter_ib="$1"    # id inbound'а или "" для всех
-    local ib_label="$2"     # название для шапки
-    local cookie="$3"
-    local srv_label="$4" srv_ip="$5"
-
-    while true; do
-        clear
-        echo -e "\n${CYAN}━━━ Клиенты: ${ib_label} ━━━${NC}"
-        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${srv_label} (${srv_ip})${NC}\n"
-
-        # Подписка
-        _3xui_load_config
-        local sub_url
-        if [ -n "$XUI_SUB_DOMAIN" ]; then
-            sub_url="${GREEN}https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}${NC}"
-        elif [ -n "$XUI_SUB_PORT" ]; then
-            sub_url="${YELLOW}http://${srv_ip}:${XUI_SUB_PORT}${XUI_SUB_PATH}${NC}  ${RED}(IP виден!)${NC}"
-        else
-            sub_url="${RED}не настроено${NC}"
-        fi
-        # Автофикс subDomain если пустой
-        if [ -z "$XUI_SUB_DOMAIN" ] && [ -f /etc/x-ui/x-ui.db ]; then
-            local nginx_domain
-            nginx_domain=$(grep -rh 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null |                 grep -oP 'server_name\s+\K\S+' | grep '\.' | grep -v 'localhost\|_' | head -1)
-            if [ -n "$nginx_domain" ]; then
-                echo -e "  ${YELLOW}⚠ subDomain пустой — подписки идут через IP.${NC}"
-                echo -ne "  ${WHITE}Исправить на ${nginx_domain}? (y/n): ${NC}"
-                read -r fix_c < /dev/tty
-                if [ "$fix_c" = "y" ]; then
-                    sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value='${nginx_domain}' WHERE key='subDomain';" 2>/dev/null &&                     systemctl restart x-ui > /dev/null 2>&1 &&                     sleep 1 &&                     _3xui_load_config
-                    echo -e "  ${GREEN}✓ subDomain = ${nginx_domain}${NC}"
-                    sub_url="${GREEN}https://${nginx_domain}${XUI_SUB_PATH}${NC}"
-                fi
-            fi
-        fi
-        echo -e "  ${WHITE}Подписки:${NC} ${sub_url}<subId>\n"
-
-        # Загружаем клиентов
-        local -a clients=()
-        local _cf; _cf=$(mktemp)
-        _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
-
-        if [ -n "$filter_ib" ]; then
-            # Фильтруем по конкретному inbound'у
-            while IFS= read -r line; do
-                [ -n "$line" ] && ! [[ "$line" == ERR:* ]] || continue
-                IFS='|' read -r _e _s inbounds _rest <<< "$line"
-                [[ ",$inbounds," == *",$filter_ib,"* ]] && clients+=("$line")
-            done < "$_cf"
-        else
-            while IFS= read -r line; do
-                [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && clients+=("$line")
-            done < "$_cf"
-        fi
-        rm -f "$_cf"
-
-        if [ ${#clients[@]} -eq 0 ]; then
-            echo -e "  ${YELLOW}Клиентов нет${NC}\n"
-        else
-            printf "  \033[97m%-4s  %-22s  %-18s  %-7s  %s\033[0m\n" \
-                "№" "Email" "SubId" "Статус" "Трафик↑/↓"
-            echo -e "  ${CYAN}$(printf '─%.0s' {1..62})${NC}"
-            local i=1
-            for c in "${clients[@]}"; do
-                IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$c"
-                local clean_email clean_sub st up_f down_f
-                clean_email=$(printf '%s' "$email" | tr -cd '[:print:]' | cut -c1-21)
-                clean_sub=$(printf '%s' "$sub_id" | cut -c1-18)
-                [ "$enable" = "on" ] && st="${GREEN}вкл${NC}" || st="${RED}выкл${NC}"
-                up_f=$(_fmt_bytes "$up"); down_f=$(_fmt_bytes "$down")
-                printf "  ${YELLOW}[%-2d]${NC}  %-22s  %-18s  %b    %s/%s\n" \
-                    "$i" "$clean_email" "$clean_sub" "$st" "$up_f" "$down_f"
-                (( i++ ))
-            done
-            echo ""
-        fi
-
-        echo -e "  ${GREEN}[a]${NC}  Добавить клиента"
-        echo -e "  ${YELLOW}[0]${NC}  Назад"
-        echo ""
-        local ch; ch=$(read_choice "Выбор: ")
-        [ "$ch" = "0" ] || [ -z "$ch" ] && return
-
-        if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#clients[@]} )); then
-            _3xui_client_profile "${clients[$((ch-1))]}" "$cookie"
-            cookie=$(_3xui_auth)
-        elif [[ "$ch" == "a" || "$ch" == "A" || "$ch" == "а" || "$ch" == "А" ]]; then
-            _3xui_add_client_menu "$cookie"
-            cookie=$(_3xui_auth)
-        fi
-    done
-}
-
-
-
-# Профиль клиента
-_3xui_client_profile() {
-    local client_str="$1" cookie="$2"
-    IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$client_str"
-
-    # Получаем ограничения из первого inbound'а
-    _get_client_limits() {
-        local jf; jf=$(mktemp)
-        _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
-        local first_ib="${inbounds%%,*}"
-        local first_email
-        first_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${first_ib}:" | cut -d: -f2-)
-        [ -z "$first_email" ] && first_email="$email"
-        python3 - "$jf" "$first_ib" "$first_email" << 'PYEOF'
-import json, sys
-from datetime import datetime
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    for ib in d.get("obj", []):
-        if str(ib["id"]) == sys.argv[2]:
-            s = json.loads(ib.get("settings", "{}"))
-            for c in s.get("clients", []):
-                if c.get("email") == sys.argv[3]:
-                    total_gb = c.get("totalGB", 0)
-                    expiry = c.get("expiryTime", 0)
-                    limit_ip = c.get("limitIp", 0)
-                    reset = c.get("reset", 0)
-                    gb_str = "{:.1f} GB".format(total_gb/1073741824) if total_gb > 0 else "∞"
-                    if expiry > 0:
-                        dt = datetime.fromtimestamp(expiry/1000)
-                        exp_str = dt.strftime("%d.%m.%Y")
-                    else:
-                        exp_str = "∞"
-                    ip_str = str(limit_ip) if limit_ip > 0 else "∞"
-                    print("{}|{}|{}|{}|{}".format(
-                        gb_str, exp_str, ip_str,
-                        total_gb, expiry))
-                    break
-except Exception as e:
-    sys.stderr.write("ERR:{}\n".format(e))
-    print("∞|∞|∞|0|0")
-PYEOF
-        rm -f "$jf"
-    }
-
-    while true; do
-        clear
-        echo -e "\n${CYAN}━━━ Клиент: ${email} ━━━${NC}\n"
-        echo -e "  ${WHITE}SubId:${NC}    ${CYAN}${sub_id}${NC}"
-        echo -e "  ${WHITE}Статус:${NC}   $([ "$enable" = "on" ] && echo -e "${GREEN}● активен${NC}" || echo -e "${RED}● отключён${NC}")"
-        # Трафик из SQLite по всем email'ам клиента
-        local real_up=0 real_down=0
-        local _emails_list
-        _emails_list=$(echo "$emails_map" | tr ';' '\n' | cut -d: -f2-)
-        while IFS= read -r _em; do
-            [ -z "$_em" ] && continue
-            local _row
-            _row=$(sqlite3 /etc/x-ui/x-ui.db "SELECT up, down FROM client_traffics WHERE email='${_em}' LIMIT 1;" 2>/dev/null)
-            if [ -n "$_row" ]; then
-                local _u _d
-                _u=$(echo "$_row" | cut -d'|' -f1)
-                _d=$(echo "$_row" | cut -d'|' -f2)
-                real_up=$(( real_up + ${_u:-0} ))
-                real_down=$(( real_down + ${_d:-0} ))
-            fi
-        done <<< "$_emails_list"
-        local up_f down_f
-        up_f=$(_fmt_bytes "$real_up"); down_f=$(_fmt_bytes "$real_down")
-        echo -e "  ${WHITE}Трафик:${NC}   ↑${up_f} / ↓${down_f}"
-
-        # Ограничения
-        local limits_str; limits_str=$(_get_client_limits)
-        IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
-        echo -e "  ${WHITE}Лимит ГБ:${NC} ${CYAN}${lim_gb}${NC}"
-        echo -e "  ${WHITE}Истекает:${NC} ${CYAN}${lim_exp}${NC}"
-        echo -e "  ${WHITE}IP лимит:${NC} ${CYAN}${lim_ip}${NC}"
-
-        echo -e "\n  ${WHITE}Протоколы:${NC}"
-        IFS=',' read -ra ib_arr <<< "$inbounds"
-        for ib_id in "${ib_arr[@]}"; do
-            local ib_nm; ib_nm=$(_3xui_inbound_name "$ib_id" "$cookie")
-            echo -e "    ${CYAN}• ${ib_nm:-id=$ib_id}${NC}"
-        done
-
-        local sub_link; sub_link=$(_3xui_sub_link "$sub_id")
-        echo -e "\n  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
-
-        echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${YELLOW}[2]${NC}  Установить лимит ГБ"
-        echo -e "  ${YELLOW}[3]${NC}  Установить срок действия"
-        echo -e "  ${GREEN}[4]${NC}  Добавить протокол"
-        echo -e "  ${RED}[5]${NC}  Удалить протокол"
-        echo -e "  ${RED}[6]${NC}  Удалить клиента полностью"
-        echo -e "  ${YELLOW}[7]${NC}  Сбросить трафик"
-        echo -e "  ${YELLOW}[0]${NC}  Назад"
-        echo ""
-        local ch; ch=$(read_choice "Выбор: ")
-        [ "$ch" = "0" ] || [ -z "$ch" ] && return
-
-        case "$ch" in
-            1)
-                command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
-                echo ""; qrencode -t ANSIUTF8 "$sub_link"
-                read -p "  Enter..." < /dev/tty ;;
-            2)
-                echo -e "\n  ${WHITE}Лимит трафика:${NC}"
-                echo -e "  Текущий: ${CYAN}${lim_gb}${NC}"
-                echo -e "  Введите новый лимит в ГБ (0 = без лимита):"
-                echo -ne "  → "; read -r new_gb < /dev/tty
-                [[ "$new_gb" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo -e "  ${RED}✗ Неверный формат${NC}"; read -p "  Enter..." < /dev/tty; continue; }
-                local new_gb_bytes
-                new_gb_bytes=$(python3 -c "print(int(float('$new_gb') * 1073741824))" 2>/dev/null)
-                _3xui_update_client_field "$inbounds" "$emails_map" "totalGB" "$new_gb_bytes" "$cookie"
-                ;;
-            3)
-                echo -e "\n  ${WHITE}Срок действия:${NC}"
-                echo -e "  Текущий: ${CYAN}${lim_exp}${NC}"
-                echo -e "  Варианты:"
-                echo -e "  ${YELLOW}[1]${NC}  30 дней"
-                echo -e "  ${YELLOW}[2]${NC}  90 дней"
-                echo -e "  ${YELLOW}[3]${NC}  180 дней"
-                echo -e "  ${YELLOW}[4]${NC}  1 год"
-                echo -e "  ${YELLOW}[5]${NC}  Без ограничений"
-                echo -e "  ${YELLOW}[6]${NC}  Указать дату (ДД.ММ.ГГГГ)"
-                echo -ne "  → "; read -r exp_ch < /dev/tty
-                local new_expiry=0
-                case "$exp_ch" in
-                    1) new_expiry=$(python3 -c "import time; print(int((time.time()+30*86400)*1000))");;
-                    2) new_expiry=$(python3 -c "import time; print(int((time.time()+90*86400)*1000))");;
-                    3) new_expiry=$(python3 -c "import time; print(int((time.time()+180*86400)*1000))");;
-                    4) new_expiry=$(python3 -c "import time; print(int((time.time()+365*86400)*1000))");;
-                    5) new_expiry=0;;
-                    6)
-                        echo -ne "  Дата (ДД.ММ.ГГГГ): "; read -r dstr < /dev/tty
-                        new_expiry=$(python3 -c "
-from datetime import datetime
-try:
-    dt=datetime.strptime('$dstr','%d.%m.%Y')
-    print(int(dt.timestamp()*1000))
-except: print(0)
-" 2>/dev/null)
-                        ;;
-                    *) continue;;
-                esac
-                _3xui_update_client_field "$inbounds" "$emails_map" "expiryTime" "$new_expiry" "$cookie"
-                ;;
-            4)
-                _3xui_add_inbound_to_client "$email" "$sub_id" "$inbounds" "$cookie"
-                return ;;
-            5)
-                _3xui_del_inbound_from_client "$email" "$inbounds" "$cookie"
-                return ;;
-            6)
-                echo -ne "\n  ${RED}Удалить ${email} из всех inbound'ов? (y/n): ${NC}"
-                read -r c < /dev/tty
-                [[ "$c" != "y" ]] && continue
-                IFS=',' read -ra ib_arr <<< "$inbounds"
-                local ok=0
-                for ib_id in "${ib_arr[@]}"; do
-                    local exact_email
-                    exact_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
-                    [ -z "$exact_email" ] && exact_email="$email"
-                    local res; res=$(_3xui_del_client_from_inbound "$ib_id" "$exact_email" "$cookie")
-                    echo "$res" | grep -q '"success":true' && (( ok++ ))
-                done
-                echo -e "  ${GREEN}✓ Удалён из ${ok} inbound(ов)${NC}"
-                log_action "3XUI: удалён ${email}"
-                read -p "  Enter..." < /dev/tty
-                return ;;
-            7)
-                local first_exact
-                first_exact=$(echo "$emails_map" | tr ';' '\n' | head -1 | cut -d: -f2-)
-                [ -z "$first_exact" ] && first_exact="$email"
-                local res; res=$(_3xui_api POST "/panel/api/inbounds/resetClientTraffic/${first_exact}" "" "$cookie")
-                echo "$res" | grep -q '"success":true' && \
-                    echo -e "  ${GREEN}✓ Трафик сброшен${NC}" || echo -e "  ${RED}✗ Ошибка${NC}"
-                read -p "  Enter..." < /dev/tty ;;
-        esac
-    done
-}
-
-# Обновляет поле клиента во всех inbound'ах
+# ── Обновляет поле клиента через SQLite
 _3xui_update_client_field() {
     local inbounds="$1" emails_map="$2" field="$3" value="$4" cookie="$5"
-    local jf; jf=$(mktemp)
-    _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
+    local ok=0 fail=0
 
     IFS=',' read -ra ib_arr <<< "$inbounds"
-    local ok=0 fail=0
     for ib_id in "${ib_arr[@]}"; do
         local exact_email
         exact_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
         [ -z "$exact_email" ] && continue
 
-        # Получаем UUID клиента
-        local client_uuid
-        client_uuid=$(python3 /tmp/xui_getid.py "$jf" "$ib_id" "$exact_email" 2>/dev/null)
-        [ -z "$client_uuid" ] && { (( fail++ )); continue; }
-
-        # Строим обновлённый объект — settings как JSON-строка внутри объекта
-        local payload
-        payload=$(python3 - "$jf" "$ib_id" "$exact_email" "$client_uuid" "$field" "$value" << 'PYEOF'
-import json, sys
+        local result
+        result=$(python3 - "$ib_id" "$exact_email" "$field" "$value" << 'PYEOF'
+import json, sys, subprocess
+ib_id, email, field, value = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+DB = "/etc/x-ui/x-ui.db"
 try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    ib_id, email, uuid, field, value = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
-    for ib in d.get("obj", []):
-        if str(ib["id"]) == ib_id:
-            s = json.loads(ib.get("settings", "{}"))
-            for c in s.get("clients", []):
-                if c.get("email") == email and c.get("id") == uuid:
-                    try:
-                        c[field] = int(value)
-                    except (ValueError, TypeError):
-                        c[field] = value
-                    # settings должен быть JSON-строкой
-                    payload = {"id": int(ib_id), "settings": json.dumps(s)}
-                    print(json.dumps(payload))
-                    break
+    r = subprocess.run(['sqlite3', DB,
+        f"SELECT settings FROM inbounds WHERE id={ib_id};"],
+        capture_output=True, text=True, timeout=3)
+    if r.returncode != 0 or not r.stdout.strip():
+        print("ERR:inbound not found"); sys.exit(1)
+    settings = json.loads(r.stdout.strip())
+    found = False
+    for c in settings.get("clients", []):
+        if c.get("email") == email:
+            try:
+                c[field] = int(value)
+            except (ValueError, TypeError):
+                c[field] = value
+            found = True
             break
+    if not found:
+        print("ERR:client not found"); sys.exit(1)
+    new_settings = json.dumps(settings)
+    new_settings_escaped = new_settings.replace("'", "''")
+    r2 = subprocess.run(['sqlite3', DB,
+        f"UPDATE inbounds SET settings='{new_settings_escaped}' WHERE id={ib_id};"],
+        capture_output=True, text=True, timeout=3)
+    if r2.returncode == 0:
+        print('{"success":true}')
+    else:
+        print("ERR:" + r2.stderr)
 except Exception as e:
-    sys.stderr.write("ERR:{}\n".format(e))
+    print("ERR:" + str(e))
 PYEOF
         )
-
-        if [ -n "$payload" ]; then
-            local df; df=$(mktemp)
-            printf '%s' "$payload" > "$df"
-            local res
-            res=$(curl -sk -X POST \
-                -H "Cookie: $cookie" \
-                -H 'Content-Type: application/json' \
-                -d "@${df}" \
-                "${XUI_BASE}/panel/api/inbounds/${ib_id}/updateClient/${client_uuid}" 2>/dev/null)
-            rm -f "$df"
-            if echo "$res" | grep -q '"success":true'; then
-                (( ok++ ))
-            else
-                local msg; msg=$(echo "$res" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null)
-                echo -e "  ${YELLOW}⚠ ${ib_id}: ${msg}${NC}"
-                (( fail++ ))
-            fi
+        if echo "$result" | grep -q '"success":true'; then
+            (( ok++ ))
         else
+            local err="${result#ERR:}"
+            echo -e "  ${YELLOW}⚠ inbound ${ib_id}: ${err}${NC}"
             (( fail++ ))
         fi
     done
-    rm -f "$jf"
+
+    # Перезапускаем xray один раз после всех изменений
+    [ "$ok" -gt 0 ] && _3xui_restart_xray "$cookie"
 
     if [ "$ok" -gt 0 ]; then
         echo -e "  ${GREEN}✓ Обновлено в ${ok} протокол(ах)${NC}"
     fi
-    [ "$fail" -gt 0 ] && echo -e "  ${RED}✗ Не удалось обновить ${fail} протокол(ов)${NC}"
+    [ "$fail" -gt 0 ] && echo -e "  ${RED}✗ Не удалось: ${fail} протокол(ов)${NC}"
     read -p "  Enter..." < /dev/tty
 }
+
+
 
 
 
@@ -1360,7 +929,7 @@ _3xui_add_inbound_to_client() {
 }
 
 _3xui_del_inbound_from_client() {
-    local email="$1" current_inbounds="$2" cookie="$3"
+    local email="$1" current_inbounds="$2" emails_map="${3:-}" cookie="${4:-$3}"
     clear
     echo -e "\n${CYAN}━━━ Удалить протокол: ${email} ━━━${NC}\n"
 
@@ -1386,10 +955,15 @@ _3xui_del_inbound_from_client() {
     read -r c < /dev/tty
     [[ "$c" != "y" ]] && return
 
-    # Пробуем удалить по точному email и по base
-    local res; res=$(_3xui_del_client_from_inbound "$target" "$email" "$cookie")
+    # Находим точный email для этого inbound из emails_map
+    local exact_em=""
+    if [ -n "$emails_map" ]; then
+        exact_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${target}:" | cut -d: -f2-)
+    fi
+    # Если нет в map — перебираем суффиксы
+    [ -z "$exact_em" ] && exact_em="$email"
+    local res; res=$(_3xui_del_client_from_inbound "$target" "$exact_em" "$cookie")
     if ! echo "$res" | grep -q '"success":true'; then
-        # Пробуем суффиксы
         local base="${email%(*}"
         for sfx in "${XUI_SUFFIXES[@]}"; do
             res=$(_3xui_del_client_from_inbound "$target" "${base}${sfx}" "$cookie")
@@ -1499,6 +1073,428 @@ PYEOF
         fi
     done
 }
+
+# ─── Профиль клиента ────────────────────────────────────────
+
+_3xui_client_profile() {
+    local client_str="$1" cookie="$2"
+    IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$client_str"
+
+    # Получает ограничения клиента из SQLite
+    _get_client_limits() {
+        local first_ib="${inbounds%%,*}"
+        local first_email
+        first_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${first_ib}:" | cut -d: -f2-)
+        [ -z "$first_email" ] && first_email="$email"
+        python3 - "$first_ib" "$first_email" << 'PYEOF'
+import json, sys, subprocess
+from datetime import datetime
+ib_id, email = sys.argv[1], sys.argv[2]
+try:
+    r = subprocess.run(['sqlite3', '/etc/x-ui/x-ui.db',
+        f"SELECT settings FROM inbounds WHERE id={ib_id};"],
+        capture_output=True, text=True, timeout=2)
+    s = json.loads(r.stdout.strip())
+    for c in s.get("clients", []):
+        if c.get("email") == email:
+            total_gb = c.get("totalGB", 0)
+            expiry = c.get("expiryTime", 0)
+            limit_ip = c.get("limitIp", 0)
+            gb_str = "{:.1f} GB".format(total_gb/1073741824) if total_gb > 0 else "∞"
+            if expiry and expiry > 0:
+                dt = datetime.fromtimestamp(expiry/1000)
+                exp_str = dt.strftime("%d.%m.%Y")
+            else:
+                exp_str = "∞"
+            ip_str = str(limit_ip) if limit_ip > 0 else "∞"
+            print("{}|{}|{}|{}|{}".format(gb_str, exp_str, ip_str, total_gb, expiry))
+            break
+except Exception as e:
+    sys.stderr.write("ERR:{}\n".format(e))
+    print("∞|∞|∞|0|0")
+PYEOF
+    }
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Клиент: ${email} ━━━${NC}\n"
+        echo -e "  ${WHITE}SubId:${NC}    ${CYAN}${sub_id}${NC}"
+        echo -e "  ${WHITE}Статус:${NC}   $([ "$enable" = "on" ] && echo -e "${GREEN}● активен${NC}" || echo -e "${RED}● отключён${NC}")"
+
+        # Трафик из SQLite
+        local real_up=0 real_down=0
+        while IFS= read -r _em; do
+            [ -z "$_em" ] && continue
+            local _row
+            _row=$(sqlite3 /etc/x-ui/x-ui.db "SELECT up, down FROM client_traffics WHERE email='${_em}' LIMIT 1;" 2>/dev/null)
+            if [ -n "$_row" ]; then
+                real_up=$(( real_up + ${_row%%|*} ))
+                real_down=$(( real_down + ${_row##*|} ))
+            fi
+        done <<< "$(echo "$emails_map" | tr ';' '\n' | cut -d: -f2-)"
+        local up_f down_f
+        up_f=$(_fmt_bytes "$real_up"); down_f=$(_fmt_bytes "$real_down")
+        echo -e "  ${WHITE}Трафик:${NC}   ↑${up_f} / ↓${down_f}"
+
+        # Ограничения
+        local limits_str lim_gb lim_exp lim_ip raw_gb raw_exp
+        limits_str=$(_get_client_limits)
+        IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
+        echo -e "  ${WHITE}Лимит:${NC}    ${CYAN}${lim_gb}${NC}  •  Истекает: ${CYAN}${lim_exp}${NC}  •  IP: ${CYAN}${lim_ip}${NC}"
+
+        # Протоколы
+        echo -e "\n  ${WHITE}Протоколы:${NC}"
+        IFS=',' read -ra ib_arr <<< "$inbounds"
+        for ib_id in "${ib_arr[@]}"; do
+            local ib_nm; ib_nm=$(_3xui_inbound_name "$ib_id" "$cookie")
+            local ex_em
+            ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+            echo -e "    ${CYAN}• ${ib_nm:-id=$ib_id}${NC}  ${WHITE}[${ex_em}]${NC}"
+        done
+
+        local sub_link; sub_link=$(_3xui_sub_link "$sub_id")
+        echo -e "\n  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
+
+        echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
+        echo -e "  ${YELLOW}[2]${NC}  Установить лимит ГБ"
+        echo -e "  ${YELLOW}[3]${NC}  Установить срок действия"
+        echo -e "  ${GREEN}[4]${NC}  Добавить протокол"
+        echo -e "  ${RED}[5]${NC}  Удалить протокол"
+        echo -e "  ${RED}[6]${NC}  Удалить клиента полностью"
+        echo -e "  ${YELLOW}[7]${NC}  Сбросить трафик"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
+        case "$ch" in
+            1)
+                command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+                echo ""; qrencode -t ANSIUTF8 "$sub_link"
+                read -p "  Enter..." < /dev/tty ;;
+            2)
+                echo -e "\n  ${WHITE}Лимит трафика:${NC}"
+                echo -e "  Текущий: ${CYAN}${lim_gb}${NC}"
+                echo -e "  Введите новый лимит в ГБ (0 = без лимита):"
+                echo -ne "  → "; read -r new_gb < /dev/tty
+                [[ "$new_gb" =~ ^[0-9]+(\.?[0-9]*)$ ]] || { echo -e "  ${RED}✗ Неверный формат${NC}"; read -p "  Enter..." < /dev/tty; continue; }
+                local new_gb_bytes
+                new_gb_bytes=$(python3 -c "print(int(float('$new_gb') * 1073741824))" 2>/dev/null)
+                _3xui_update_client_field "$inbounds" "$emails_map" "totalGB" "$new_gb_bytes" "$cookie"
+                limits_str=$(_get_client_limits)
+                IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
+                ;;
+            3)
+                echo -e "\n  ${WHITE}Срок действия:${NC}"
+                echo -e "  Текущий: ${CYAN}${lim_exp}${NC}"
+                echo -e "  ${YELLOW}[1]${NC}  30 дней   ${YELLOW}[2]${NC}  90 дней"
+                echo -e "  ${YELLOW}[3]${NC}  180 дней  ${YELLOW}[4]${NC}  1 год"
+                echo -e "  ${YELLOW}[5]${NC}  Без ограничений"
+                echo -e "  ${YELLOW}[6]${NC}  Указать дату (ДД.ММ.ГГГГ)"
+                echo -ne "  → "; read -r exp_ch < /dev/tty
+                local new_expiry=0
+                case "$exp_ch" in
+                    1) new_expiry=$(python3 -c "import time; print(int((time.time()+30*86400)*1000))");;
+                    2) new_expiry=$(python3 -c "import time; print(int((time.time()+90*86400)*1000))");;
+                    3) new_expiry=$(python3 -c "import time; print(int((time.time()+180*86400)*1000))");;
+                    4) new_expiry=$(python3 -c "import time; print(int((time.time()+365*86400)*1000))");;
+                    5) new_expiry=0;;
+                    6)
+                        echo -ne "  Дата (ДД.ММ.ГГГГ): "; read -r dstr < /dev/tty
+                        new_expiry=$(python3 -c "
+from datetime import datetime
+try:
+    dt=datetime.strptime('$dstr','%d.%m.%Y')
+    print(int(dt.timestamp()*1000))
+except: print(0)
+" 2>/dev/null)
+                        ;;
+                    *) continue;;
+                esac
+                _3xui_update_client_field "$inbounds" "$emails_map" "expiryTime" "$new_expiry" "$cookie"
+                limits_str=$(_get_client_limits)
+                IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
+                ;;
+            4)
+                _3xui_add_inbound_to_client "$email" "$sub_id" "$inbounds" "$cookie"
+                return ;;
+            5)
+                _3xui_del_inbound_from_client "$email" "$inbounds" "$emails_map" "$cookie"
+                return ;;
+            6)
+                echo -ne "\n  ${RED}Удалить ${email} из всех протоколов? (y/n): ${NC}"
+                read -r c < /dev/tty
+                [[ "$c" != "y" ]] && continue
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                local ok=0
+                for ib_id in "${ib_arr[@]}"; do
+                    local ex_em
+                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                    [ -z "$ex_em" ] && ex_em="$email"
+                    local res; res=$(_3xui_del_client_from_inbound "$ib_id" "$ex_em" "$cookie")
+                    echo "$res" | grep -q '"success":true' && (( ok++ ))
+                done
+                echo -e "  ${GREEN}✓ Удалён из ${ok} протокол(ов)${NC}"
+                log_action "3XUI: удалён ${email}"
+                read -p "  Enter..." < /dev/tty
+                return ;;
+            7)
+                # Сбрасываем трафик через SQLite
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                local ok=0
+                for ib_id in "${ib_arr[@]}"; do
+                    local ex_em
+                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                    [ -z "$ex_em" ] && continue
+                    sqlite3 /etc/x-ui/x-ui.db \
+                        "UPDATE client_traffics SET up=0, down=0 WHERE email='${ex_em}';" 2>/dev/null && (( ok++ ))
+                done
+                _3xui_restart_xray "$cookie"
+                echo -e "  ${GREEN}✓ Трафик сброшен (${ok} записей)${NC}"
+                real_up=0; real_down=0
+                read -p "  Enter..." < /dev/tty ;;
+        esac
+    done
+}
+
+# ─── Список клиентов inbound'а ──────────────────────────────
+
+_3xui_clients_list_menu() {
+    local filter_ib="$1" ib_label="$2" cookie="$3" srv_label="$4" srv_ip="$5"
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Клиенты: ${ib_label} ━━━${NC}"
+        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${srv_label} (${srv_ip})${NC}\n"
+
+        _3xui_load_config
+        local sub_url
+        if [ -n "$XUI_SUB_DOMAIN" ]; then
+            sub_url="${GREEN}https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}${NC}"
+        elif [ -n "$XUI_SUB_PORT" ]; then
+            # Автофикс subDomain
+            local nginx_domain
+            nginx_domain=$(grep -rh 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null | \
+                grep -oP 'server_name\s+\K\S+' | grep '\.' | grep -v 'localhost\|_' | head -1)
+            if [ -n "$nginx_domain" ]; then
+                echo -e "  ${YELLOW}⚠ subDomain пустой — исправить на ${nginx_domain}? (y/n):${NC} "
+                read -r fix_c < /dev/tty
+                if [ "$fix_c" = "y" ]; then
+                    sqlite3 /etc/x-ui/x-ui.db \
+                        "UPDATE settings SET value='${nginx_domain}' WHERE key='subDomain';" 2>/dev/null
+                    systemctl restart x-ui > /dev/null 2>&1; sleep 1
+                    _3xui_load_config
+                fi
+            fi
+            sub_url="${YELLOW}http://${srv_ip}:${XUI_SUB_PORT}${XUI_SUB_PATH}${NC}"
+        else
+            sub_url="${RED}не настроено${NC}"
+        fi
+        echo -e "  ${WHITE}Подписки:${NC} ${sub_url}<subId>\n"
+
+        # Загружаем клиентов
+        local -a clients=()
+        local _cf; _cf=$(mktemp)
+        _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
+
+        if [ -n "$filter_ib" ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] && ! [[ "$line" == ERR:* ]] || continue
+                IFS='|' read -r _e _s inbounds _rest <<< "$line"
+                [[ ",$inbounds," == *",$filter_ib,"* ]] && clients+=("$line")
+            done < "$_cf"
+        else
+            while IFS= read -r line; do
+                [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && clients+=("$line")
+            done < "$_cf"
+        fi
+        rm -f "$_cf"
+
+        if [ ${#clients[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}Клиентов нет${NC}\n"
+        else
+            printf "  \033[97m%-4s  %-22s  %-18s  %-7s  %s\033[0m\n" \
+                "№" "Email" "SubId" "Статус" "Трафик↑/↓"
+            echo -e "  ${CYAN}$(printf '─%.0s' {1..62})${NC}"
+            local i=1
+            for c in "${clients[@]}"; do
+                IFS='|' read -r em sb inbs en up dn emap <<< "$c"
+                local ce cs st uf df
+                ce=$(printf '%s' "$em" | tr -cd '[:print:]' | cut -c1-21)
+                cs=$(printf '%s' "$sb" | cut -c1-18)
+                [ "$en" = "on" ] && st="${GREEN}вкл${NC}" || st="${RED}выкл${NC}"
+                uf=$(_fmt_bytes "$up"); df=$(_fmt_bytes "$dn")
+                printf "  ${YELLOW}[%-2d]${NC}  %-22s  %-18s  %b    %s/%s\n" \
+                    "$i" "$ce" "$cs" "$st" "$uf" "$df"
+                (( i++ ))
+            done
+            echo ""
+        fi
+
+        echo -e "  ${GREEN}[a]${NC}  Добавить клиента"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
+        if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#clients[@]} )); then
+            _3xui_client_profile "${clients[$((ch-1))]}" "$cookie"
+            cookie=$(_3xui_auth)
+        elif [[ "$ch" == [aAаА] ]]; then
+            _3xui_add_client_menu "$cookie"
+            cookie=$(_3xui_auth)
+        fi
+    done
+}
+
+# ─── Главное меню: выбор сервера и протокола ────────────────
+
+_3xui_clients_menu() {
+    _3xui_load_config
+    _3xui_write_helpers
+
+    local SERVER_LABEL="Текущий"
+    local SERVER_IP="$MY_IP"
+    local SSH_TUNNEL_PID=""
+
+    _3xui_switch_server() {
+        [ -n "$SSH_TUNNEL_PID" ] && { kill "$SSH_TUNNEL_PID" 2>/dev/null; SSH_TUNNEL_PID=""; }
+        XUI_BASE="https://127.0.0.1:${XUI_PORT}${XUI_PATH}"
+
+        clear
+        echo -e "\n${CYAN}━━━ Выберите сервер ━━━${NC}\n"
+        echo -e "  ${YELLOW}[0]${NC}  ${MY_IP} (текущий)"
+        local ai=1
+        local -a alias_entries=()
+        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+            while IFS= read -r aline; do
+                [[ -z "$aline" || "$aline" == \#* ]] && continue
+                local _aip="${aline%%=*}" _ai="${aline##*=}"
+                local _an="${_ai%%|*}"
+                [ "$_aip" = "$MY_IP" ] && continue
+                echo -e "  ${YELLOW}[$ai]${NC}  ${_an} (${_aip})"
+                alias_entries+=("${_aip}|${_an}"); (( ai++ ))
+            done < "$ALIASES_FILE"
+        fi
+        echo ""; read -p "  Выбор: " srv_ch < /dev/tty
+
+        if [[ "$srv_ch" =~ ^[1-9][0-9]*$ ]] && (( srv_ch < ai )); then
+            local tgt="${alias_entries[$((srv_ch-1))]}"
+            local tip="${tgt%%|*}" tnm="${tgt##*|}"
+            echo -ne "  ${CYAN}→ SSH туннель к ${tnm}...${NC} "
+            local tport=$(( 17000 + RANDOM % 1000 ))
+            ssh -f -N -L "${tport}:127.0.0.1:${XUI_PORT}" \
+                -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "root@${tip}" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                SSH_TUNNEL_PID=$(pgrep -f "ssh.*${tport}:127.0.0.1:${XUI_PORT}" | head -1)
+                XUI_BASE="https://127.0.0.1:${tport}${XUI_PATH}"
+                SERVER_LABEL="$tnm"; SERVER_IP="$tip"
+                echo -e "${GREEN}✓${NC}"; sleep 1
+            else
+                echo -e "${RED}✗ SSH недоступен${NC}"; sleep 2
+            fi
+        else
+            SERVER_LABEL="Текущий"; SERVER_IP="$MY_IP"
+        fi
+    }
+
+    # Пароль
+    if ! grep -q "^XUI_PASS=" /etc/govpn/config 2>/dev/null; then
+        echo -e "\n  ${YELLOW}Пароль панели 3X-UI не настроен.${NC}"
+        _3xui_save_password || return
+    fi
+
+    local cookie; cookie=$(_3xui_auth)
+    [ -z "$cookie" ] && return 1
+
+    trap '[ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null; trap - RETURN' RETURN
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ 3X-UI — выбор протокола ━━━${NC}"
+        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${SERVER_LABEL} (${SERVER_IP})${NC}"
+
+        # Другие серверы в одну строку
+        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+            local _others=""
+            while IFS= read -r aline; do
+                [[ -z "$aline" || "$aline" == \#* ]] && continue
+                local _aip="${aline%%=*}" _ai="${aline##*=}"
+                [ "$_aip" = "$SERVER_IP" ] && continue
+                _others+="${_ai%%|*}(${_aip})  "
+            done < "$ALIASES_FILE"
+            [ -n "$_others" ] && echo -e "  ${WHITE}Другие:${NC}  ${CYAN}${_others}${NC}  ${YELLOW}[s]${NC} сменить"
+        fi
+        echo ""
+
+        # Inbound'ы с числом клиентов
+        local -a ibs=()
+        local _sf; _sf=$(mktemp)
+        _3xui_select_inbounds "$cookie" > "$_sf" 2>/dev/null
+        while IFS= read -r line; do
+            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && ibs+=("$line")
+        done < "$_sf"; rm -f "$_sf"
+
+        if [ ${#ibs[@]} -eq 0 ]; then
+            echo -e "  ${RED}✗ Нет активных протоколов${NC}"
+            read -p "  Enter..." < /dev/tty; return
+        fi
+
+        echo -e "  ${WHITE}Выберите протокол:${NC}\n"
+        local _jf; _jf=$(mktemp)
+        _3xui_get_inbounds "$cookie" > "$_jf" 2>/dev/null
+        local i=1
+        for ib in "${ibs[@]}"; do
+            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+            local cnt
+            cnt=$(python3 -c "
+import json,sys
+with open(sys.argv[1]) as f: d=json.load(f)
+for ib in d.get('obj',[]):
+    if str(ib['id'])=='$ib_id':
+        s=json.loads(ib.get('settings','{}'))
+        print(len(s.get('clients',[])))
+        break
+" "$_jf" 2>/dev/null || echo 0)
+            printf "  ${YELLOW}[%d]${NC}  %-22s ${CYAN}%s:%s${NC}  %s клиентов\n" \
+                "$i" "$ib_name" "$ib_proto" "$ib_port" "$cnt"
+            (( i++ ))
+        done
+        rm -f "$_jf"
+
+        echo ""
+        echo -e "  ${GREEN}[a]${NC}  Все клиенты (из всех протоколов)"
+        echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
+        echo -e "  ${YELLOW}[p]${NC}  Сменить пароль"
+        [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ] && \
+            echo -e "  ${YELLOW}[s]${NC}  Сменить сервер"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+
+        local ch; ch=$(read_choice "Выбор: ")
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
+        case "$ch" in
+            [sS]) _3xui_switch_server; cookie=$(_3xui_auth) ;;
+            [iI]) _3xui_toggle_inbounds_menu "$cookie"; cookie=$(_3xui_auth) ;;
+            [pP]) _3xui_save_password; cookie=$(_3xui_auth) ;;
+            [aAаА])
+                _3xui_clients_list_menu "" "Все протоколы" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
+                cookie=$(_3xui_auth) ;;
+            *)
+                if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#ibs[@]} )); then
+                    local ib="${ibs[$((ch-1))]}"
+                    IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+                    _3xui_clients_list_menu "$ib_id" "${ib_name} (${ib_proto}:${ib_port})" \
+                        "$cookie" "$SERVER_LABEL" "$SERVER_IP"
+                    cookie=$(_3xui_auth)
+                fi ;;
+        esac
+    done
+}
+
+
 
 
 
@@ -4102,704 +4098,6 @@ install_wizard() {
     done
 }
 
-# ═══════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════
-#  3X-UI — УПРАВЛЕНИЕ КЛИЕНТАМИ ЧЕРЕЗ API
-# ═══════════════════════════════════════════════════════════════
-
-# Конфиг API для текущего сервера
-XUI_API_HOST="127.0.0.1"
-XUI_COOKIE_FILE="/tmp/govpn_xui_session.txt"
-XUI_HEADERS_FILE="/tmp/govpn_xui_headers.txt"
-
-# Inbound'ы которые используем (WS=2 исключён)
-# id|название|тип
-XUI_INBOUNDS_USABLE="1:TCP:vless 3:TCP2:vless 4:gRPC:trojan 5:xHTTP:vless"
-
-# Читает параметры панели из x-ui.db
-_xui_read_config() {
-    if [ ! -f /etc/x-ui/x-ui.db ]; then
-        echo ""; return 1
-    fi
-    XUI_PORT=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='webPort';" 2>/dev/null || echo "17331")
-    XUI_BASEPATH=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='webBasePath';" 2>/dev/null || echo "/")
-    XUI_USER=$(sqlite3 /etc/x-ui/x-ui.db "SELECT username FROM users LIMIT 1;" 2>/dev/null || echo "")
-    XUI_PASS_HASH=$(sqlite3 /etc/x-ui/x-ui.db "SELECT password FROM users LIMIT 1;" 2>/dev/null || echo "")
-    XUI_SUB_PORT=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null || echo "15903")
-    XUI_SUB_PATH=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='subPath';" 2>/dev/null || echo "")
-    XUI_SUB_DOMAIN=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null || echo "")
-    # Убираем слэши из basepath для URL
-    XUI_BASEPATH="${XUI_BASEPATH%/}"
-}
-
-# Запрашивает пароль у пользователя и логинится
-_xui_login() {
-    _xui_read_config || return 1
-
-    echo -ne "  ${CYAN}→ Пароль от панели x-ui: ${NC}"
-    read -rs XUI_PASS_INPUT
-    echo ""
-
-    local login_url="https://${XUI_API_HOST}:${XUI_PORT}${XUI_BASEPATH}/login"
-    curl -sk -X POST "$login_url" \
-        -H 'Content-Type: application/json' \
-        -d "{\"username\":\"${XUI_USER}\",\"password\":\"${XUI_PASS_INPUT}\"}" \
-        -D "$XUI_HEADERS_FILE" > /dev/null 2>&1
-
-    local cookie
-    cookie=$(grep -ioP '3x-ui=\S+(?=;)' "$XUI_HEADERS_FILE" 2>/dev/null)
-    if [ -z "$cookie" ]; then
-        echo -e "  ${RED}✗ Авторизация не удалась${NC}"
-        return 1
-    fi
-    echo "$cookie" > "$XUI_COOKIE_FILE"
-    echo -e "  ${GREEN}✓ Авторизован${NC}"
-    return 0
-}
-
-# Выполняет API запрос (с автоповтором при устаревшей сессии)
-_xui_api() {
-    local method="$1" path="$2" data="$3"
-    [ ! -f "$XUI_COOKIE_FILE" ] && { echo "NO_SESSION"; return 1; }
-    local cookie; cookie=$(cat "$XUI_COOKIE_FILE")
-    local url="https://${XUI_API_HOST}:${XUI_PORT}${XUI_BASEPATH}${path}"
-    local result
-    if [ "$method" = "GET" ]; then
-        result=$(curl -sk -H "Cookie: $cookie" "$url" 2>/dev/null)
-    else
-        result=$(curl -sk -X POST -H "Cookie: $cookie" -H 'Content-Type: application/json' \
-            -d "$data" "$url" 2>/dev/null)
-    fi
-    # Проверяем успех
-    local success; success=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('success','false'))" 2>/dev/null)
-    if [ "$success" != "True" ] && [ "$success" != "true" ]; then
-        local msg; msg=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null)
-        if echo "$msg" | grep -qi 'login\|auth\|session\|unauthorized'; then
-            echo "SESSION_EXPIRED"
-        else
-            echo "ERROR:${msg}"
-        fi
-        return 1
-    fi
-    echo "$result"
-    return 0
-}
-
-# Получает список клиентов (все inbound'ы, дедупликация по subId)
-_xui_get_clients() {
-    local resp; resp=$(_xui_api GET "/panel/api/inbounds/list" "")
-    [ "$resp" = "SESSION_EXPIRED" ] && { echo "SESSION_EXPIRED"; return 1; }
-    [ -z "$resp" ] && { echo "ERROR:empty"; return 1; }
-
-    python3 - "$resp" << 'PYEOF'
-import json, sys, re
-
-try:
-    data = json.loads(sys.argv[1])
-    inbounds = data.get('obj', [])
-    
-    # Собираем уникальных клиентов по subId
-    clients = {}  # subId -> {email, subId, inbounds: [id,...], total, up, down, expiry}
-    
-    for ib in inbounds:
-        ib_id = ib.get('id')
-        ib_remark = ib.get('remark', '').strip()
-        ib_protocol = ib.get('protocol', '')
-        
-        # Пропускаем WS (id=2) и Socks5 (id=6)
-        if ib_id in [2, 6]:
-            continue
-        
-        # Парсим клиентов из settings JSON
-        try:
-            settings = json.loads(ib.get('settings', '{}'))
-        except:
-            continue
-        
-        for c in settings.get('clients', []):
-            sub_id = c.get('subId', '')
-            email = c.get('email', '')
-            key = sub_id if sub_id else email
-            
-            if key not in clients:
-                clients[key] = {
-                    'email': email,
-                    'subId': sub_id,
-                    'enable': c.get('enable', True),
-                    'totalGB': c.get('totalGB', 0),
-                    'expiryTime': c.get('expiryTime', 0),
-                    'inbounds': [],
-                    'up': 0, 'down': 0
-                }
-            
-            clients[key]['inbounds'].append({
-                'id': ib_id,
-                'remark': ib_remark,
-                'protocol': ib_protocol,
-                'clientId': c.get('id', ''),
-                'flow': c.get('flow', '')
-            })
-        
-        # Собираем статистику трафика
-        try:
-            stats_resp = data  # трафик будет отдельным запросом
-        except:
-            pass
-    
-    # Выводим в формате для парсинга
-    for key, c in clients.items():
-        ib_ids = ','.join(str(i['id']) for i in c['inbounds'])
-        ib_names = ','.join(i['remark'][:8] for i in c['inbounds'])
-        print(f"{c['subId']}|{c['email']}|{ib_ids}|{ib_names}|{c['enable']}|{c['totalGB']}|{c['expiryTime']}")
-
-except Exception as e:
-    print(f"ERR:{e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-}
-
-# Генерирует subId
-_xui_gen_subid() {
-    cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | head -c 16 || \
-    date +%s%N | md5sum | cut -c 1-16
-}
-
-# Генерирует UUID v4
-_xui_gen_uuid() {
-    cat /proc/sys/kernel/random/uuid 2>/dev/null || \
-    python3 -c "import uuid; print(str(uuid.uuid4()))"
-}
-
-# Генерирует пароль для trojan
-_xui_gen_pass() {
-    tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16
-}
-
-# Добавляет клиента в один inbound
-_xui_add_to_inbound() {
-    local ib_id="$1" email="$2" sub_id="$3" client_uuid="$4" client_pass="$5"
-    
-    # Получаем тип протокола для этого inbound
-    local resp; resp=$(_xui_api GET "/panel/api/inbounds/list" "")
-    local protocol
-    protocol=$(echo "$resp" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for i in d.get('obj',[]):
-    if i['id']==${ib_id}: print(i['protocol']); break
-" 2>/dev/null)
-
-    # Формируем клиента в зависимости от протокола
-    local client_json
-    if [ "$protocol" = "trojan" ]; then
-        client_json=$(python3 -c "
-import json
-c = {
-    'password': '${client_pass}',
-    'email': '${email}',
-    'enable': True,
-    'subId': '${sub_id}',
-    'tgId': '',
-    'limitIp': 0,
-    'totalGB': 0,
-    'expiryTime': 0,
-    'reset': 0,
-    'comment': ''
-}
-print(json.dumps(c))
-")
-    else
-        client_json=$(python3 -c "
-import json
-c = {
-    'id': '${client_uuid}',
-    'flow': 'xtls-rprx-vision',
-    'email': '${email}',
-    'enable': True,
-    'subId': '${sub_id}',
-    'tgId': '',
-    'limitIp': 0,
-    'totalGB': 0,
-    'expiryTime': 0,
-    'reset': 0,
-    'comment': ''
-}
-print(json.dumps(c))
-")
-    fi
-
-    local payload; payload=$(python3 -c "
-import json
-print(json.dumps({'id': ${ib_id}, 'settings': json.dumps({'clients': [${client_json}]})}))
-")
-    local result; result=$(_xui_api POST "/panel/api/inbounds/addClient" "$payload")
-    echo "$result"
-}
-
-# Удаляет клиента из inbound по email
-_xui_del_from_inbound() {
-    local ib_id="$1" client_uuid="$2"
-    local payload="{\"id\":${ib_id}}"
-    local result; result=$(_xui_api POST "/panel/api/inbounds/${ib_id}/delClient/${client_uuid}" "")
-    echo "$result"
-}
-
-# Генерирует ссылку подписки
-_xui_sub_url() {
-    local sub_id="$1"
-    _xui_read_config
-    if [ -n "$XUI_SUB_DOMAIN" ]; then
-        echo "https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}${sub_id}"
-    else
-        echo "https://${MY_IP}:${XUI_SUB_PORT}${XUI_SUB_PATH}${sub_id}"
-    fi
-}
-
-# Показывает QR-код подписки
-_xui_show_qr() {
-    local sub_id="$1" email="$2"
-    local url; url=$(_xui_sub_url "$sub_id")
-    echo ""
-    echo -e "  ${WHITE}Клиент:${NC} ${CYAN}${email}${NC}"
-    echo -e "  ${WHITE}Подписка:${NC} ${CYAN}${url}${NC}"
-    echo ""
-    if command -v qrencode &>/dev/null; then
-        qrencode -t ANSIUTF8 "$url"
-    else
-        echo -e "  ${YELLOW}qrencode не установлен (apt-get install -y qrencode)${NC}"
-    fi
-}
-
-# Меню выбора inbound'ов
-_xui_select_inbounds() {
-    local prompt="$1"  # "add" or "del"
-    local inbound_data="$2"  # текущие inbound'ы клиента (через запятую id)
-    
-    echo ""
-    echo -e "  ${CYAN}Доступные inbound'ы:${NC}"
-    echo ""
-    
-    # Получаем полный список
-    local resp; resp=$(_xui_api GET "/panel/api/inbounds/list" "")
-    local inbounds_list
-    inbounds_list=$(echo "$resp" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for i in d.get('obj',[]):
-    if i['id'] not in [2,6]:
-        print(f\"{i['id']}|{i['remark'].strip()[:20]}|{i['protocol']}|{i['port']}\")
-" 2>/dev/null)
-
-    local -a ib_array=()
-    local i=1
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        local ib_id="${line%%|*}"
-        local rest="${line#*|}"
-        local ib_name="${rest%%|*}"
-        rest="${rest#*|}"
-        local ib_proto="${rest%%|*}"
-        local ib_port="${rest##*|}"
-        
-        # Проверяем есть ли уже у клиента
-        local has=""
-        echo "$inbound_data" | grep -q "\b${ib_id}\b" && has=" ${GREEN}(есть)${NC}"
-        
-        echo -e "  ${YELLOW}[${i}]${NC}  id=${ib_id}  ${ib_name}  ${ib_proto}:${ib_port}${has}"
-        ib_array+=("$ib_id")
-        (( i++ ))
-    done <<< "$inbounds_list"
-    echo ""
-    echo -e "  ${YELLOW}[a]${NC}  Все inbound'ы сразу"
-    echo -e "  ${YELLOW}[0]${NC}  Отмена"
-    echo ""
-    
-    read -p "  Выбор: " sel
-    case "$sel" in
-        a|A) echo "ALL" ;;
-        0|"") echo "CANCEL" ;;
-        *) 
-            if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel < i )); then
-                echo "${ib_array[$((sel-1))]}"
-            else
-                echo "CANCEL"
-            fi
-            ;;
-    esac
-}
-
-# Главное меню управления клиентами 3X-UI
-xui_clients_menu() {
-    # Проверяем что есть x-ui
-    if ! systemctl is-active x-ui &>/dev/null 2>&1; then
-        echo -e "  ${RED}✗ x-ui не запущен${NC}"
-        read -p "  Enter..."; return
-    fi
-    if [ ! -f /etc/x-ui/x-ui.db ]; then
-        echo -e "  ${RED}✗ x-ui база не найдена${NC}"
-        read -p "  Enter..."; return
-    fi
-
-    _xui_read_config
-
-    # Авторизация
-    local session_ok=0
-    if [ -f "$XUI_COOKIE_FILE" ]; then
-        # Проверяем сессию
-        local test; test=$(_xui_api GET "/panel/api/inbounds/list" "")
-        [[ "$test" != "SESSION_EXPIRED" && "$test" != "NO_SESSION" && "$test" != ERROR:* ]] && session_ok=1
-    fi
-    if [ "$session_ok" -eq 0 ]; then
-        clear
-        echo -e "\n${CYAN}━━━ Авторизация 3X-UI ━━━${NC}\n"
-        echo -e "  ${WHITE}Панель:${NC} https://${XUI_SUB_DOMAIN:-$MY_IP}${XUI_BASEPATH}/"
-        echo -e "  ${WHITE}Логин:${NC}  ${XUI_USER}\n"
-        _xui_login || { read -p "  Enter..."; return; }
-    fi
-
-    while true; do
-        clear
-        echo -e "\n${CYAN}━━━ 3X-UI — Клиенты ━━━${NC}\n"
-
-        # Шапка
-        local sub_domain_info
-        [ -n "$XUI_SUB_DOMAIN" ] && \
-            sub_domain_info="${GREEN}https://${XUI_SUB_DOMAIN}${XUI_SUB_PATH}${NC}" || \
-            sub_domain_info="${YELLOW}https://${MY_IP}:${XUI_SUB_PORT}${XUI_SUB_PATH}${NC}"
-        echo -e "  ${WHITE}Подписки:${NC} ${sub_domain_info}"
-
-        # Предупреждение если subDomain пустой
-        if [ -z "$XUI_SUB_DOMAIN" ]; then
-            echo -e "  ${YELLOW}⚠ subDomain не задан — IP виден в ссылке подписки${NC}"
-            echo -e "  ${WHITE}  Исправить: govpn → [3] Клиенты 3X-UI → [f] Настроить домен подписки${NC}"
-        fi
-        echo ""
-
-        # Получаем клиентов
-        local clients_raw
-        clients_raw=$(_xui_get_clients)
-        if [ "$clients_raw" = "SESSION_EXPIRED" ]; then
-            echo -e "  ${YELLOW}Сессия истекла, переавторизация...${NC}"
-            _xui_login || { read -p "  Enter..."; return; }
-            clients_raw=$(_xui_get_clients)
-        fi
-
-        # Парсим и показываем список
-        local -a client_lines=()
-        local idx=1
-        while IFS= read -r line; do
-            [ -z "$line" ] || [[ "$line" == ERR:* ]] && continue
-            local sub_id="${line%%|*}"
-            local rest="${line#*|}"
-            local email="${rest%%|*}"
-            rest="${rest#*|}"
-            local ib_ids="${rest%%|*}"
-            rest="${rest#*|}"
-            local ib_names="${rest%%|*}"
-            rest="${rest#*|}"
-            local enabled="${rest%%|*}"
-
-            local status_icon
-            [[ "$enabled" == "True" || "$enabled" == "true" ]] && \
-                status_icon="${GREEN}●${NC}" || status_icon="${RED}●${NC}"
-
-            printf "  ${YELLOW}[%2d]${NC}  %b  ${WHITE}%-20s${NC}  ${CYAN}%-30s${NC}  %s\n" \
-                "$idx" "$status_icon" "$email" "$ib_names" "${sub_id:0:8}..."
-            client_lines+=("$line")
-            (( idx++ ))
-        done <<< "$clients_raw"
-
-        echo ""
-        echo -e "  ${GREEN}[n]${NC}  Новый клиент"
-        echo -e "  ${YELLOW}[f]${NC}  Настроить домен подписки"
-        echo -e "  ${YELLOW}[0]${NC}  Назад"
-        echo ""
-        local ch; ch=$(read_choice "Выбор (номер клиента или команда): ")
-
-        case "$ch" in
-            n|N|т|Т)
-                _xui_new_client_wizard
-                ;;
-            f|F|а|А)
-                _xui_fix_subdomain
-                ;;
-            0|"") return ;;
-            *)
-                if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#client_lines[@]} )); then
-                    _xui_client_profile "${client_lines[$((ch-1))]}"
-                fi
-                ;;
-        esac
-    done
-}
-
-# Профиль клиента
-_xui_client_profile() {
-    local line="$1"
-    local sub_id="${line%%|*}"
-    local rest="${line#*|}"
-    local email="${rest%%|*}"
-    rest="${rest#*|}"
-    local ib_ids="${rest%%|*}"
-    rest="${rest#*|}"
-    local ib_names="${rest%%|*}"
-    rest="${rest#*|}"
-    local enabled="${rest%%|*}"
-    rest="${rest#*|}"
-    local total_gb="${rest%%|*}"
-
-    while true; do
-        clear
-        echo -e "\n${CYAN}━━━ Клиент: ${email} ━━━${NC}\n"
-        local status
-        [[ "$enabled" == "True" || "$enabled" == "true" ]] && \
-            status="${GREEN}● активен${NC}" || status="${RED}● отключён${NC}"
-        echo -e "  ${WHITE}Статус:${NC}   ${status}"
-        echo -e "  ${WHITE}subId:${NC}    ${CYAN}${sub_id}${NC}"
-        echo -e "  ${WHITE}Inbound'ы:${NC} ${ib_names}"
-        echo -e "  ${WHITE}Лимит:${NC}    $([ "$total_gb" = "0" ] && echo "${GREEN}∞${NC}" || echo "${YELLOW}${total_gb} GB${NC}")"
-        local sub_url; sub_url=$(_xui_sub_url "$sub_id")
-        echo -e "  ${WHITE}Подписка:${NC} ${CYAN}${sub_url}${NC}"
-        echo ""
-        echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${GREEN}[2]${NC}  Добавить inbound"
-        echo -e "  ${RED}[3]${NC}  Удалить из inbound'а"
-        echo -e "  ${RED}[4]${NC}  Удалить клиента полностью"
-        echo -e "  ${YELLOW}[0]${NC}  Назад"
-        echo ""
-        local ch; ch=$(read_choice "Выбор: ")
-        case "$ch" in
-            1)
-                _xui_show_qr "$sub_id" "$email"
-                read -p "  Enter..."
-                ;;
-            2)
-                _xui_add_inbound_to_client "$sub_id" "$email" "$ib_ids"
-                # Обновляем данные
-                return
-                ;;
-            3)
-                _xui_remove_inbound_from_client "$sub_id" "$email" "$ib_ids"
-                return
-                ;;
-            4)
-                echo -ne "\n  ${RED}Удалить ${email} из всех inbound'ов? (y/n): ${NC}"
-                read -r c
-                [[ "$c" != "y" ]] && continue
-                _xui_delete_client_all "$sub_id" "$email" "$ib_ids"
-                read -p "  Enter..."
-                return
-                ;;
-            0|"") return ;;
-        esac
-    done
-}
-
-# Мастер создания нового клиента
-_xui_new_client_wizard() {
-    clear
-    echo -e "\n${CYAN}━━━ Новый клиент 3X-UI ━━━${NC}\n"
-
-    # Имя
-    echo -ne "  Имя клиента (email): "; read -r new_email
-    [ -z "$new_email" ] && return
-
-    # Генерируем ID
-    local new_sub_id; new_sub_id=$(_xui_gen_subid)
-    local new_uuid; new_uuid=$(_xui_gen_uuid)
-    local new_pass; new_pass=$(_xui_gen_pass)
-
-    echo -e "\n  ${WHITE}subId:${NC} ${CYAN}${new_sub_id}${NC}"
-    echo -e "  ${WHITE}UUID:${NC}  ${CYAN}${new_uuid}${NC}\n"
-
-    # Выбор inbound'ов
-    local sel; sel=$(_xui_select_inbounds "add" "")
-    [ "$sel" = "CANCEL" ] && return
-
-    local -a target_ids=()
-    if [ "$sel" = "ALL" ]; then
-        # Все inbound'ы (1,3,4,5)
-        target_ids=(1 3 4 5)
-    else
-        target_ids=("$sel")
-    fi
-
-    echo ""
-    local success_count=0 fail_count=0
-    for ib_id in "${target_ids[@]}"; do
-        echo -ne "  ${CYAN}→ inbound ${ib_id}...${NC} "
-        local result; result=$(_xui_add_to_inbound "$ib_id" "$new_email" "$new_sub_id" "$new_uuid" "$new_pass")
-        local ok; ok=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('success','false'))" 2>/dev/null)
-        if [[ "$ok" == "True" || "$ok" == "true" ]]; then
-            echo -e "${GREEN}✓${NC}"
-            (( success_count++ ))
-        else
-            local msg; msg=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null)
-            echo -e "${RED}✗ ${msg}${NC}"
-            (( fail_count++ ))
-        fi
-    done
-
-    if [ "$success_count" -gt 0 ]; then
-        echo -e "\n  ${GREEN}✓ Клиент ${new_email} создан в ${success_count} inbound'ах${NC}"
-        local sub_url; sub_url=$(_xui_sub_url "$new_sub_id")
-        echo -e "  ${WHITE}Подписка:${NC} ${CYAN}${sub_url}${NC}"
-        echo ""
-        command -v qrencode &>/dev/null && qrencode -t ANSIUTF8 "$sub_url"
-        log_action "XUI: добавлен клиент ${new_email} subId=${new_sub_id}"
-    fi
-    read -p "  Enter..."
-}
-
-# Добавляет inbound к существующему клиенту
-_xui_add_inbound_to_client() {
-    local sub_id="$1" email="$2" current_ibs="$3"
-    clear
-    echo -e "\n${CYAN}━━━ Добавить inbound → ${email} ━━━${NC}\n"
-
-    local sel; sel=$(_xui_select_inbounds "add" "$current_ibs")
-    [ "$sel" = "CANCEL" ] && return
-
-    # Нужны UUID/pass клиента — берём из первого inbound'а
-    local first_ib; first_ib=$(echo "$current_ibs" | cut -d, -f1)
-    local resp; resp=$(_xui_api GET "/panel/api/inbounds/list" "")
-    local client_data
-    client_data=$(echo "$resp" | python3 - "$first_ib" "$email" << 'PYEOF'
-import json,sys
-ib_id, email = int(sys.argv[1]), sys.argv[2]
-d = json.loads(sys.argv[3]) if len(sys.argv)>3 else json.load(sys.stdin)
-PYEOF
-)
-    # Упрощённо — генерируем новые (клиент будет в подписке через subId)
-    local new_uuid; new_uuid=$(_xui_gen_uuid)
-    local new_pass; new_pass=$(_xui_gen_pass)
-
-    local -a target_ids=()
-    [ "$sel" = "ALL" ] && target_ids=(1 3 4 5) || target_ids=("$sel")
-
-    for ib_id in "${target_ids[@]}"; do
-        # Пропускаем если уже есть
-        echo "$current_ibs" | grep -q "\b${ib_id}\b" && \
-            { echo -e "  ${YELLOW}inbound ${ib_id} — уже добавлен${NC}"; continue; }
-        echo -ne "  ${CYAN}→ inbound ${ib_id}...${NC} "
-        local result; result=$(_xui_add_to_inbound "$ib_id" "$email" "$sub_id" "$new_uuid" "$new_pass")
-        local ok; ok=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('success','false'))" 2>/dev/null)
-        [[ "$ok" == "True" || "$ok" == "true" ]] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
-    done
-    log_action "XUI: клиент ${email} — добавлен inbound"
-    read -p "  Enter..."
-}
-
-# Удаляет клиента из конкретного inbound'а
-_xui_remove_inbound_from_client() {
-    local sub_id="$1" email="$2" current_ibs="$3"
-    clear
-    echo -e "\n${CYAN}━━━ Удалить из inbound → ${email} ━━━${NC}\n"
-
-    local sel; sel=$(_xui_select_inbounds "del" "$current_ibs")
-    [ "$sel" = "CANCEL" ] && return
-
-    local resp; resp=$(_xui_api GET "/panel/api/inbounds/list" "")
-    local -a target_ids=()
-    [ "$sel" = "ALL" ] && {
-        IFS=',' read -ra target_ids <<< "$current_ibs"
-    } || target_ids=("$sel")
-
-    for ib_id in "${target_ids[@]}"; do
-        echo -ne "  ${CYAN}→ Удаление из inbound ${ib_id}...${NC} "
-        # Находим clientId (UUID) клиента в этом inbound
-        local client_id
-        client_id=$(echo "$resp" | python3 - "$ib_id" "$email" << 'PYEOF'
-import json,sys
-d=json.load(sys.stdin)
-ib_id,email=int(sys.argv[1]),sys.argv[2]
-for ib in d.get('obj',[]):
-    if ib['id']==ib_id:
-        s=json.loads(ib.get('settings','{}'))
-        for c in s.get('clients',[]):
-            if c.get('email')==email:
-                print(c.get('id') or c.get('password',''))
-                break
-PYEOF
-)
-        if [ -z "$client_id" ]; then
-            echo -e "${YELLOW}не найден${NC}"
-            continue
-        fi
-        local result; result=$(_xui_api POST "/panel/api/inbounds/${ib_id}/delClient/${client_id}" "")
-        local ok; ok=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('success','false'))" 2>/dev/null)
-        [[ "$ok" == "True" || "$ok" == "true" ]] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
-    done
-    log_action "XUI: клиент ${email} — удалён из inbound"
-    read -p "  Enter..."
-}
-
-# Удаляет клиента из всех inbound'ов
-_xui_delete_client_all() {
-    local sub_id="$1" email="$2" ib_ids_str="$3"
-    local resp; resp=$(_xui_api GET "/panel/api/inbounds/list" "")
-    IFS=',' read -ra ib_ids <<< "$ib_ids_str"
-
-    for ib_id in "${ib_ids[@]}"; do
-        echo -ne "  ${CYAN}→ inbound ${ib_id}...${NC} "
-        local client_id
-        client_id=$(echo "$resp" | python3 - "$ib_id" "$email" << 'PYEOF'
-import json,sys
-d=json.load(sys.stdin)
-ib_id,email=int(sys.argv[1]),sys.argv[2]
-for ib in d.get('obj',[]):
-    if ib['id']==ib_id:
-        s=json.loads(ib.get('settings','{}'))
-        for c in s.get('clients',[]):
-            if c.get('email')==email:
-                print(c.get('id') or c.get('password',''))
-                break
-PYEOF
-)
-        if [ -z "$client_id" ]; then
-            echo -e "${YELLOW}не найден${NC}"; continue
-        fi
-        local result; result=$(_xui_api POST "/panel/api/inbounds/${ib_id}/delClient/${client_id}" "")
-        local ok; ok=$(echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('success','false'))" 2>/dev/null)
-        [[ "$ok" == "True" || "$ok" == "true" ]] && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
-    done
-    log_action "XUI: удалён клиент ${email} полностью"
-}
-
-# Исправляет subDomain в x-ui.db
-_xui_fix_subdomain() {
-    clear
-    echo -e "\n${CYAN}━━━ Домен подписки ━━━${NC}\n"
-    _xui_read_config
-
-    echo -e "  ${WHITE}Текущий subDomain:${NC} ${CYAN}${XUI_SUB_DOMAIN:-не задан}${NC}"
-    echo -e "  ${WHITE}Текущий subPath:${NC}   ${CYAN}${XUI_SUB_PATH}${NC}"
-    echo -e "  ${WHITE}Текущий subPort:${NC}   ${CYAN}${XUI_SUB_PORT}${NC}"
-    echo ""
-    echo -e "  ${WHITE}Пример подписки сейчас:${NC}"
-    echo -e "  ${CYAN}$(_xui_sub_url 'SUBID_КЛИЕНТА')${NC}"
-    echo ""
-
-    echo -ne "  Новый домен подписки (Enter = оставить): "
-    read -r new_domain
-    [ -z "$new_domain" ] && { read -p "  Enter..."; return; }
-
-    echo -ne "  ${YELLOW}Внимание! Клиенты с доменом в подписке обновятся автоматически.${NC}"
-    echo -ne "\n  Продолжить? (y/n): "; read -r c
-    [[ "$c" != "y" ]] && return
-
-    sqlite3 /etc/x-ui/x-ui.db \
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('subDomain', '${new_domain}');" \
-        2>/dev/null && \
-        echo -e "  ${GREEN}✓ subDomain обновлён: ${new_domain}${NC}" || \
-        echo -e "  ${RED}✗ Ошибка записи в БД${NC}"
-
-    systemctl restart x-ui > /dev/null 2>&1
-    sleep 2
-    echo -e "  ${GREEN}✓ x-ui перезапущен${NC}"
-    log_action "XUI: subDomain установлен: ${new_domain}"
-    read -p "  Enter..."
-}
 
 
 #  ДОМЕНЫ И SSL
