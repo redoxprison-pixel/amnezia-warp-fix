@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.33"
+VERSION="5.34"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -429,11 +429,16 @@ _3xui_get_inbounds() {
 # Пишет вспомогательные python скрипты
 _3xui_write_helpers() {
     cat > /tmp/xui_parse.py << 'PYEOF'
-import json, sys
+import json, sys, re
+
+def strip_suffix(email):
+    """Убирает суффиксы (-_•) (•_-) (•_•) (-_-) и подобные"""
+    return re.sub(r'\([^)]*[_\-•.][^)]*\)\s*$', '', email).strip()
+
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    seen = {}
+    seen = {}  # key=subId -> data
     for ib in d.get("obj", []):
         ib_id = str(ib["id"])
         try:
@@ -446,22 +451,38 @@ try:
             enable = "on" if c.get("enable", True) else "off"
             up = ib.get("up", 0)
             down = ib.get("down", 0)
-            key = sub_id if sub_id else email
+            # Группируем по subId (уникальный для клиента)
+            # Если subId пустой — используем базовый email без суффикса
+            base = strip_suffix(email)
+            key = sub_id if sub_id else base
             if key not in seen:
-                seen[key] = {"email": email, "subId": sub_id,
-                             "inbounds": [], "enable": enable, "up": up, "down": down}
+                seen[key] = {
+                    "display_email": base or email,
+                    "subId": sub_id,
+                    "inbounds": [],
+                    "emails": {},   # ib_id -> email (для удаления)
+                    "enable": enable,
+                    "up": up,
+                    "down": down
+                }
             if ib_id not in seen[key]["inbounds"]:
                 seen[key]["inbounds"].append(ib_id)
+                seen[key]["emails"][ib_id] = email
+            # Суммируем трафик только один раз (берём макс по inbound)
+            seen[key]["up"] = max(seen[key]["up"], up)
+            seen[key]["down"] = max(seen[key]["down"], down)
     for v in seen.values():
-        print("{}|{}|{}|{}|{}|{}".format(
-            v["email"], v["subId"], ",".join(v["inbounds"]),
-            v["enable"], v["up"], v["down"]))
+        # emails_map: "ib_id:email,ib_id:email,..."
+        emails_map = ";".join("{}:{}".format(k, v2) for k, v2 in v["emails"].items())
+        print("{}|{}|{}|{}|{}|{}|{}".format(
+            v["display_email"], v["subId"], ",".join(v["inbounds"]),
+            v["enable"], v["up"], v["down"], emails_map))
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
 
     cat > /tmp/xui_inbounds.py << 'PYEOF'
-import json, sys, unicodedata
+import json, sys
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
@@ -503,6 +524,7 @@ except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
 }
+
 
 
 # Парсит клиентов
@@ -612,17 +634,73 @@ _3xui_clients_menu() {
     _3xui_load_config
     _3xui_write_helpers
 
+    # Выбор сервера если есть несколько в алиасах
+    local SSH_TUNNEL_PID="" SSH_TUNNEL_PORT=""
+    if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+        clear
+        echo -e "
+${CYAN}━━━ Выберите сервер 3X-UI ━━━${NC}
+"
+        echo -e "  ${YELLOW}[0]${NC}  Текущий (${MY_IP})"
+        local ai=1
+        local -a alias_entries=()
+        while IFS= read -r aline; do
+            [[ -z "$aline" || "$aline" == \#* ]] && continue
+            local aip="${aline%%=*}" ainfo="${aline##*=}"
+            local aname="${ainfo%%|*}"
+            # Показываем только если это не текущий IP
+            [ "$aip" = "$MY_IP" ] && continue
+            echo -e "  ${YELLOW}[$ai]${NC}  ${aname} (${aip})"
+            alias_entries+=("${aip}|${aname}")
+            (( ai++ ))
+        done < "$ALIASES_FILE"
+        echo ""
+        local srv_ch
+        read -p "  Выбор (0 = текущий): " srv_ch < /dev/tty
+
+        if [[ "$srv_ch" =~ ^[1-9][0-9]*$ ]] && (( srv_ch < ai )); then
+            local target_entry="${alias_entries[$((srv_ch-1))]}"
+            local target_ip="${target_entry%%|*}"
+            local target_name="${target_entry##*|}"
+
+            # SSH туннель к удалённому серверу
+            local tport=$(( 17000 + RANDOM % 1000 ))
+            echo -e "
+  ${CYAN}→ SSH туннель к ${target_name} (${target_ip})...${NC}"
+            ssh -f -N -L "${tport}:127.0.0.1:${XUI_PORT}"                 -o StrictHostKeyChecking=no                 -o ConnectTimeout=5                 -o ServerAliveInterval=30                 "root@${target_ip}" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                SSH_TUNNEL_PID=$(pgrep -f "ssh.*${tport}:127.0.0.1:${XUI_PORT}.*${target_ip}" | head -1)
+                SSH_TUNNEL_PORT="$tport"
+                # Перенаправляем API на туннель
+                XUI_BASE="https://127.0.0.1:${tport}${XUI_PATH}"
+                echo -e "  ${GREEN}✓ Туннель установлен${NC}"
+                sleep 1
+            else
+                echo -e "  ${RED}✗ SSH недоступен. Используется текущий сервер.${NC}"
+                sleep 2
+            fi
+        fi
+    fi
+
     # Проверяем пароль
     if ! grep -q "^XUI_PASS=" /etc/govpn/config 2>/dev/null; then
-        echo -e "\n  ${YELLOW}Пароль панели 3X-UI не настроен.${NC}"
-        _3xui_save_password || { read -p "  Enter..." < /dev/tty; return; }
+        echo -e "
+  ${YELLOW}Пароль панели 3X-UI не настроен.${NC}"
+        _3xui_save_password || {
+            [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
+            read -p "  Enter..." < /dev/tty; return
+        }
     fi
 
     local cookie
     cookie=$(_3xui_auth)
     if [ -z "$cookie" ]; then
+        [ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null
         read -p "  Enter..." < /dev/tty; return 1
     fi
+
+    # Закрываем туннель при выходе
+    trap '[ -n "$SSH_TUNNEL_PID" ] && kill "$SSH_TUNNEL_PID" 2>/dev/null; trap - RETURN' RETURN
 
     while true; do
         clear
@@ -657,7 +735,7 @@ _3xui_clients_menu() {
             echo -e "  ${CYAN}$(printf '─%.0s' {1..60})${NC}"
             local i=1
             for c in "${clients[@]}"; do
-                IFS='|' read -r email sub_id inbounds enable up down <<< "$c"
+                IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$c"
                 # Убираем спецсимволы из email для выравнивания
                 local clean_email; clean_email=$(printf '%s' "$email" | tr -cd '[:print:]' | cut -c1-20)
                 local clean_sub; clean_sub=$(printf '%s' "$sub_id" | cut -c1-18)
@@ -700,7 +778,7 @@ _3xui_clients_menu() {
 # Профиль клиента
 _3xui_client_profile() {
     local client_str="$1" cookie="$2"
-    IFS='|' read -r email sub_id inbounds enable up down <<< "$client_str"
+    IFS='|' read -r email sub_id inbounds enable up down emails_map <<< "$client_str"
 
     while true; do
         clear
@@ -750,7 +828,11 @@ _3xui_client_profile() {
                 IFS=',' read -ra ib_arr <<< "$inbounds"
                 local ok=0
                 for ib_id in "${ib_arr[@]}"; do
-                    local res; res=$(_3xui_del_client_from_inbound "$ib_id" "$email" "$cookie")
+                    # Получаем точный email для этого inbound из emails_map
+                    local exact_email
+                    exact_email=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                    [ -z "$exact_email" ] && exact_email="$email"
+                    local res; res=$(_3xui_del_client_from_inbound "$ib_id" "$exact_email" "$cookie")
                     echo "$res" | grep -q '"success":true' && (( ok++ ))
                 done
                 echo -e "  ${GREEN}✓ Удалён из ${ok} inbound(ов)${NC}"
@@ -758,7 +840,11 @@ _3xui_client_profile() {
                 read -p "  Enter..." < /dev/tty
                 return ;;
             5)
-                local res; res=$(_3xui_api POST "/panel/api/inbounds/resetClientTraffic/${email}" "" "$cookie")
+                # Сбрасываем трафик по всем email из emails_map
+                local first_exact
+                first_exact=$(echo "$emails_map" | tr ';' '\n' | head -1 | cut -d: -f2-)
+                [ -z "$first_exact" ] && first_exact="$email"
+                local res; res=$(_3xui_api POST "/panel/api/inbounds/resetClientTraffic/${first_exact}" "" "$cookie")
                 echo "$res" | grep -q '"success":true' && \
                     echo -e "  ${GREEN}✓ Трафик сброшен${NC}" || echo -e "  ${RED}✗ Ошибка${NC}"
                 read -p "  Enter..." < /dev/tty ;;
