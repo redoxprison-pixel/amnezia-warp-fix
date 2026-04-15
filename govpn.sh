@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.32"
+VERSION="5.33"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -461,22 +461,49 @@ except Exception as e:
 PYEOF
 
     cat > /tmp/xui_inbounds.py << 'PYEOF'
+import json, sys, unicodedata
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    exclude = {"2", "6"}
+    show_all = len(sys.argv) > 2 and sys.argv[2] == "all"
+    for ib in d.get("obj", []):
+        if str(ib["id"]) not in exclude:
+            enabled = ib.get("enable", True)
+            if not show_all and not enabled:
+                continue
+            raw = ib.get("remark", "")
+            name = ""
+            for c in raw:
+                cp = ord(c)
+                if 0x20 <= cp < 0x2000 and c.isprintable():
+                    name += c
+            name = name.strip() or "id={}".format(ib["id"])
+            status = "on" if enabled else "off"
+            print("{}|{}|{}|{}|{}".format(
+                ib["id"], name, ib.get("protocol",""), ib.get("port",""), status))
+except Exception as e:
+    sys.stderr.write("ERR:{}\n".format(e))
+PYEOF
+
+    cat > /tmp/xui_getid.py << 'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    exclude = {"2", "6"}  # WS и Socks5
+    ib_id, email = sys.argv[2], sys.argv[3]
     for ib in d.get("obj", []):
-        if str(ib["id"]) not in exclude:
-            # Очищаем название от непечатаемых символов
-            name = "".join(c for c in ib.get("remark","") if c.isprintable() and ord(c) < 0x2600)
-            name = name.strip() or "id={}".format(ib["id"])
-            print("{}|{}|{}|{}".format(
-                ib["id"], name, ib.get("protocol",""), ib.get("port","")))
+        if str(ib["id"]) == ib_id:
+            s = json.loads(ib.get("settings", "{}"))
+            for c in s.get("clients", []):
+                if c.get("email") == email:
+                    print(c.get("id", ""))
+                    break
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
 }
+
 
 # Парсит клиентов
 _3xui_parse_clients() {
@@ -489,32 +516,23 @@ _3xui_parse_clients() {
 
 # Список доступных inbound'ов (без WS и Socks5)
 _3xui_select_inbounds() {
-    local cookie="$1"
+    local cookie="$1" show_all="${2:-}"
     local jf; jf=$(mktemp)
     _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
-    python3 /tmp/xui_inbounds.py "$jf" 2>/dev/null
+    if [ "$show_all" = "all" ]; then
+        python3 /tmp/xui_inbounds.py "$jf" all 2>/dev/null
+    else
+        python3 /tmp/xui_inbounds.py "$jf" 2>/dev/null
+    fi
     rm -f "$jf"
 }
 
-# Имя inbound'а по id
+# Имя inbound'а по id (использует xui_inbounds.py)
 _3xui_inbound_name() {
     local ib_id="$1" cookie="$2"
     local jf; jf=$(mktemp)
     _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
-    python3 - "$jf" "$ib_id" << 'PYEOF'
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    target = sys.argv[2]
-    for ib in d.get("obj", []):
-        if str(ib["id"]) == target:
-            name = "".join(c for c in ib.get("remark","") if c.isprintable() and ord(c) < 0x2600).strip()
-            print(name or "id={}".format(target))
-            break
-except Exception:
-    print("id={}".format(sys.argv[2]))
-PYEOF
+    python3 /tmp/xui_inbounds.py "$jf" all 2>/dev/null | grep "^${ib_id}|" | cut -d'|' -f2
     rm -f "$jf"
 }
 
@@ -655,6 +673,7 @@ _3xui_clients_menu() {
         fi
 
         echo -e "  ${GREEN}[a]${NC}  Добавить клиента"
+        echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
         echo -e "  ${YELLOW}[p]${NC}  Сменить пароль панели"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -667,6 +686,9 @@ _3xui_clients_menu() {
             cookie=$(_3xui_auth)
         elif [[ "$ch" == "a" || "$ch" == "A" || "$ch" == "а" || "$ch" == "А" ]]; then
             _3xui_add_client_menu "$cookie"
+            cookie=$(_3xui_auth)
+        elif [[ "$ch" == "i" || "$ch" == "I" || "$ch" == "ш" || "$ch" == "Ш" ]]; then
+            _3xui_toggle_inbounds_menu "$cookie"
             cookie=$(_3xui_auth)
         elif [[ "$ch" == "p" || "$ch" == "P" || "$ch" == "з" || "$ch" == "З" ]]; then
             _3xui_save_password
@@ -745,27 +767,29 @@ _3xui_client_profile() {
 }
 
 # Добавить нового клиента
+# Суффиксы для уникальных email по inbound
+# Порядок inbound'ов: 1й=(-_•), 2й=(•_-), 3й=(•_•), 4й=(-_-)
+XUI_SUFFIXES=('(-_•)' '(•_-)' '(•_•)' '(-_-)')
+
+_3xui_email_for_inbound() {
+    local base_email="$1" inbound_index="$2"
+    # index 0-based
+    local suffix="${XUI_SUFFIXES[$inbound_index]:-($inbound_index)}"
+    echo "${base_email}${suffix}"
+}
+
 _3xui_add_client_menu() {
     local cookie="$1"
     clear
     echo -e "\n${CYAN}━━━ Добавить клиента ━━━${NC}\n"
 
-    echo -ne "  Имя клиента: "; read -r email < /dev/tty
-    [ -z "$email" ] && return
-
-    local _cf; _cf=$(mktemp)
-    _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
-    local existing; existing=$(grep "^${email}|" "$_cf" 2>/dev/null)
-    rm -f "$_cf"
-    if [ -n "$existing" ]; then
-        echo -e "  ${RED}✗ Клиент '${email}' уже существует${NC}"
-        read -p "  Enter..." < /dev/tty; return
-    fi
+    echo -ne "  Имя клиента: "; read -r base_email < /dev/tty
+    [ -z "$base_email" ] && return
 
     local uuid sub_id
     uuid=$(_gen_uuid); sub_id=$(_gen_subid)
 
-    # Загружаем inbound'ы
+    # Загружаем активные inbound'ы
     local -a available_ibs=()
     local _sf; _sf=$(mktemp)
     _3xui_select_inbounds "$cookie" > "$_sf" 2>/dev/null
@@ -775,15 +799,16 @@ _3xui_add_client_menu() {
     rm -f "$_sf"
 
     if [ ${#available_ibs[@]} -eq 0 ]; then
-        echo -e "  ${RED}✗ Нет доступных протоколов${NC}"
+        echo -e "  ${RED}✗ Нет активных протоколов${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
     echo -e "\n  ${WHITE}Доступные протоколы:${NC}\n"
     local i=1
     for ib in "${available_ibs[@]}"; do
-        IFS='|' read -r ib_id ib_name ib_proto ib_port <<< "$ib"
-        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}"
+        IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+        local suffix="${XUI_SUFFIXES[$((i-1))]:-($((i-1)))}"
+        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}  → email: ${base_email}${suffix}"
         (( i++ ))
     done
     echo ""
@@ -792,26 +817,29 @@ _3xui_add_client_menu() {
     echo -e "  ${WHITE}Введите номер(а) через пробел или 'a':${NC}"
     echo -ne "  → "; read -r sel < /dev/tty
 
-    local -a selected_ids=()
+    local -a selected_idx=()
     if [[ "$sel" == [aAаА] ]]; then
-        for ib in "${available_ibs[@]}"; do selected_ids+=("${ib%%|*}"); done
+        for (( j=0; j<${#available_ibs[@]}; j++ )); do selected_idx+=("$j"); done
     else
         for num in $sel; do
-            [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#available_ibs[@]} )) && \
-                selected_ids+=("${available_ibs[$((num-1))]%%|*}")
+            if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#available_ibs[@]} )); then
+                selected_idx+=("$((num-1))")
+            fi
         done
     fi
 
-    if [ ${#selected_ids[@]} -eq 0 ]; then
+    if [ ${#selected_idx[@]} -eq 0 ]; then
         echo -e "\n  ${YELLOW}Ничего не выбрано${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
     echo ""
     local success=0 fail=0
-    for ib_id in "${selected_ids[@]}"; do
-        local ib_name; ib_name=$(_3xui_inbound_name "$ib_id" "$cookie")
-        echo -ne "  ${CYAN}→ ${ib_name}...${NC} "
+    for idx in "${selected_idx[@]}"; do
+        local ib="${available_ibs[$idx]}"
+        IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+        local email; email=$(_3xui_email_for_inbound "$base_email" "$idx")
+        echo -ne "  ${CYAN}→ ${ib_name} [${email}]...${NC} "
         local res; res=$(_3xui_add_client_to_inbound "$ib_id" "$email" "$uuid" "$sub_id" "$cookie")
         if echo "$res" | grep -q '"success":true'; then
             echo -e "${GREEN}✓${NC}"; (( success++ ))
@@ -824,37 +852,44 @@ _3xui_add_client_menu() {
     if [ "$success" -gt 0 ]; then
         local sub_link; sub_link=$(_3xui_sub_link "$sub_id")
         echo -e "\n  ${GREEN}✅ Готово! Добавлен в ${success} протокол(ов)${NC}"
-        echo -e "  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
+        echo -e "  ${WHITE}Имена:${NC}"
+        for idx in "${selected_idx[@]}"; do
+            local sfx="${XUI_SUFFIXES[$idx]:-($idx)}"
+            echo -e "    ${CYAN}${base_email}${sfx}${NC}"
+        done
+        echo -e "\n  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
         command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
         command -v qrencode &>/dev/null && qrencode -t ANSIUTF8 "$sub_link"
-        log_action "3XUI: добавлен ${email} subId=${sub_id}"
+        log_action "3XUI: добавлен ${base_email} subId=${sub_id}"
     fi
     [ "$fail" -gt 0 ] && echo -e "  ${YELLOW}⚠ ${fail} протокол(ов) не добавилось${NC}"
     read -p "  Enter..." < /dev/tty
 }
 
-# Добавить протокол к существующему клиенту
 _3xui_add_inbound_to_client() {
     local email="$1" sub_id="$2" current_inbounds="$3" cookie="$4"
     clear
     echo -e "\n${CYAN}━━━ Добавить протокол: ${email} ━━━${NC}\n"
 
+    # Получаем UUID клиента через xui_getid.py
     local first_ib="${current_inbounds%%,*}"
     local jf; jf=$(mktemp)
     _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
     local uuid
-    uuid=$(python3 - "$jf" "$first_ib" "$email" << 'PYEOF'
-import json,sys
-with open(sys.argv[1]) as f: d=json.load(f)
-for ib in d.get("obj",[]):
-    if str(ib["id"])==sys.argv[2]:
-        s=json.loads(ib.get("settings","{}"))
-        for c in s.get("clients",[]):
-            if c.get("email")==sys.argv[3]: print(c.get("id","")); break
-PYEOF
-    )
+    uuid=$(python3 /tmp/xui_getid.py "$jf" "$first_ib" "$email" 2>/dev/null)
+    # Если email с суффиксом — пробуем базовое имя тоже
+    if [ -z "$uuid" ]; then
+        local base_email="${email%(*}"
+        uuid=$(python3 /tmp/xui_getid.py "$jf" "$first_ib" "$base_email" 2>/dev/null)
+    fi
     rm -f "$jf"
 
+    if [ -z "$uuid" ]; then
+        echo -e "  ${RED}✗ Не удалось найти UUID клиента${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    # Inbound'ы которых ещё нет у клиента
     local -a available=()
     local _sf; _sf=$(mktemp)
     _3xui_select_inbounds "$cookie" > "$_sf" 2>/dev/null
@@ -867,43 +902,49 @@ PYEOF
     rm -f "$_sf"
 
     if [ ${#available[@]} -eq 0 ]; then
-        echo -e "  ${YELLOW}Клиент уже во всех доступных протоколах${NC}"
+        echo -e "  ${YELLOW}Клиент уже во всех активных протоколах${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
     local i=1
     for ib in "${available[@]}"; do
-        IFS='|' read -r ib_id ib_name ib_proto ib_port <<< "$ib"
-        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}"
+        IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+        local idx=$(( i - 1 ))
+        local suffix="${XUI_SUFFIXES[$idx]:-($idx)}"
+        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}  → ${email%(*}${suffix}"
         (( i++ ))
     done
     echo -e "\n  ${GREEN}[a]${NC}  Все сразу"
     echo ""
     echo -ne "  Выбор: "; read -r sel < /dev/tty
 
-    local -a selected=()
+    local -a selected_idx=()
     if [[ "$sel" == [aAаА] ]]; then
-        for ib in "${available[@]}"; do selected+=("${ib%%|*}"); done
+        for (( j=0; j<${#available[@]}; j++ )); do selected_idx+=("$j"); done
     else
         for num in $sel; do
             [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#available[@]} )) && \
-                selected+=("${available[$((num-1))]%%|*}")
+                selected_idx+=("$((num-1))")
         done
     fi
-    [ ${#selected[@]} -eq 0 ] && { read -p "  Enter..." < /dev/tty; return; }
+    [ ${#selected_idx[@]} -eq 0 ] && { read -p "  Enter..." < /dev/tty; return; }
 
+    local base_email="${email%(*}"
     echo ""
-    for ib_id in "${selected[@]}"; do
-        local ib_name; ib_name=$(_3xui_inbound_name "$ib_id" "$cookie")
-        echo -ne "  ${CYAN}→ ${ib_name}...${NC} "
-        local res; res=$(_3xui_add_client_to_inbound "$ib_id" "$email" "$uuid" "$sub_id" "$cookie")
+    for idx in "${selected_idx[@]}"; do
+        local ib="${available[$idx]}"
+        IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+        # Считаем глобальный индекс для суффикса
+        local global_idx=$(( idx + ${#current_inbounds//[^,]/} + 1 ))
+        local new_email; new_email=$(_3xui_email_for_inbound "$base_email" "$global_idx")
+        echo -ne "  ${CYAN}→ ${ib_name} [${new_email}]...${NC} "
+        local res; res=$(_3xui_add_client_to_inbound "$ib_id" "$new_email" "$uuid" "$sub_id" "$cookie")
         echo "$res" | grep -q '"success":true' && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
     done
-    log_action "3XUI: ${email} добавлен в протоколы: ${selected[*]}"
+    log_action "3XUI: ${email} добавлен в протоколы"
     read -p "  Enter..." < /dev/tty
 }
 
-# Удалить протокол у клиента
 _3xui_del_inbound_from_client() {
     local email="$1" current_inbounds="$2" cookie="$3"
     clear
@@ -911,14 +952,14 @@ _3xui_del_inbound_from_client() {
 
     IFS=',' read -ra ib_arr <<< "$current_inbounds"
     if [ ${#ib_arr[@]} -le 1 ]; then
-        echo -e "  ${YELLOW}Только один протокол. Используйте 'Удалить клиента' для полного удаления.${NC}"
+        echo -e "  ${YELLOW}Только один протокол — используйте 'Удалить клиента'.${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
     local i=1
     for ib_id in "${ib_arr[@]}"; do
         local ib_name; ib_name=$(_3xui_inbound_name "$ib_id" "$cookie")
-        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name} (id=${ib_id})"
+        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name:-id=$ib_id} (id=${ib_id})"
         (( i++ ))
     done
     echo ""
@@ -927,16 +968,126 @@ _3xui_del_inbound_from_client() {
 
     local target="${ib_arr[$((num-1))]}"
     local ib_name; ib_name=$(_3xui_inbound_name "$target" "$cookie")
-    echo -ne "  ${RED}Удалить ${email} из ${ib_name}? (y/n): ${NC}"
+    echo -ne "  ${RED}Удалить ${email} из ${ib_name:-id=$target}? (y/n): ${NC}"
     read -r c < /dev/tty
     [[ "$c" != "y" ]] && return
 
+    # Пробуем удалить по точному email и по base
     local res; res=$(_3xui_del_client_from_inbound "$target" "$email" "$cookie")
+    if ! echo "$res" | grep -q '"success":true'; then
+        # Пробуем суффиксы
+        local base="${email%(*}"
+        for sfx in "${XUI_SUFFIXES[@]}"; do
+            res=$(_3xui_del_client_from_inbound "$target" "${base}${sfx}" "$cookie")
+            echo "$res" | grep -q '"success":true' && break
+        done
+    fi
     echo "$res" | grep -q '"success":true' && \
-        echo -e "  ${GREEN}✓ Удалён из ${ib_name}${NC}" || echo -e "  ${RED}✗ Ошибка${NC}"
+        echo -e "  ${GREEN}✓ Удалён из ${ib_name:-id=$target}${NC}" || \
+        echo -e "  ${RED}✗ Ошибка${NC}"
     log_action "3XUI: ${email} удалён из ${target}"
     read -p "  Enter..." < /dev/tty
 }
+
+# Включение / отключение inbound'ов
+_3xui_toggle_inbounds_menu() {
+    local cookie="$1"
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Управление протоколами ━━━${NC}\n"
+
+        # Загружаем ВСЕ inbound'ы включая отключённые
+        local -a all_ibs=()
+        local _sf; _sf=$(mktemp)
+        _3xui_select_inbounds "$cookie" all > "$_sf" 2>/dev/null
+        while IFS= read -r line; do
+            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] && all_ibs+=("$line")
+        done < "$_sf"
+        rm -f "$_sf"
+
+        if [ ${#all_ibs[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}Протоколов не найдено${NC}"
+            read -p "  Enter..." < /dev/tty; return
+        fi
+
+        local i=1
+        for ib in "${all_ibs[@]}"; do
+            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+            local st_col
+            [ "$ib_status" = "on" ] && st_col="${GREEN}● вкл${NC}" || st_col="${RED}● выкл${NC}"
+            printf "  ${YELLOW}[%d]${NC}  %-22s ${CYAN}(%s:%s)${NC}  %b\n" \
+                "$i" "$ib_name" "$ib_proto" "$ib_port" "$st_col"
+            (( i++ ))
+        done
+
+        echo ""
+        echo -e "  ${WHITE}Выберите номер для переключения (вкл/выкл)${NC}"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
+        if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#all_ibs[@]} )); then
+            local ib="${all_ibs[$((ch-1))]}"
+            IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
+
+            local action new_status
+            if [ "$ib_status" = "on" ]; then
+                action="отключить"; new_status="false"
+            else
+                action="включить"; new_status="true"
+            fi
+
+            echo -ne "  ${YELLOW}${action^} ${ib_name}? (y/n): ${NC}"
+            read -r c < /dev/tty
+            [[ "$c" != "y" ]] && continue
+
+            # Получаем полный объект inbound и меняем enable
+            local jf; jf=$(mktemp)
+            _3xui_get_inbounds "$cookie" > "$jf" 2>/dev/null
+            local upd_data
+            upd_data=$(python3 - "$jf" "$ib_id" "$new_status" << 'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    ib_id, new_en = sys.argv[2], sys.argv[3] == "true"
+    for ib in d.get("obj", []):
+        if str(ib["id"]) == ib_id:
+            ib["enable"] = new_en
+            # API принимает объект inbound целиком
+            print(json.dumps(ib))
+            break
+except Exception as e:
+    sys.stderr.write("ERR:{}\n".format(e))
+PYEOF
+            )
+            rm -f "$jf"
+
+            if [ -z "$upd_data" ]; then
+                echo -e "  ${RED}✗ Ошибка получения данных inbound${NC}"
+                read -p "  Enter..." < /dev/tty; continue
+            fi
+
+            local res
+            res=$(_3xui_api POST "/panel/api/inbounds/update/${ib_id}" "$upd_data" "$cookie")
+
+            if echo "$res" | grep -q '"success":true'; then
+                local done_msg
+                [ "$new_status" = "true" ] && done_msg="${GREEN}✓ Включён${NC}" || done_msg="${YELLOW}✓ Отключён${NC}"
+                echo -e "  ${done_msg}: ${ib_name}"
+                log_action "3XUI: inbound ${ib_id} (${ib_name}) → enable=${new_status}"
+            else
+                local err; err=$(echo "$res" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('msg',''))" 2>/dev/null)
+                echo -e "  ${RED}✗ Ошибка: ${err}${NC}"
+            fi
+            read -p "  Enter..." < /dev/tty
+        fi
+    done
+}
+
+
+
 
 
 
