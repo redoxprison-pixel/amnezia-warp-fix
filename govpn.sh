@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.49"
+VERSION="5.50"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -436,7 +436,7 @@ _3xui_write_helpers() {
 import json, sys, re, subprocess
 
 def strip_suffix(email):
-    # Новый формат: Name(-_•)1  -> Name
+    # Новый формат: Name(-_•)N
     cleaned = re.sub(r'\(-_•\)\d+$', '', email).strip()
     if cleaned != email:
         return cleaned
@@ -445,20 +445,20 @@ def strip_suffix(email):
 
 def get_traffic(email):
     try:
-        r = subprocess.run(
-            ['sqlite3', '/etc/x-ui/x-ui.db',
-             "SELECT up, down FROM client_traffics WHERE email='{}' LIMIT 1;".format(email)],
-            capture_output=True, text=True, timeout=2)
-        if r.returncode == 0 and r.stdout.strip():
-            parts = r.stdout.strip().split('|')
-            if len(parts) == 2:
-                return int(parts[0] or 0), int(parts[1] or 0)
+        # Используем python sqlite3 чтобы не падать на спецсимволах
+        import sqlite3
+        conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+        conn.text_factory = lambda b: b.decode('utf-8', errors='replace')
+        row = conn.execute(
+            "SELECT up, down FROM client_traffics WHERE email=? LIMIT 1", (email,)
+        ).fetchone()
+        conn.close()
+        return (int(row[0] or 0), int(row[1] or 0)) if row else (0, 0)
     except Exception:
-        pass
-    return 0, 0
+        return 0, 0
 
 try:
-    with open(sys.argv[1]) as f:
+    with open(sys.argv[1], encoding='utf-8', errors='replace') as f:
         d = json.load(f)
     seen = {}
     for ib in d.get("obj", []):
@@ -469,6 +469,10 @@ try:
             settings = {}
         for c in settings.get("clients", []):
             email = c.get("email", "")
+            # Пропускаем записи с битыми суррогатами
+            if '\ud800' <= email[:1] <= '\udfff' or any(
+                '\ud800' <= ch <= '\udfff' for ch in email):
+                continue
             sub_id = c.get("subId", "")
             enable = "on" if c.get("enable", True) else "off"
             base = strip_suffix(email)
@@ -553,6 +557,8 @@ field = os.environ.get("FIELD", "")
 value = os.environ.get("VALUE", "")
 try:
     conn = sqlite3.connect(DB)
+    # surrogateescape чтобы не падать на битых UTF-8 в старых записях
+    conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
     cur = conn.cursor()
     cur.execute("SELECT settings FROM inbounds WHERE id=?", (ib_id,))
     row = cur.fetchone()
@@ -567,8 +573,11 @@ try:
     elif mode == "update":
         for c in s.get("clients", []):
             if c.get("email") == old_email:
-                try: c[field] = int(value)
-                except (ValueError, TypeError): c[field] = value
+                if field == "enable":
+                    c[field] = (value.lower() == "true")
+                else:
+                    try: c[field] = int(value)
+                    except (ValueError, TypeError): c[field] = value
                 break
     elif mode == "delete":
         before = len(s.get("clients", []))
