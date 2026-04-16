@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.42"
+VERSION="5.44"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -436,6 +436,11 @@ _3xui_write_helpers() {
 import json, sys, re, subprocess
 
 def strip_suffix(email):
+    # Новый формат: Name(-_•)1  -> Name
+    cleaned = re.sub(r'\(-_•\)\d+$', '', email).strip()
+    if cleaned != email:
+        return cleaned
+    # Старый формат: Name(-_•) (•_-) (•_•) (-_-)
     return re.sub(r'\([^)]*[_\-•.][^)]*\)\s*$', '', email).strip()
 
 def get_traffic(email):
@@ -752,13 +757,21 @@ PYEOF
 # Добавить нового клиента
 # Суффиксы для уникальных email по inbound
 # Порядок inbound'ов: 1й=(-_•), 2й=(•_-), 3й=(•_•), 4й=(-_-)
-XUI_SUFFIXES=('(-_•)' '(•_-)' '(•_•)' '(-_-)')
+# Разделитель групп клиента по inbound'ам
+XUI_SEP='(-_•)'
 
+# Формирует email клиента для конкретного inbound
+# Формат: BaseName(-_•)N  (где N = id inbound'а)
 _3xui_email_for_inbound() {
-    local base_email="$1" inbound_index="$2"
-    # index 0-based
-    local suffix="${XUI_SUFFIXES[$inbound_index]:-($inbound_index)}"
-    echo "${base_email}${suffix}"
+    local base_email="$1" ib_id="$2"
+    echo "${base_email}${XUI_SEP}${ib_id}"
+}
+
+# Извлекает base email из email с суффиксом
+_3xui_base_email() {
+    local email="$1"
+    # Убираем (-_•)N в конце
+    echo "$email" | sed "s/(-_•)[0-9]*$//"
 }
 
 _3xui_add_client_menu() {
@@ -790,8 +803,7 @@ _3xui_add_client_menu() {
     local i=1
     for ib in "${available_ibs[@]}"; do
         IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-        local suffix="${XUI_SUFFIXES[$((i-1))]:-($((i-1)))}"
-        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}  → email: ${base_email}${suffix}"
+        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}  → email: ${base_email}${XUI_SEP}${ib_id}"
         (( i++ ))
     done
     echo ""
@@ -821,7 +833,7 @@ _3xui_add_client_menu() {
     for idx in "${selected_idx[@]}"; do
         local ib="${available_ibs[$idx]}"
         IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-        local email; email=$(_3xui_email_for_inbound "$base_email" "$idx")
+        local email; email=$(_3xui_email_for_inbound "$base_email" "${available_ibs[$idx]%%|*}")
         echo -ne "  ${CYAN}→ ${ib_name} [${email}]...${NC} "
         local res; res=$(_3xui_add_client_to_inbound "$ib_id" "$email" "$uuid" "$sub_id" "$cookie")
         if echo "$res" | grep -q '"success":true'; then
@@ -837,8 +849,8 @@ _3xui_add_client_menu() {
         echo -e "\n  ${GREEN}✅ Готово! Добавлен в ${success} протокол(ов)${NC}"
         echo -e "  ${WHITE}Имена:${NC}"
         for idx in "${selected_idx[@]}"; do
-            local sfx="${XUI_SUFFIXES[$idx]:-($idx)}"
-            echo -e "    ${CYAN}${base_email}${sfx}${NC}"
+            local _ib_id="${available_ibs[$idx]%%|*}"
+            echo -e "    ${CYAN}${base_email}${XUI_SEP}${_ib_id}${NC}"
         done
         echo -e "\n  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
         command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
@@ -868,9 +880,10 @@ _3xui_add_inbound_to_client() {
     done <<< "$(echo "$emails_map" | tr ';' '\n')"
     # Fallback: базовый email и суффиксы
     if [ -z "$uuid" ]; then
-        local base_email="${email%(*}"
-        for sfx in "" "${XUI_SUFFIXES[@]}"; do
-            uuid=$(python3 /tmp/xui_getid.py "$jf" "$first_ib" "${base_email}${sfx}" 2>/dev/null)
+        local base_email; base_email=$(_3xui_base_email "$email")
+        # Перебираем возможные форматы: новый Name(-_•)N и старый с суффиксами
+        for _ib in $(echo "$current_inbounds" | tr ',' ' '); do
+            uuid=$(python3 /tmp/xui_getid.py "$jf" "$_ib" "${base_email}${XUI_SEP}${_ib}" 2>/dev/null)
             [ -n "$uuid" ] && break
         done
     fi
@@ -901,9 +914,8 @@ _3xui_add_inbound_to_client() {
     local i=1
     for ib in "${available[@]}"; do
         IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-        local idx=$(( i - 1 ))
-        local suffix="${XUI_SUFFIXES[$idx]:-($idx)}"
-        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}  → ${email%(*}${suffix}"
+        local base_em; base_em=$(_3xui_base_email "$email")
+        echo -e "  ${YELLOW}[$i]${NC}  ${ib_name}  ${CYAN}(${ib_proto}:${ib_port})${NC}  → ${base_em}${XUI_SEP}${ib_id}"
         (( i++ ))
     done
     echo -e "\n  ${GREEN}[a]${NC}  Все сразу"
@@ -921,15 +933,12 @@ _3xui_add_inbound_to_client() {
     fi
     [ ${#selected_idx[@]} -eq 0 ] && { read -p "  Enter..." < /dev/tty; return; }
 
-    local base_email="${email%(*}"
+    local base_email; base_email=$(_3xui_base_email "$email")
     echo ""
     for idx in "${selected_idx[@]}"; do
         local ib="${available[$idx]}"
         IFS='|' read -r ib_id ib_name ib_proto ib_port ib_status <<< "$ib"
-        # Считаем глобальный индекс для суффикса (по кол-ву уже занятых inbound'ов)
-        local _comma_cnt; _comma_cnt=$(echo "$current_inbounds" | tr -cd ',' | wc -c)
-        local global_idx=$(( idx + _comma_cnt + 1 ))
-        local new_email; new_email=$(_3xui_email_for_inbound "$base_email" "$global_idx")
+        local new_email; new_email=$(_3xui_email_for_inbound "$base_email" "$ib_id")
         echo -ne "  ${CYAN}→ ${ib_name} [${new_email}]...${NC} "
         local res; res=$(_3xui_add_client_to_inbound "$ib_id" "$new_email" "$uuid" "$sub_id" "$cookie")
         echo "$res" | grep -q '"success":true' && echo -e "${GREEN}✓${NC}" || echo -e "${RED}✗${NC}"
@@ -937,6 +946,7 @@ _3xui_add_inbound_to_client() {
     log_action "3XUI: ${email} добавлен в протоколы"
     read -p "  Enter..." < /dev/tty
 }
+
 
 _3xui_del_inbound_from_client() {
     local email="$1" current_inbounds="$2" emails_map="${3:-}" cookie="${4:-$3}"
@@ -974,11 +984,16 @@ _3xui_del_inbound_from_client() {
     [ -z "$exact_em" ] && exact_em="$email"
     local res; res=$(_3xui_del_client_from_inbound "$target" "$exact_em" "$cookie")
     if ! echo "$res" | grep -q '"success":true'; then
-        local base="${email%(*}"
-        for sfx in "${XUI_SUFFIXES[@]}"; do
-            res=$(_3xui_del_client_from_inbound "$target" "${base}${sfx}" "$cookie")
-            echo "$res" | grep -q '"success":true' && break
-        done
+        local base; base=$(_3xui_base_email "$email")
+        # Пробуем новый формат Name#N(-_•)
+        res=$(_3xui_del_client_from_inbound "$target" "${base}${XUI_SEP}${target}" "$cookie")
+        if ! echo "$res" | grep -q '"success":true'; then
+            # Старый формат с суффиксами
+            for sfx in '(-_•)' '(•_-)' '(•_•)' '(-_-)'; do
+                res=$(_3xui_del_client_from_inbound "$target" "${base}${sfx}" "$cookie")
+                echo "$res" | grep -q '"success":true' && break
+            done
+        fi
     fi
     echo "$res" | grep -q '"success":true' && \
         echo -e "  ${GREEN}✓ Удалён из ${ib_name:-id=$target}${NC}" || \
