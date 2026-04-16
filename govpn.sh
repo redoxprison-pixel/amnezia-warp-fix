@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.44"
+VERSION="5.45"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1184,6 +1184,7 @@ PYEOF
         echo -e "  ${YELLOW}[2]${NC}  Установить лимит ГБ"
         echo -e "  ${YELLOW}[3]${NC}  Установить срок действия"
         echo -e "  ${YELLOW}[8]${NC}  Переименовать клиента"
+        echo -e "  ${YELLOW}[9]${NC}  Причесать имена (привести к единому формату)"
         echo -e "  ${GREEN}[4]${NC}  Добавить протокол"
         echo -e "  ${RED}[5]${NC}  Удалить протокол"
         echo -e "  ${RED}[6]${NC}  Удалить клиента полностью"
@@ -1340,6 +1341,79 @@ PYEOF
                     return
                 else
                     echo -e "  ${RED}✗ Не удалось переименовать${NC}"
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
+            9)
+                # Причёсывание — приводим все email'ы подписки к формату BaseName(-_•)N
+                echo -e "\n  ${CYAN}━━━ Причесать имена клиента ━━━${NC}\n"
+                echo -e "  ${WHITE}SubId:${NC} ${CYAN}${sub_id}${NC}"
+                echo -e "  ${WHITE}Текущие имена:${NC}"
+                echo "$emails_map" | tr ';' '\n' | while IFS=: read -r _ib _em; do
+                    local _nm; _nm=$(_3xui_inbound_name "$_ib" "$cookie")
+                    echo -e "    id=${_ib} ${CYAN}${_nm}${NC}: ${YELLOW}${_em}${NC}"
+                done
+                echo ""
+                echo -ne "  ${WHITE}Базовое имя (Enter = '${email}'): ${NC}"
+                read -r comb_base < /dev/tty
+                [ -z "$comb_base" ] && comb_base="$email"
+
+                echo -e "\n  ${WHITE}Будет:${NC}"
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                for _ib_id in "${ib_arr[@]}"; do
+                    local _nm; _nm=$(_3xui_inbound_name "$_ib_id" "$cookie")
+                    echo -e "    ${CYAN}${comb_base}${XUI_SEP}${_ib_id}${NC}  ← ${_nm}"
+                done
+                echo ""
+                echo -ne "  ${GREEN}Применить? (y/n): ${NC}"
+                read -r c < /dev/tty
+                [ "$c" != "y" ] && continue
+
+                local comb_ok=0
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                for _ib_id in "${ib_arr[@]}"; do
+                    local old_em new_em
+                    old_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${_ib_id}:" | cut -d: -f2-)
+                    [ -z "$old_em" ] && continue
+                    new_em="${comb_base}${XUI_SEP}${_ib_id}"
+                    [ "$old_em" = "$new_em" ] && (( comb_ok++ )) && continue
+                    local comb_res
+                    comb_res=$(python3 - "$_ib_id" "$old_em" "$new_em" << 'PYEOF'
+import json, sys, subprocess
+ib_id, old_email, new_email = sys.argv[1], sys.argv[2], sys.argv[3]
+DB = "/etc/x-ui/x-ui.db"
+try:
+    r = subprocess.run(["sqlite3", DB,
+        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
+        capture_output=True, text=True, timeout=3)
+    s = json.loads(r.stdout.strip())
+    for c in s.get("clients", []):
+        if c.get("email") == old_email:
+            c["email"] = new_email
+            break
+    ns = json.dumps(s).replace("'", "''")
+    r2 = subprocess.run(["sqlite3", DB,
+        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
+        capture_output=True, text=True, timeout=3)
+    subprocess.run(["sqlite3", DB,
+        "UPDATE client_traffics SET email='{}' WHERE email='{}';".format(new_email, old_email)],
+        capture_output=True, text=True, timeout=3)
+    print("ok" if r2.returncode == 0 else "err")
+except Exception as e:
+    print("err:" + str(e))
+PYEOF
+                    )
+                    [ "$comb_res" = "ok" ] && (( comb_ok++ )) || \
+                        echo -e "  ${RED}✗ id=${_ib_id}: ошибка${NC}"
+                done
+
+                if [ "$comb_ok" -gt 0 ]; then
+                    _3xui_restart_xray "$cookie"
+                    echo -e "  ${GREEN}✓ Причёсано ${comb_ok} протокол(ов)${NC}"
+                    log_action "3XUI: причёсан ${email} → ${comb_base}"
+                    read -p "  Enter..." < /dev/tty
+                    return
+                else
+                    echo -e "  ${RED}✗ Не удалось применить${NC}"
                     read -p "  Enter..." < /dev/tty
                 fi ;;
         esac
