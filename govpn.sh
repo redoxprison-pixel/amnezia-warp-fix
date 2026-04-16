@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.41"
+VERSION="5.42"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2420,21 +2420,80 @@ awg_clients_menu() {
             n|N) sel_ips=() ;;
             s|S)
                 echo ""
-                echo -e "${YELLOW}[1/3]${NC} Сохраняем..."
+                # ── Бэкап перед изменениями ──────────────────
+                local bk_dir="/etc/govpn/backups"
+                mkdir -p "$bk_dir"
+                local bk_ts; bk_ts=$(date +%s)
+                local bk_clients="${bk_dir}/awg_clients.bak.${bk_ts}"
+                local bk_start="${bk_dir}/awg_start.bak.${bk_ts}"
+
+                # Сохраняем текущий список клиентов WARP
+                local _awg_cf; _awg_cf=$(_awg_conf)
+                local _awg_clients_file="${_awg_cf%/*}/warp_clients.txt"
+                docker exec "$AWG_CONTAINER" sh -c                     "cat '${_awg_clients_file}' 2>/dev/null || echo ''" > "$bk_clients" 2>/dev/null
+                # Сохраняем start.sh
+                docker exec "$AWG_CONTAINER" sh -c                     "cat /opt/amnezia/start.sh 2>/dev/null || echo ''" > "$bk_start" 2>/dev/null
+                echo -e "${YELLOW}[0/4]${NC} Бэкап → ${bk_clients##*/}  ${GREEN}✓${NC}"
+
+                echo -e "${YELLOW}[1/4]${NC} Сохраняем список клиентов..."
                 _awg_save_clients "${sel_ips[@]}"
                 echo -e "${GREEN}  ✓${NC}"
 
-                echo -e "${YELLOW}[2/3]${NC} Применяем правила..."
+                echo -e "${YELLOW}[2/4]${NC} Применяем правила маршрутизации..."
                 _awg_apply_rules "${sel_ips[@]}"
                 echo -e "${GREEN}  ✓${NC}"
 
-                echo -e "${YELLOW}[3/3]${NC} Патчим start.sh..."
+                echo -e "${YELLOW}[3/4]${NC} Патчим start.sh..."
                 _awg_patch_start_sh "${sel_ips[@]}"
                 echo -e "${GREEN}  ✓${NC}"
 
-                log_action "AWG CLIENTS: ${#sel_ips[@]} через WARP"
-                echo -e "\n${GREEN}Применено. Изменения активны.${NC}"
-                echo -e "${WHITE}Перезапуск контейнера не нужен — правила применились сразу.${NC}"
+                # ── Верификация ───────────────────────────────
+                echo -e "${YELLOW}[4/4]${NC} Проверка туннеля..."
+                local verify_ok=1
+                if _awg_warp_running; then
+                    # Проверяем что WARP IP отвечает
+                    local warp_test
+                    warp_test=$(docker exec "$AWG_CONTAINER" sh -c                         "curl -s4 --max-time 5 --interface warp https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -c 'warp=on'"                         2>/dev/null || echo 0)
+                    if [ "${warp_test:-0}" -gt 0 ]; then
+                        local wip; wip=$(_awg_warp_ip)
+                        echo -e "${GREEN}  ✓ WARP активен (${wip})${NC}"
+                    else
+                        # WARP запущен но trace не прошёл — не критично
+                        echo -e "${YELLOW}  ⚠ WARP запущен, trace недоступен — правила применены${NC}"
+                    fi
+                else
+                    echo -e "${YELLOW}  ⚠ WARP не запущен — правила сохранены, активируются при запуске WARP${NC}"
+                fi
+
+                # Проверяем что selected клиенты имеют ip rule
+                if [ "${#sel_ips[@]}" -gt 0 ] && _awg_warp_running; then
+                    local missing=0
+                    for chk_ip in "${sel_ips[@]}"; do
+                        local bare="${chk_ip%/32}"
+                        local has_rule
+                        has_rule=$(docker exec "$AWG_CONTAINER" sh -c                             "ip rule list | grep -c 'from ${bare}'" 2>/dev/null || echo 0)
+                        [ "${has_rule:-0}" -eq 0 ] && (( missing++ ))
+                    done
+                    if [ "$missing" -gt 0 ]; then
+                        echo -e "${RED}  ✗ ${missing} клиент(ов) без маршрута! Откат...${NC}"
+                        # Откат
+                        local old_clients
+                        old_clients=$(cat "$bk_clients" 2>/dev/null)
+                        if [ -n "$old_clients" ]; then
+                            local -a old_ips=()
+                            while IFS= read -r _ip; do [ -n "$_ip" ] && old_ips+=("$_ip"); done <<< "$old_clients"
+                            _awg_save_clients "${old_ips[@]}"
+                            _awg_apply_rules "${old_ips[@]}"
+                            echo -e "${YELLOW}  Откат выполнен. Бэкап: ${bk_clients##*/}${NC}"
+                        fi
+                        read -p "  Enter..." < /dev/tty
+                        continue
+                    fi
+                fi
+
+                log_action "AWG CLIENTS: ${#sel_ips[@]} через WARP (бэкап: ${bk_ts})"
+                echo -e "\n${GREEN}✅ Применено. Изменения активны.${NC}"
+                echo -e "${WHITE}Бэкап сохранён: ${bk_clients##*/}${NC}"
                 read -p "Нажмите Enter..." ;;
         esac
         fi
@@ -5460,16 +5519,52 @@ _awg_show_client_menu() {
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Показать конфиг (текст)"
         echo -e "  ${YELLOW}[2]${NC}  Показать QR код"
+        echo -e "  ${YELLOW}[3]${NC}  Переименовать"
+        echo -e "  ${RED}[4]${NC}  Удалить клиента"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _awg_show_config "$client_ip" ;;
             2) _awg_show_qr "$client_ip" ;;
+            3)
+                echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_name < /dev/tty
+                [ -z "$new_name" ] && continue
+                local tmp_ct="/tmp/awg_ct_rename.json"
+                docker cp "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" "$tmp_ct" 2>/dev/null
+                if [ -f "$tmp_ct" ]; then
+                    local bare_ip="${client_ip%/32}"
+                    python3 - "$tmp_ct" "$bare_ip" "$new_name" << 'PYEOF'
+import sys, json
+ct, bare, newname = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(ct) as f: data = json.load(f)
+    for c in data:
+        if c.get("userData",{}).get("allowedIps","").split("/")[0] == bare:
+            c["userData"]["clientName"] = newname; break
+    with open(ct,"w") as f: json.dump(data, f, indent=4)
+    print("ok")
+except Exception as e: print("err:"+str(e))
+PYEOF
+                    docker cp "$tmp_ct" "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" 2>/dev/null
+                    rm -f "$tmp_ct"
+                    name="$new_name"; label="$new_name"
+                    echo -e "  ${GREEN}✓ Переименован в '${new_name}'${NC}"
+                    log_action "AWG PEER RENAME: ${client_ip} -> ${new_name}"
+                fi
+                read -p "  Enter..." < /dev/tty ;;
+            4)
+                echo -ne "  ${RED}Удалить ${label}? (y/n): ${NC}"
+                read -r c < /dev/tty
+                if [ "$c" = "y" ]; then
+                    _awg_del_peer "$client_ip"
+                    return
+                fi ;;
             0|"") return ;;
         esac
     done
 }
+
 
 _awg_get_client_config() {
     local client_ip="$1"
@@ -5801,6 +5896,25 @@ print(j.dumps(data,indent=4))
     fi
 
     echo -e "\n${WHITE}Конфиг сохранён: ${CYAN}${CONF_DIR}/awg_clients/${bare}.conf${NC}"
+
+    # Верификация — пир должен появиться в wg show
+    sleep 1
+    local verify_ok
+    verify_ok=$(docker exec "$AWG_CONTAINER" sh -c         "wg show $(_awg_iface) allowed-ips 2>/dev/null | grep '${bare}/32'" 2>/dev/null)
+    if [ -n "$verify_ok" ]; then
+        echo -e "  ${GREEN}✓ Верификация: пир активен в wg${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ Пир не виден в wg show — перезапуск контейнера...${NC}"
+        docker restart "$AWG_CONTAINER" > /dev/null 2>&1
+        sleep 3
+        verify_ok=$(docker exec "$AWG_CONTAINER" sh -c             "wg show $(_awg_iface) allowed-ips 2>/dev/null | grep '${bare}/32'" 2>/dev/null)
+        if [ -n "$verify_ok" ]; then
+            echo -e "  ${GREEN}✓ Пир активен после перезапуска${NC}"
+        else
+            echo -e "  ${RED}✗ Пир не появился — проверьте вручную: wg show${NC}"
+            echo -e "  ${WHITE}Конфиг клиента сохранён, можно попробовать снова.${NC}"
+        fi
+    fi
     echo ""
     read -p "Нажмите Enter..."
 }
@@ -5958,6 +6072,15 @@ PYEOF
 
     # Удалить сохранённый конфиг
     rm -f "${CONF_DIR}/awg_clients/${bare}.conf"
+
+    # Верификация — пир должен исчезнуть из wg show
+    sleep 1
+    local verify_gone
+    verify_gone=$(docker exec "$AWG_CONTAINER" sh -c         "wg show $(_awg_iface) allowed-ips 2>/dev/null | grep '${bare}/32'" 2>/dev/null)
+    if [ -n "$verify_gone" ]; then
+        echo -e "  ${RED}⚠ Пир всё ещё виден в wg show — пробуем принудительно${NC}"
+        [ -n "$del_pubkey" ] &&             docker exec "$AWG_CONTAINER" sh -c                 "wg set $(_awg_iface) peer '${del_pubkey}' remove" 2>/dev/null
+    fi
 
     echo -e "${GREEN}  ✓ Удалён: ${del_name:-$del_ip}${NC}"
     log_action "AWG PEER DEL: ${del_name} ${del_ip}"
