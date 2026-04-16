@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.46"
+VERSION="5.47"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1190,7 +1190,19 @@ PYEOF
         echo -e "  ${GREEN}[5]${NC}  Добавить протокол"
         echo -e "  ${RED}[6]${NC}  Удалить протокол"
         echo -e "  ${WHITE}── Имя клиента ───────────────────────${NC}"
-        echo -e "  ${YELLOW}[7]${NC}  Переименовать / причесать"
+        echo -e "  ${YELLOW}[7]${NC}  Переименовать стек"
+        echo -e "  ${WHITE}── Статус ────────────────────────────${NC}"
+        if [ "$enable" = "on" ]; then
+            echo -e "  ${YELLOW}[e]${NC}  ${RED}Отключить клиента${NC} (все протоколы)"
+        else
+            echo -e "  ${YELLOW}[e]${NC}  ${GREEN}Включить клиента${NC} (все протоколы)"
+        fi
+        echo -e "  ${WHITE}── Статус ────────────────────────────${NC}"
+        if [ "$enable" = "on" ]; then
+            echo -e "  ${RED}[e]${NC}  Отключить клиента (весь стек)"
+        else
+            echo -e "  ${GREEN}[e]${NC}  Включить клиента (весь стек)"
+        fi
         echo -e "  ${WHITE}── Опасная зона ──────────────────────${NC}"
         echo -e "  ${RED}[8]${NC}  Удалить клиента полностью"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
@@ -1346,6 +1358,50 @@ PYEOF
                     echo -e "  ${RED}✗ Не удалось применить${NC}"
                     read -p "  Enter..." < /dev/tty
                 fi ;;
+            [eE])
+                # Вкл/выкл всего стека подписки
+                local new_enable
+                [ "$enable" = "on" ] && new_enable="false" || new_enable="true"
+                local tog_ok=0
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                for ib_id in "${ib_arr[@]}"; do
+                    local ex_em
+                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                    [ -z "$ex_em" ] && continue
+                    local tog_res
+                    tog_res=$(python3 - "$ib_id" "$ex_em" "$new_enable" << 'PYEOF'
+import json, sys, subprocess
+ib_id, email, new_en = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+DB = "/etc/x-ui/x-ui.db"
+try:
+    r = subprocess.run(["sqlite3", DB,
+        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
+        capture_output=True, text=True, timeout=3)
+    s = json.loads(r.stdout.strip())
+    for c in s.get("clients", []):
+        if c.get("email") == email:
+            c["enable"] = new_en; break
+    ns = json.dumps(s).replace("'", "''")
+    r2 = subprocess.run(["sqlite3", DB,
+        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
+        capture_output=True, text=True, timeout=3)
+    print("ok" if r2.returncode == 0 else "err")
+except Exception as e:
+    print("err:" + str(e))
+PYEOF
+                    )
+                    [ "$tog_res" = "ok" ] && (( tog_ok++ ))
+                done
+                if [ "$tog_ok" -gt 0 ]; then
+                    _3xui_restart_xray "$cookie"
+                    [ "$new_enable" = "true" ] && enable="on" || enable="off"
+                    local st_msg
+                    [ "$enable" = "on" ] && \
+                        echo -e "  ${GREEN}✓ Включён${NC}: ${email} (${tog_ok} протокол(ов))" || \
+                        echo -e "  ${RED}✓ Отключён${NC}: ${email} (${tog_ok} протокол(ов))"
+                    log_action "3XUI: ${email} enable=${new_enable}"
+                fi
+                read -p "  Enter..." < /dev/tty ;;
             8)
                 echo -ne "\n  ${RED}Удалить ${email} из всех протоколов? (y/n): ${NC}"
                 read -r c < /dev/tty
@@ -1364,6 +1420,111 @@ PYEOF
                 read -p "  Enter..." < /dev/tty
                 return ;;
         esac
+    done
+}
+
+# ─── Отключённые клиенты ────────────────────────────────────
+
+_3xui_disabled_clients_menu() {
+    local filter_ib="$1" ib_label="$2" cookie="$3" srv_label="$4" srv_ip="$5"
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Отключённые клиенты: ${ib_label} ━━━${NC}"
+        echo -e "  ${WHITE}Сервер:${NC} ${GREEN}${srv_label} (${srv_ip})${NC}\n"
+
+        # Загружаем всех клиентов и фильтруем выключенных
+        local -a disabled=()
+        local _cf; _cf=$(mktemp)
+        _3xui_parse_clients "$cookie" > "$_cf" 2>/dev/null
+
+        while IFS= read -r line; do
+            [ -n "$line" ] && ! [[ "$line" == ERR:* ]] || continue
+            IFS='|' read -r _e _s inbounds en _rest <<< "$line"
+            [ "$en" = "on" ] && continue  # пропускаем включённых
+            if [ -n "$filter_ib" ]; then
+                [[ ",$inbounds," == *",$filter_ib,"* ]] || continue
+            fi
+            disabled+=("$line")
+        done < "$_cf"
+        rm -f "$_cf"
+
+        if [ ${#disabled[@]} -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Отключённых клиентов нет${NC}\n"
+            read -p "  Enter..." < /dev/tty; return
+        fi
+
+        printf "  \033[97m%-4s  %-22s  %-18s  %s\033[0m\n" "№" "Email" "SubId" "Трафик↑/↓"
+        echo -e "  ${CYAN}$(printf '─%.0s' {1..56})${NC}"
+        local i=1
+        for c in "${disabled[@]}"; do
+            IFS='|' read -r em sb inbs en up dn emap <<< "$c"
+            local ce cs uf df
+            ce=$(printf '%s' "$em" | tr -cd '[:print:]' | cut -c1-21)
+            cs=$(printf '%s' "$sb" | cut -c1-18)
+            uf=$(_fmt_bytes "$up"); df=$(_fmt_bytes "$dn")
+            printf "  ${RED}[%-2d]${NC}  %-22s  %-18s  %s/%s\n" \
+                "$i" "$ce" "$cs" "$uf" "$df"
+            (( i++ ))
+        done
+        echo ""
+        echo -e "  ${WHITE}Выберите номер для включения клиента${NC}"
+        echo -e "  ${GREEN}[a]${NC}  Включить всех"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        [ "$ch" = "0" ] || [ -z "$ch" ] && return
+
+        local targets=()
+        if [[ "$ch" == [aAаА] ]]; then
+            targets=("${disabled[@]}")
+        elif [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#disabled[@]} )); then
+            targets=("${disabled[$((ch-1))]}")
+        else
+            continue
+        fi
+
+        local enabled_cnt=0
+        for c in "${targets[@]}"; do
+            IFS='|' read -r em sb inbs en up dn emap <<< "$c"
+            IFS=',' read -ra ib_arr <<< "$inbs"
+            local c_ok=0
+            for ib_id in "${ib_arr[@]}"; do
+                local ex_em
+                ex_em=$(echo "$emap" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                [ -z "$ex_em" ] && continue
+                local res
+                res=$(python3 - "$ib_id" "$ex_em" << 'PYEOF'
+import json, sys, subprocess
+ib_id, email = sys.argv[1], sys.argv[2]
+DB = "/etc/x-ui/x-ui.db"
+try:
+    r = subprocess.run(["sqlite3", DB,
+        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
+        capture_output=True, text=True, timeout=3)
+    s = json.loads(r.stdout.strip())
+    for c in s.get("clients", []):
+        if c.get("email") == email:
+            c["enable"] = True; break
+    ns = json.dumps(s).replace("'", "''")
+    r2 = subprocess.run(["sqlite3", DB,
+        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
+        capture_output=True, text=True, timeout=3)
+    print("ok" if r2.returncode == 0 else "err")
+except Exception as e:
+    print("err:" + str(e))
+PYEOF
+                )
+                [ "$res" = "ok" ] && (( c_ok++ ))
+            done
+            [ "$c_ok" -gt 0 ] && (( enabled_cnt++ )) && \
+                echo -e "  ${GREEN}✓ Включён:${NC} ${em}"
+        done
+
+        [ "$enabled_cnt" -gt 0 ] && _3xui_restart_xray "$cookie"
+        echo -e "  ${GREEN}Включено клиентов: ${enabled_cnt}${NC}"
+        log_action "3XUI: включено ${enabled_cnt} клиентов"
+        read -p "  Enter..." < /dev/tty
     done
 }
 
@@ -1442,6 +1603,7 @@ _3xui_clients_list_menu() {
         fi
 
         echo -e "  ${GREEN}[a]${NC}  Добавить клиента"
+        echo -e "  ${YELLOW}[d]${NC}  Отключённые клиенты"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -1452,6 +1614,9 @@ _3xui_clients_list_menu() {
             cookie=$(_3xui_auth)
         elif [[ "$ch" == [aAаА] ]]; then
             _3xui_add_client_menu "$cookie"
+            cookie=$(_3xui_auth)
+        elif [[ "$ch" == [dDдД] ]]; then
+            _3xui_disabled_clients_menu "$filter_ib" "$ib_label" "$cookie" "$srv_label" "$srv_ip"
             cookie=$(_3xui_auth)
         fi
     done
@@ -1575,6 +1740,7 @@ for ib in d.get('obj',[]):
 
         echo ""
         echo -e "  ${GREEN}[a]${NC}  Все клиенты (из всех протоколов)"
+        echo -e "  ${YELLOW}[d]${NC}  Отключённые клиенты (все протоколы)"
         echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
         echo -e "  ${YELLOW}[p]${NC}  Сменить пароль"
         [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ] && \
@@ -1591,6 +1757,9 @@ for ib in d.get('obj',[]):
             [pP]) _3xui_save_password; cookie=$(_3xui_auth) ;;
             [aAаА])
                 _3xui_clients_list_menu "" "Все протоколы" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
+                cookie=$(_3xui_auth) ;;
+            [dDдД])
+                _3xui_disabled_clients_menu "" "Все протоколы" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
                 cookie=$(_3xui_auth) ;;
             *)
                 if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#ibs[@]} )); then
