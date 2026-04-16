@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.45"
+VERSION="5.46"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1180,15 +1180,19 @@ PYEOF
         local sub_link; sub_link=$(_3xui_sub_link "$sub_id")
         echo -e "\n  ${WHITE}Подписка:${NC}\n  ${CYAN}${sub_link}${NC}\n"
 
+        echo -e "  ${WHITE}── Подписка ──────────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${YELLOW}[2]${NC}  Установить лимит ГБ"
-        echo -e "  ${YELLOW}[3]${NC}  Установить срок действия"
-        echo -e "  ${YELLOW}[8]${NC}  Переименовать клиента"
-        echo -e "  ${YELLOW}[9]${NC}  Причесать имена (привести к единому формату)"
-        echo -e "  ${GREEN}[4]${NC}  Добавить протокол"
-        echo -e "  ${RED}[5]${NC}  Удалить протокол"
-        echo -e "  ${RED}[6]${NC}  Удалить клиента полностью"
-        echo -e "  ${YELLOW}[7]${NC}  Сбросить трафик"
+        echo -e "  ${WHITE}── Ограничения ───────────────────────${NC}"
+        echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ          ${CYAN}(${lim_gb})${NC}"
+        echo -e "  ${YELLOW}[3]${NC}  Срок действия     ${CYAN}(${lim_exp})${NC}"
+        echo -e "  ${YELLOW}[4]${NC}  Сбросить трафик"
+        echo -e "  ${WHITE}── Протоколы ─────────────────────────${NC}"
+        echo -e "  ${GREEN}[5]${NC}  Добавить протокол"
+        echo -e "  ${RED}[6]${NC}  Удалить протокол"
+        echo -e "  ${WHITE}── Имя клиента ───────────────────────${NC}"
+        echo -e "  ${YELLOW}[7]${NC}  Переименовать / причесать"
+        echo -e "  ${WHITE}── Опасная зона ──────────────────────${NC}"
+        echo -e "  ${RED}[8]${NC}  Удалить клиента полностью"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -1200,8 +1204,7 @@ PYEOF
                 echo ""; qrencode -t ANSIUTF8 "$sub_link"
                 read -p "  Enter..." < /dev/tty ;;
             2)
-                echo -e "\n  ${WHITE}Лимит трафика:${NC}"
-                echo -e "  Текущий: ${CYAN}${lim_gb}${NC}"
+                echo -e "\n  ${WHITE}Лимит трафика:${NC}  Текущий: ${CYAN}${lim_gb}${NC}"
                 echo -e "  Введите новый лимит в ГБ (0 = без лимита):"
                 echo -ne "  → "; read -r new_gb < /dev/tty
                 [[ "$new_gb" =~ ^[0-9]+(\.?[0-9]*)$ ]] || { echo -e "  ${RED}✗ Неверный формат${NC}"; read -p "  Enter..." < /dev/tty; continue; }
@@ -1209,11 +1212,9 @@ PYEOF
                 new_gb_bytes=$(python3 -c "print(int(float('$new_gb') * 1073741824))" 2>/dev/null)
                 _3xui_update_client_field "$inbounds" "$emails_map" "totalGB" "$new_gb_bytes" "$cookie"
                 limits_str=$(_get_client_limits)
-                IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
-                ;;
+                IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str" ;;
             3)
-                echo -e "\n  ${WHITE}Срок действия:${NC}"
-                echo -e "  Текущий: ${CYAN}${lim_exp}${NC}"
+                echo -e "\n  ${WHITE}Срок действия:${NC}  Текущий: ${CYAN}${lim_exp}${NC}"
                 echo -e "  ${YELLOW}[1]${NC}  30 дней   ${YELLOW}[2]${NC}  90 дней"
                 echo -e "  ${YELLOW}[3]${NC}  180 дней  ${YELLOW}[4]${NC}  1 год"
                 echo -e "  ${YELLOW}[5]${NC}  Без ограничений"
@@ -1234,21 +1235,118 @@ try:
     dt=datetime.strptime('$dstr','%d.%m.%Y')
     print(int(dt.timestamp()*1000))
 except: print(0)
-" 2>/dev/null)
-                        ;;
+" 2>/dev/null);;
                     *) continue;;
                 esac
                 _3xui_update_client_field "$inbounds" "$emails_map" "expiryTime" "$new_expiry" "$cookie"
                 limits_str=$(_get_client_limits)
-                IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str"
-                ;;
+                IFS='|' read -r lim_gb lim_exp lim_ip raw_gb raw_exp <<< "$limits_str" ;;
             4)
+                # Сброс трафика через SQLite
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                local ok=0
+                for ib_id in "${ib_arr[@]}"; do
+                    local ex_em
+                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
+                    [ -z "$ex_em" ] && continue
+                    sqlite3 /etc/x-ui/x-ui.db \
+                        "UPDATE client_traffics SET up=0, down=0 WHERE email='${ex_em}';" 2>/dev/null && (( ok++ ))
+                done
+                _3xui_restart_xray "$cookie"
+                echo -e "  ${GREEN}✓ Трафик сброшен (${ok} записей)${NC}"
+                real_up=0; real_down=0
+                read -p "  Enter..." < /dev/tty ;;
+            5)
                 _3xui_add_inbound_to_client "$email" "$sub_id" "$inbounds" "$emails_map" "$cookie"
                 return ;;
-            5)
+            6)
                 _3xui_del_inbound_from_client "$email" "$inbounds" "$emails_map" "$cookie"
                 return ;;
-            6)
+            7)
+                # Переименование / причёсывание
+                echo -e "\n  ${CYAN}━━━ Переименовать клиента ━━━${NC}\n"
+                echo -e "  ${WHITE}Текущие имена по протоколам:${NC}"
+                echo "$emails_map" | tr ';' '\n' | while IFS=: read -r _ib _em; do
+                    [ -z "$_ib" ] && continue
+                    local _nm; _nm=$(_3xui_inbound_name "$_ib" "$cookie")
+                    echo -e "    ${CYAN}${_nm:-id=$_ib}${NC}: ${YELLOW}${_em}${NC}"
+                done
+                echo ""
+                echo -e "  ${WHITE}Новое базовое имя${NC} (Enter = '${email}'):"
+                echo -ne "  → "; read -r new_base < /dev/tty
+                [ -z "$new_base" ] && new_base="$email"
+
+                # Проверяем что имя свободно (только если изменилось)
+                if [ "$new_base" != "$email" ]; then
+                    local _cf2; _cf2=$(mktemp)
+                    _3xui_parse_clients "$cookie" > "$_cf2" 2>/dev/null
+                    local _exists; _exists=$(grep "^${new_base}|" "$_cf2" 2>/dev/null)
+                    rm -f "$_cf2"
+                    if [ -n "$_exists" ]; then
+                        echo -e "  ${RED}✗ Имя '${new_base}' уже занято${NC}"
+                        read -p "  Enter..." < /dev/tty; continue
+                    fi
+                fi
+
+                echo -e "\n  ${WHITE}Результат:${NC}"
+                IFS=',' read -ra ib_arr <<< "$inbounds"
+                for _ib_id in "${ib_arr[@]}"; do
+                    local _nm; _nm=$(_3xui_inbound_name "$_ib_id" "$cookie")
+                    echo -e "    ${GREEN}${new_base}${XUI_SEP}${_ib_id}${NC}  ← ${_nm}"
+                done
+                echo ""
+                echo -ne "  ${WHITE}Применить? (y/n): ${NC}"
+                read -r c < /dev/tty
+                [ "$c" != "y" ] && continue
+
+                local ren_ok=0
+                for _ib_id in "${ib_arr[@]}"; do
+                    local old_em new_em
+                    old_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${_ib_id}:" | cut -d: -f2-)
+                    [ -z "$old_em" ] && continue
+                    new_em="${new_base}${XUI_SEP}${_ib_id}"
+                    [ "$old_em" = "$new_em" ] && (( ren_ok++ )) && continue
+                    local ren_res
+                    ren_res=$(python3 - "$_ib_id" "$old_em" "$new_em" << 'PYEOF'
+import json, sys, subprocess
+ib_id, old_email, new_email = sys.argv[1], sys.argv[2], sys.argv[3]
+DB = "/etc/x-ui/x-ui.db"
+try:
+    r = subprocess.run(["sqlite3", DB,
+        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
+        capture_output=True, text=True, timeout=3)
+    s = json.loads(r.stdout.strip())
+    for c in s.get("clients", []):
+        if c.get("email") == old_email:
+            c["email"] = new_email; break
+    ns = json.dumps(s).replace("'", "''")
+    r2 = subprocess.run(["sqlite3", DB,
+        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
+        capture_output=True, text=True, timeout=3)
+    subprocess.run(["sqlite3", DB,
+        "UPDATE client_traffics SET email='{}' WHERE email='{}';".format(
+            new_email, old_email)],
+        capture_output=True, text=True, timeout=3)
+    print("ok" if r2.returncode == 0 else "err")
+except Exception as e:
+    print("err:" + str(e))
+PYEOF
+                    )
+                    [ "$ren_res" = "ok" ] && (( ren_ok++ )) || \
+                        echo -e "  ${RED}✗ id=${_ib_id}: ошибка${NC}"
+                done
+
+                if [ "$ren_ok" -gt 0 ]; then
+                    _3xui_restart_xray "$cookie"
+                    echo -e "  ${GREEN}✓ Готово (${ren_ok} протокол(ов)): ${new_base}${XUI_SEP}N${NC}"
+                    log_action "3XUI: переименован ${email} → ${new_base}"
+                    read -p "  Enter..." < /dev/tty
+                    return
+                else
+                    echo -e "  ${RED}✗ Не удалось применить${NC}"
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
+            8)
                 echo -ne "\n  ${RED}Удалить ${email} из всех протоколов? (y/n): ${NC}"
                 read -r c < /dev/tty
                 [[ "$c" != "y" ]] && continue
@@ -1265,157 +1363,6 @@ except: print(0)
                 log_action "3XUI: удалён ${email}"
                 read -p "  Enter..." < /dev/tty
                 return ;;
-            7)
-                # Сбрасываем трафик через SQLite
-                IFS=',' read -ra ib_arr <<< "$inbounds"
-                local ok=0
-                for ib_id in "${ib_arr[@]}"; do
-                    local ex_em
-                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
-                    [ -z "$ex_em" ] && continue
-                    sqlite3 /etc/x-ui/x-ui.db \
-                        "UPDATE client_traffics SET up=0, down=0 WHERE email='${ex_em}';" 2>/dev/null && (( ok++ ))
-                done
-                _3xui_restart_xray "$cookie"
-                echo -e "  ${GREEN}✓ Трафик сброшен (${ok} записей)${NC}"
-                real_up=0; real_down=0
-                read -p "  Enter..." < /dev/tty ;;
-            8)
-                # Переименование клиента
-                echo -e "\n  ${WHITE}Текущее имя:${NC} ${CYAN}${email}${NC}"
-                echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_base < /dev/tty
-                [ -z "$new_base" ] && continue
-                # Проверяем что имя свободно
-                local _cf2; _cf2=$(mktemp)
-                _3xui_parse_clients "$cookie" > "$_cf2" 2>/dev/null
-                local _exists; _exists=$(grep "^${new_base}|" "$_cf2" 2>/dev/null)
-                rm -f "$_cf2"
-                if [ -n "$_exists" ]; then
-                    echo -e "  ${RED}✗ Имя '${new_base}' уже занято${NC}"
-                    read -p "  Enter..." < /dev/tty; continue
-                fi
-                # Переименовываем в каждом inbound через SQLite
-                IFS=',' read -ra ib_arr <<< "$inbounds"
-                local ren_ok=0
-                for ib_id in "${ib_arr[@]}"; do
-                    local ex_em new_em
-                    ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
-                    [ -z "$ex_em" ] && continue
-                    # Суффикс = всё что после base email
-                    local old_base="${email}"
-                    local sfx="${ex_em#$old_base}"
-                    new_em="${new_base}${sfx}"
-                    local ren_result
-                    ren_result=$(python3 - "$ib_id" "$ex_em" "$new_em" << 'PYEOF'
-import json, sys, subprocess
-ib_id, old_email, new_email = sys.argv[1], sys.argv[2], sys.argv[3]
-DB = "/etc/x-ui/x-ui.db"
-try:
-    r = subprocess.run(["sqlite3", DB,
-        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
-        capture_output=True, text=True, timeout=3)
-    s = json.loads(r.stdout.strip())
-    for c in s.get("clients", []):
-        if c.get("email") == old_email:
-            c["email"] = new_email
-            break
-    ns = json.dumps(s).replace("'", "''")
-    r2 = subprocess.run(["sqlite3", DB,
-        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
-        capture_output=True, text=True, timeout=3)
-    subprocess.run(["sqlite3", DB,
-        "UPDATE client_traffics SET email='{}' WHERE email='{}';".format(new_email, old_email)],
-        capture_output=True, text=True, timeout=3)
-    print("ok" if r2.returncode == 0 else "err")
-except Exception as e:
-    print("err:" + str(e))
-PYEOF
-                    )
-                    [ "$ren_result" = "ok" ] && (( ren_ok++ ))
-                done
-                if [ "$ren_ok" -gt 0 ]; then
-                    _3xui_restart_xray "$cookie"
-                    echo -e "  ${GREEN}✓ Переименован: ${email} → ${new_base} (${ren_ok} протокол(ов))${NC}"
-                    log_action "3XUI: переименован ${email} → ${new_base}"
-                    read -p "  Enter..." < /dev/tty
-                    return
-                else
-                    echo -e "  ${RED}✗ Не удалось переименовать${NC}"
-                    read -p "  Enter..." < /dev/tty
-                fi ;;
-            9)
-                # Причёсывание — приводим все email'ы подписки к формату BaseName(-_•)N
-                echo -e "\n  ${CYAN}━━━ Причесать имена клиента ━━━${NC}\n"
-                echo -e "  ${WHITE}SubId:${NC} ${CYAN}${sub_id}${NC}"
-                echo -e "  ${WHITE}Текущие имена:${NC}"
-                echo "$emails_map" | tr ';' '\n' | while IFS=: read -r _ib _em; do
-                    local _nm; _nm=$(_3xui_inbound_name "$_ib" "$cookie")
-                    echo -e "    id=${_ib} ${CYAN}${_nm}${NC}: ${YELLOW}${_em}${NC}"
-                done
-                echo ""
-                echo -ne "  ${WHITE}Базовое имя (Enter = '${email}'): ${NC}"
-                read -r comb_base < /dev/tty
-                [ -z "$comb_base" ] && comb_base="$email"
-
-                echo -e "\n  ${WHITE}Будет:${NC}"
-                IFS=',' read -ra ib_arr <<< "$inbounds"
-                for _ib_id in "${ib_arr[@]}"; do
-                    local _nm; _nm=$(_3xui_inbound_name "$_ib_id" "$cookie")
-                    echo -e "    ${CYAN}${comb_base}${XUI_SEP}${_ib_id}${NC}  ← ${_nm}"
-                done
-                echo ""
-                echo -ne "  ${GREEN}Применить? (y/n): ${NC}"
-                read -r c < /dev/tty
-                [ "$c" != "y" ] && continue
-
-                local comb_ok=0
-                IFS=',' read -ra ib_arr <<< "$inbounds"
-                for _ib_id in "${ib_arr[@]}"; do
-                    local old_em new_em
-                    old_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${_ib_id}:" | cut -d: -f2-)
-                    [ -z "$old_em" ] && continue
-                    new_em="${comb_base}${XUI_SEP}${_ib_id}"
-                    [ "$old_em" = "$new_em" ] && (( comb_ok++ )) && continue
-                    local comb_res
-                    comb_res=$(python3 - "$_ib_id" "$old_em" "$new_em" << 'PYEOF'
-import json, sys, subprocess
-ib_id, old_email, new_email = sys.argv[1], sys.argv[2], sys.argv[3]
-DB = "/etc/x-ui/x-ui.db"
-try:
-    r = subprocess.run(["sqlite3", DB,
-        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
-        capture_output=True, text=True, timeout=3)
-    s = json.loads(r.stdout.strip())
-    for c in s.get("clients", []):
-        if c.get("email") == old_email:
-            c["email"] = new_email
-            break
-    ns = json.dumps(s).replace("'", "''")
-    r2 = subprocess.run(["sqlite3", DB,
-        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
-        capture_output=True, text=True, timeout=3)
-    subprocess.run(["sqlite3", DB,
-        "UPDATE client_traffics SET email='{}' WHERE email='{}';".format(new_email, old_email)],
-        capture_output=True, text=True, timeout=3)
-    print("ok" if r2.returncode == 0 else "err")
-except Exception as e:
-    print("err:" + str(e))
-PYEOF
-                    )
-                    [ "$comb_res" = "ok" ] && (( comb_ok++ )) || \
-                        echo -e "  ${RED}✗ id=${_ib_id}: ошибка${NC}"
-                done
-
-                if [ "$comb_ok" -gt 0 ]; then
-                    _3xui_restart_xray "$cookie"
-                    echo -e "  ${GREEN}✓ Причёсано ${comb_ok} протокол(ов)${NC}"
-                    log_action "3XUI: причёсан ${email} → ${comb_base}"
-                    read -p "  Enter..." < /dev/tty
-                    return
-                else
-                    echo -e "  ${RED}✗ Не удалось применить${NC}"
-                    read -p "  Enter..." < /dev/tty
-                fi ;;
         esac
     done
 }
