@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.47"
+VERSION="5.48"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -678,9 +678,12 @@ except Exception as e:
 PYEOF
     )
     # После изменения БД перезапускаем xray
-    echo "$result" | grep -q '"success":true' && \
-        _3xui_restart_xray "$cookie" &
     echo "$result"
+    # Перезапуск xray в фоне с сообщением
+    if echo "$result" | grep -q '"success":true'; then
+        echo -e "  ${CYAN}↻ Применяю изменения...${NC}" >&2
+        _3xui_restart_xray "$cookie"
+    fi
 }
 
 # ── Обновляет поле клиента через SQLite
@@ -1182,29 +1185,17 @@ PYEOF
 
         echo -e "  ${WHITE}── Подписка ──────────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${WHITE}── Ограничения ───────────────────────${NC}"
-        echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ          ${CYAN}(${lim_gb})${NC}"
-        echo -e "  ${YELLOW}[3]${NC}  Срок действия     ${CYAN}(${lim_exp})${NC}"
-        echo -e "  ${YELLOW}[4]${NC}  Сбросить трафик"
-        echo -e "  ${WHITE}── Протоколы ─────────────────────────${NC}"
-        echo -e "  ${GREEN}[5]${NC}  Добавить протокол"
-        echo -e "  ${RED}[6]${NC}  Удалить протокол"
-        echo -e "  ${WHITE}── Имя клиента ───────────────────────${NC}"
+        echo -e "  ${WHITE}── Ограничения ──────────────────────${NC}"
+        echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ       ${CYAN}${lim_gb}${NC}   [3] Срок  ${CYAN}${lim_exp}${NC}   [4] Сброс трафика"
+        echo -e "  ${WHITE}── Протоколы / имя ──────────────────${NC}"
+        echo -e "  ${GREEN}[5]${NC}  Добавить протокол    ${RED}[6]${NC}  Удалить протокол"
         echo -e "  ${YELLOW}[7]${NC}  Переименовать стек"
-        echo -e "  ${WHITE}── Статус ────────────────────────────${NC}"
+        echo -e "  ${WHITE}── Статус / удаление ────────────────${NC}"
         if [ "$enable" = "on" ]; then
-            echo -e "  ${YELLOW}[e]${NC}  ${RED}Отключить клиента${NC} (все протоколы)"
+            echo -e "  ${YELLOW}[e]${NC}  ${RED}Отключить стек${NC}       ${RED}[8]${NC}  Удалить полностью"
         else
-            echo -e "  ${YELLOW}[e]${NC}  ${GREEN}Включить клиента${NC} (все протоколы)"
+            echo -e "  ${YELLOW}[e]${NC}  ${GREEN}Включить стек${NC}        ${RED}[8]${NC}  Удалить полностью"
         fi
-        echo -e "  ${WHITE}── Статус ────────────────────────────${NC}"
-        if [ "$enable" = "on" ]; then
-            echo -e "  ${RED}[e]${NC}  Отключить клиента (весь стек)"
-        else
-            echo -e "  ${GREEN}[e]${NC}  Включить клиента (весь стек)"
-        fi
-        echo -e "  ${WHITE}── Опасная зона ──────────────────────${NC}"
-        echo -e "  ${RED}[8]${NC}  Удалить клиента полностью"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -1406,16 +1397,41 @@ PYEOF
                 echo -ne "\n  ${RED}Удалить ${email} из всех протоколов? (y/n): ${NC}"
                 read -r c < /dev/tty
                 [[ "$c" != "y" ]] && continue
+                echo -e "  ${YELLOW}Удаляю...${NC}"
                 IFS=',' read -ra ib_arr <<< "$inbounds"
-                local ok=0
+                local ok=0 fail=0
                 for ib_id in "${ib_arr[@]}"; do
+                    # Ищем точный email из emails_map
                     local ex_em
                     ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
-                    [ -z "$ex_em" ] && ex_em="$email"
+                    # Fallback: ищем по subId напрямую в SQLite
+                    if [ -z "$ex_em" ] && [ -n "$sub_id" ]; then
+                        ex_em=$(python3 -c "
+import json, subprocess
+r = subprocess.run(['sqlite3', '/etc/x-ui/x-ui.db',
+    'SELECT settings FROM inbounds WHERE id=${ib_id};'],
+    capture_output=True, text=True, timeout=3)
+try:
+    s = json.loads(r.stdout.strip())
+    for c in s.get('clients', []):
+        if c.get('subId') == '${sub_id}':
+            print(c.get('email', '')); break
+except: pass
+" 2>/dev/null)
+                    fi
+                    [ -z "$ex_em" ] && { (( fail++ )); continue; }
                     local res; res=$(_3xui_del_client_from_inbound "$ib_id" "$ex_em" "$cookie")
-                    echo "$res" | grep -q '"success":true' && (( ok++ ))
+                    if echo "$res" | grep -q '"success":true'; then
+                        (( ok++ ))
+                    else
+                        echo -e "  ${RED}✗ id=${ib_id}: не найден${NC}"
+                        (( fail++ ))
+                    fi
                 done
+                _3xui_restart_xray "$cookie"
                 echo -e "  ${GREEN}✓ Удалён из ${ok} протокол(ов)${NC}"
+                [ "$fail" -gt 0 ] && echo -e "  ${YELLOW}⚠ Не найден в ${fail} протокол(ах)${NC}"
+                echo -e "  ${CYAN}↻ Перезапуск xray...${NC}"
                 log_action "3XUI: удалён ${email}"
                 read -p "  Enter..." < /dev/tty
                 return ;;
@@ -1739,12 +1755,15 @@ for ib in d.get('obj',[]):
         rm -f "$_jf"
 
         echo ""
-        echo -e "  ${GREEN}[a]${NC}  Все клиенты (из всех протоколов)"
-        echo -e "  ${YELLOW}[d]${NC}  Отключённые клиенты (все протоколы)"
-        echo -e "  ${YELLOW}[i]${NC}  Управление протоколами (вкл/выкл)"
-        echo -e "  ${YELLOW}[p]${NC}  Сменить пароль"
-        [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ] && \
-            echo -e "  ${YELLOW}[s]${NC}  Сменить сервер"
+        echo -e "  ${WHITE}── Клиенты ──────────────────────────${NC}"
+        echo -e "  ${GREEN}[a]${NC}  Все клиенты    ${CYAN}[d]${NC}  Отключённые"
+        echo -e "  ${WHITE}── Настройки ────────────────────────${NC}"
+        echo -e "  ${YELLOW}[i]${NC}  Вкл/выкл протоколов"
+        if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
+            echo -e "  ${YELLOW}[s]${NC}  Сменить сервер   ${YELLOW}[p]${NC}  Сменить пароль"
+        else
+            echo -e "  ${YELLOW}[p]${NC}  Сменить пароль"
+        fi
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
 
