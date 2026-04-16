@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.48"
+VERSION="5.49"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -540,6 +540,49 @@ try:
 except Exception as e:
     sys.stderr.write("ERR:{}\n".format(e))
 PYEOF
+
+    # Универсальный helper для записи в SQLite (без проблем с кавычками/кириллицей)
+    cat > /tmp/xui_db_write.py << 'PYEOF'
+import json, sys, sqlite3, os
+DB = "/etc/x-ui/x-ui.db"
+mode = os.environ.get("MODE", "rename")
+ib_id = os.environ.get("IB_ID", "")
+old_email = os.environ.get("OLD_EMAIL", "")
+new_email = os.environ.get("NEW_EMAIL", "")
+field = os.environ.get("FIELD", "")
+value = os.environ.get("VALUE", "")
+try:
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT settings FROM inbounds WHERE id=?", (ib_id,))
+    row = cur.fetchone()
+    if not row:
+        print("err:inbound not found"); conn.close(); sys.exit(1)
+    s = json.loads(row[0])
+    if mode == "rename":
+        for c in s.get("clients", []):
+            if c.get("email") == old_email:
+                c["email"] = new_email; break
+        cur.execute("UPDATE client_traffics SET email=? WHERE email=?", (new_email, old_email))
+    elif mode == "update":
+        for c in s.get("clients", []):
+            if c.get("email") == old_email:
+                try: c[field] = int(value)
+                except (ValueError, TypeError): c[field] = value
+                break
+    elif mode == "delete":
+        before = len(s.get("clients", []))
+        s["clients"] = [c for c in s.get("clients", []) if c.get("email") != old_email]
+        if len(s.get("clients", [])) == before:
+            print("err:client not found"); conn.close(); sys.exit(1)
+        cur.execute("DELETE FROM client_traffics WHERE email=?", (old_email,))
+    cur.execute("UPDATE inbounds SET settings=? WHERE id=?",
+        (json.dumps(s, ensure_ascii=False), ib_id))
+    conn.commit(); conn.close()
+    print("ok")
+except Exception as e:
+    print("err:" + str(e))
+PYEOF
 }
 
 
@@ -646,45 +689,17 @@ PYEOF
 _3xui_del_client_from_inbound() {
     local ib_id="$1" email="$2" cookie="$3"
     local result
-    result=$(python3 - "$ib_id" "$email" << 'PYEOF'
-import json, sys, subprocess
-ib_id, email = sys.argv[1], sys.argv[2]
-DB = "/etc/x-ui/x-ui.db"
-try:
-    # Читаем текущие настройки inbound
-    r = subprocess.run(['sqlite3', DB,
-        f"SELECT settings FROM inbounds WHERE id={ib_id};"],
-        capture_output=True, text=True, timeout=3)
-    if r.returncode != 0 or not r.stdout.strip():
-        print("ERR:inbound not found"); sys.exit(1)
-    settings = json.loads(r.stdout.strip())
-    clients = settings.get("clients", [])
-    new_clients = [c for c in clients if c.get("email") != email]
-    if len(new_clients) == len(clients):
-        print("ERR:client not found"); sys.exit(1)
-    settings["clients"] = new_clients
-    new_settings = json.dumps(settings)
-    # Экранируем для SQLite
-    new_settings_escaped = new_settings.replace("'", "''")
-    r2 = subprocess.run(['sqlite3', DB,
-        f"UPDATE inbounds SET settings='{new_settings_escaped}' WHERE id={ib_id};"],
-        capture_output=True, text=True, timeout=3)
-    if r2.returncode == 0:
-        print('{"success":true,"msg":"deleted"}')
-    else:
-        print("ERR:" + r2.stderr)
-except Exception as e:
-    print("ERR:" + str(e))
-PYEOF
-    )
-    # После изменения БД перезапускаем xray
-    echo "$result"
-    # Перезапуск xray в фоне с сообщением
-    if echo "$result" | grep -q '"success":true'; then
+    result=$(MODE=delete IB_ID="$ib_id" OLD_EMAIL="$email" \
+        python3 /tmp/xui_db_write.py 2>/dev/null)
+    if [ "$result" = "ok" ]; then
+        echo '{"success":true,"msg":"deleted"}'
         echo -e "  ${CYAN}↻ Применяю изменения...${NC}" >&2
         _3xui_restart_xray "$cookie"
+    else
+        echo '{"success":false,"msg":"'"${result#err:}"'"}'
     fi
 }
+
 
 # ── Обновляет поле клиента через SQLite
 _3xui_update_client_field() {
@@ -698,51 +713,18 @@ _3xui_update_client_field() {
         [ -z "$exact_email" ] && continue
 
         local result
-        result=$(python3 - "$ib_id" "$exact_email" "$field" "$value" << 'PYEOF'
-import json, sys, subprocess
-ib_id, email, field, value = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-DB = "/etc/x-ui/x-ui.db"
-try:
-    r = subprocess.run(['sqlite3', DB,
-        f"SELECT settings FROM inbounds WHERE id={ib_id};"],
-        capture_output=True, text=True, timeout=3)
-    if r.returncode != 0 or not r.stdout.strip():
-        print("ERR:inbound not found"); sys.exit(1)
-    settings = json.loads(r.stdout.strip())
-    found = False
-    for c in settings.get("clients", []):
-        if c.get("email") == email:
-            try:
-                c[field] = int(value)
-            except (ValueError, TypeError):
-                c[field] = value
-            found = True
-            break
-    if not found:
-        print("ERR:client not found"); sys.exit(1)
-    new_settings = json.dumps(settings)
-    new_settings_escaped = new_settings.replace("'", "''")
-    r2 = subprocess.run(['sqlite3', DB,
-        f"UPDATE inbounds SET settings='{new_settings_escaped}' WHERE id={ib_id};"],
-        capture_output=True, text=True, timeout=3)
-    if r2.returncode == 0:
-        print('{"success":true}')
-    else:
-        print("ERR:" + r2.stderr)
-except Exception as e:
-    print("ERR:" + str(e))
-PYEOF
-        )
-        if echo "$result" | grep -q '"success":true'; then
+        result=$(MODE=update IB_ID="$ib_id" OLD_EMAIL="$exact_email" \
+            FIELD="$field" VALUE="$value" python3 /tmp/xui_db_write.py 2>/dev/null)
+
+        if [ "$result" = "ok" ]; then
             (( ok++ ))
         else
-            local err="${result#ERR:}"
+            local err="${result#err:}"
             echo -e "  ${YELLOW}⚠ inbound ${ib_id}: ${err}${NC}"
             (( fail++ ))
         fi
     done
 
-    # Перезапускаем xray один раз после всех изменений
     [ "$ok" -gt 0 ] && _3xui_restart_xray "$cookie"
 
     if [ "$ok" -gt 0 ]; then
@@ -751,6 +733,7 @@ PYEOF
     [ "$fail" -gt 0 ] && echo -e "  ${RED}✗ Не удалось: ${fail} протокол(ов)${NC}"
     read -p "  Enter..." < /dev/tty
 }
+
 
 
 
@@ -1185,17 +1168,21 @@ PYEOF
 
         echo -e "  ${WHITE}── Подписка ──────────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${WHITE}── Ограничения ──────────────────────${NC}"
-        echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ       ${CYAN}${lim_gb}${NC}   [3] Срок  ${CYAN}${lim_exp}${NC}   [4] Сброс трафика"
-        echo -e "  ${WHITE}── Протоколы / имя ──────────────────${NC}"
-        echo -e "  ${GREEN}[5]${NC}  Добавить протокол    ${RED}[6]${NC}  Удалить протокол"
+        echo -e "  ${WHITE}── Ограничения ───────────────────────${NC}"
+        echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ          ${CYAN}(${lim_gb})${NC}"
+        echo -e "  ${YELLOW}[3]${NC}  Срок действия     ${CYAN}(${lim_exp})${NC}"
+        echo -e "  ${YELLOW}[4]${NC}  Сбросить трафик"
+        echo -e "  ${WHITE}── Протоколы / имя ───────────────────${NC}"
+        echo -e "  ${GREEN}[5]${NC}  Добавить протокол"
+        echo -e "  ${RED}[6]${NC}  Удалить протокол"
         echo -e "  ${YELLOW}[7]${NC}  Переименовать стек"
-        echo -e "  ${WHITE}── Статус / удаление ────────────────${NC}"
+        echo -e "  ${WHITE}── Статус / удаление ─────────────────${NC}"
         if [ "$enable" = "on" ]; then
-            echo -e "  ${YELLOW}[e]${NC}  ${RED}Отключить стек${NC}       ${RED}[8]${NC}  Удалить полностью"
+            echo -e "  ${YELLOW}[e]${NC}  Отключить стек"
         else
-            echo -e "  ${YELLOW}[e]${NC}  ${GREEN}Включить стек${NC}        ${RED}[8]${NC}  Удалить полностью"
+            echo -e "  ${YELLOW}[e]${NC}  ${GREEN}Включить стек${NC}"
         fi
+        echo -e "  ${RED}[8]${NC}  Удалить полностью"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -1309,33 +1296,14 @@ except: print(0)
                     [ -z "$old_em" ] && continue
                     new_em="${new_base}${XUI_SEP}${_ib_id}"
                     [ "$old_em" = "$new_em" ] && (( ren_ok++ )) && continue
-                    local ren_res
-                    ren_res=$(python3 - "$_ib_id" "$old_em" "$new_em" << 'PYEOF'
-import json, sys, subprocess
-ib_id, old_email, new_email = sys.argv[1], sys.argv[2], sys.argv[3]
-DB = "/etc/x-ui/x-ui.db"
-try:
-    r = subprocess.run(["sqlite3", DB,
-        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
-        capture_output=True, text=True, timeout=3)
-    s = json.loads(r.stdout.strip())
-    for c in s.get("clients", []):
-        if c.get("email") == old_email:
-            c["email"] = new_email; break
-    ns = json.dumps(s).replace("'", "''")
-    r2 = subprocess.run(["sqlite3", DB,
-        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
-        capture_output=True, text=True, timeout=3)
-    subprocess.run(["sqlite3", DB,
-        "UPDATE client_traffics SET email='{}' WHERE email='{}';".format(
-            new_email, old_email)],
-        capture_output=True, text=True, timeout=3)
-    print("ok" if r2.returncode == 0 else "err")
-except Exception as e:
-    print("err:" + str(e))
-PYEOF
-                    )
+                    # Переименование через env-переменные и python sqlite3 (без проблем с кавычками)
+                    local ren_res _nef; _nef=$(mktemp)
+                    printf '%s' "$new_em" > "$_nef"
+                    ren_res=$(MODE=rename IB_ID="$_ib_id" OLD_EMAIL="$old_em" \
+                        NEW_EMAIL="$new_em" python3 /tmp/xui_db_write.py 2>/dev/null)
+                    rm -f "$_nef"
                     [ "$ren_res" = "ok" ] && (( ren_ok++ )) || \
+                        echo -e "  ${RED}✗ id=${_ib_id}: ${ren_res#err:}${NC}"
                         echo -e "  ${RED}✗ id=${_ib_id}: ошибка${NC}"
                 done
 
@@ -1360,27 +1328,9 @@ PYEOF
                     ex_em=$(echo "$emails_map" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
                     [ -z "$ex_em" ] && continue
                     local tog_res
-                    tog_res=$(python3 - "$ib_id" "$ex_em" "$new_enable" << 'PYEOF'
-import json, sys, subprocess
-ib_id, email, new_en = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
-DB = "/etc/x-ui/x-ui.db"
-try:
-    r = subprocess.run(["sqlite3", DB,
-        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
-        capture_output=True, text=True, timeout=3)
-    s = json.loads(r.stdout.strip())
-    for c in s.get("clients", []):
-        if c.get("email") == email:
-            c["enable"] = new_en; break
-    ns = json.dumps(s).replace("'", "''")
-    r2 = subprocess.run(["sqlite3", DB,
-        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
-        capture_output=True, text=True, timeout=3)
-    print("ok" if r2.returncode == 0 else "err")
-except Exception as e:
-    print("err:" + str(e))
-PYEOF
-                    )
+                    # toggle enable через xui_db_write: используем update mode с полем enable
+                    tog_res=$(MODE=update IB_ID="$ib_id" OLD_EMAIL="$ex_em" \
+                        FIELD="enable" VALUE="$new_enable" python3 /tmp/xui_db_write.py 2>/dev/null)
                     [ "$tog_res" = "ok" ] && (( tog_ok++ ))
                 done
                 if [ "$tog_ok" -gt 0 ]; then
@@ -1510,27 +1460,8 @@ _3xui_disabled_clients_menu() {
                 ex_em=$(echo "$emap" | tr ';' '\n' | grep "^${ib_id}:" | cut -d: -f2-)
                 [ -z "$ex_em" ] && continue
                 local res
-                res=$(python3 - "$ib_id" "$ex_em" << 'PYEOF'
-import json, sys, subprocess
-ib_id, email = sys.argv[1], sys.argv[2]
-DB = "/etc/x-ui/x-ui.db"
-try:
-    r = subprocess.run(["sqlite3", DB,
-        "SELECT settings FROM inbounds WHERE id={};".format(ib_id)],
-        capture_output=True, text=True, timeout=3)
-    s = json.loads(r.stdout.strip())
-    for c in s.get("clients", []):
-        if c.get("email") == email:
-            c["enable"] = True; break
-    ns = json.dumps(s).replace("'", "''")
-    r2 = subprocess.run(["sqlite3", DB,
-        "UPDATE inbounds SET settings='{}' WHERE id={};".format(ns, ib_id)],
-        capture_output=True, text=True, timeout=3)
-    print("ok" if r2.returncode == 0 else "err")
-except Exception as e:
-    print("err:" + str(e))
-PYEOF
-                )
+                res=$(MODE=update IB_ID="$ib_id" OLD_EMAIL="$ex_em" \
+                    FIELD="enable" VALUE="true" python3 /tmp/xui_db_write.py 2>/dev/null)
                 [ "$res" = "ok" ] && (( c_ok++ ))
             done
             [ "$c_ok" -gt 0 ] && (( enabled_cnt++ )) && \
