@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.52"
+VERSION="5.53"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6466,17 +6466,29 @@ _mtg_add() {
             local arch; arch=$(uname -m)
             local mtg_arch="amd64"
             [ "$arch" = "aarch64" ] && mtg_arch="arm64"
-            # Пробуем несколько источников (GitHub может быть заблокирован)
-            local mtg_urls=(
-                "https://github.com/9seconds/mtg/releases/latest/download/mtg-linux-${mtg_arch}"
-                "https://objects.githubusercontent.com/github-production-release-asset-2e65be/161644585/mtg-linux-${mtg_arch}"
-            )
             local downloaded=0
-            for url in "${mtg_urls[@]}"; do
-                curl -fsSL --connect-timeout 5 "$url" -o "$mtg_bin" 2>/dev/null &&                     chmod +x "$mtg_bin" && downloaded=1 && break
-            done
+            # Способ 1: docker cp из образа (если Docker есть на этом сервере)
+            if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+                echo -e "  ${CYAN}Извлекаю mtg из Docker образа...${NC}"
+                local tmp_name="mtg_extract_$$"
+                docker create --name "$tmp_name" "$MTG_IMAGE" > /dev/null 2>&1
+                docker cp "${tmp_name}:/mtg" "$mtg_bin" 2>/dev/null &&                     chmod +x "$mtg_bin" && downloaded=1
+                docker rm "$tmp_name" > /dev/null 2>&1
+            fi
+            # Способ 2: GitHub (может быть заблокирован в РФ)
             if [ "$downloaded" -eq 0 ]; then
-                echo -e "  ${YELLOW}GitHub недоступен — генерирую секрет локально${NC}"
+                local mtg_urls=(
+                    "https://github.com/9seconds/mtg/releases/latest/download/mtg-linux-${mtg_arch}"
+                    "https://objects.githubusercontent.com/github-production-release-asset-2e65be/161644585/mtg-linux-${mtg_arch}"
+                )
+                for url in "${mtg_urls[@]}"; do
+                    curl -fsSL --connect-timeout 5 "$url" -o "$mtg_bin" 2>/dev/null &&                         chmod +x "$mtg_bin" && downloaded=1 && break
+                done
+            fi
+            if [ "$downloaded" -eq 0 ]; then
+                echo -e "  ${YELLOW}mtg недоступен — секрет будет сгенерирован локально${NC}"
+                echo -e "  ${WHITE}Для запуска прокси скопируйте mtg вручную:${NC}"
+                echo -e "  ${CYAN}scp /usr/local/bin/mtg root@<этот_сервер>:/usr/local/bin/mtg${NC}"
             else
                 echo -e "  ${GREEN}✓ mtg установлен${NC}"
             fi
