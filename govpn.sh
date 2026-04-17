@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.50"
+VERSION="5.51"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6449,12 +6449,36 @@ _mtg_add() {
         docker rm "$name" > /dev/null 2>&1
     fi
 
-    # Генерируем секрет
+    # Генерируем секрет — через Docker или нативный mtg бинарник
     echo -e "\n${YELLOW}Генерация секрета...${NC}"
-    local secret
-    secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+    local secret=""
+
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        # Docker доступен
+        secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+    fi
+
     if [ -z "$secret" ]; then
-        echo -e "${RED}  ✗ Не удалось сгенерировать секрет. Docker установлен?${NC}"
+        # Fallback: нативный mtg (скачиваем если нет)
+        local mtg_bin="/usr/local/bin/mtg"
+        if [ ! -x "$mtg_bin" ]; then
+            echo -e "  ${CYAN}Docker недоступен — скачиваю mtg бинарник...${NC}"
+            local arch
+            arch=$(uname -m)
+            local mtg_arch="amd64"
+            [ "$arch" = "aarch64" ] && mtg_arch="arm64"
+            local mtg_url="https://github.com/9seconds/mtg/releases/latest/download/mtg-linux-${mtg_arch}"
+            curl -fsSL "$mtg_url" -o "$mtg_bin" 2>/dev/null && chmod +x "$mtg_bin" || {
+                echo -e "${RED}  ✗ Не удалось скачать mtg${NC}"
+                read -p "Enter..."; return
+            }
+            echo -e "  ${GREEN}✓ mtg установлен${NC}"
+        fi
+        secret=$("$mtg_bin" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+    fi
+
+    if [ -z "$secret" ]; then
+        echo -e "${RED}  ✗ Не удалось сгенерировать секрет${NC}"
         read -p "Enter..."; return
     fi
     echo -e "${GREEN}  ✓ Секрет: ${secret:0:20}...${NC}"
@@ -6470,21 +6494,51 @@ bind-to = "0.0.0.0:3128"
 dns = "https://1.1.1.1/dns-query"
 TOML
 
-    # Запускаем контейнер
-    echo -e "${YELLOW}Запускаю контейнер ${name}...${NC}"
-    docker run -d \
-        --name "$name" \
-        --restart unless-stopped \
-        -v "${conf_file}:/config.toml" \
-        -p "${chosen_port}:3128" \
-        "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
+    # Запускаем — через Docker или нативно
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        echo -e "${YELLOW}Запускаю контейнер ${name}...${NC}"
+        docker run -d \
+            --name "$name" \
+            --restart unless-stopped \
+            -v "${conf_file}:/config.toml" \
+            -p "${chosen_port}:3128" \
+            "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
+        sleep 3
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+            echo -e "${RED}  ✗ Контейнер не запустился${NC}"
+            echo -e "${YELLOW}  Логи: docker logs ${name}${NC}"
+            read -p "Enter..."; return
+        fi
+    else
+        # Нативный запуск через systemd service
+        echo -e "${YELLOW}Запускаю mtg нативно (без Docker)...${NC}"
+        local mtg_bin="/usr/local/bin/mtg"
+        local svc_name="mtg-${chosen_port}"
+        cat > "/etc/systemd/system/${svc_name}.service" << SYSTEMD
+[Unit]
+Description=MTProto proxy ${name}
+After=network.target
 
-    sleep 3
+[Service]
+ExecStart=${mtg_bin} run /etc/mtg/${name}.toml --bind 0.0.0.0:${chosen_port}
+Restart=always
+RestartSec=5
 
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
-        echo -e "${RED}  ✗ Контейнер не запустился${NC}"
-        echo -e "${YELLOW}  Логи: docker logs ${name}${NC}"
-        read -p "Enter..."; return
+[Install]
+WantedBy=multi-user.target
+SYSTEMD
+        mkdir -p /etc/mtg
+        cp "$conf_file" "/etc/mtg/${name}.toml"
+        systemctl daemon-reload
+        systemctl enable "$svc_name" > /dev/null 2>&1
+        systemctl start "$svc_name"
+        sleep 2
+        if ! systemctl is-active "$svc_name" &>/dev/null; then
+            echo -e "${RED}  ✗ Сервис не запустился${NC}"
+            echo -e "${YELLOW}  Логи: journalctl -u ${svc_name} -n 20${NC}"
+            read -p "Enter..."; return
+        fi
+        echo -e "${GREEN}  ✓ Сервис ${svc_name} запущен${NC}"
     fi
 
     # Формируем ссылку
@@ -6573,7 +6627,11 @@ _mtg_manage() {
                 echo -e "\n${CYAN}━━━ Перевыпуск секрета: ${name} ━━━${NC}\n"
                 echo -e "${YELLOW}Генерируем новый секрет для домена ${domain}...${NC}"
                 local new_secret
+                if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
                 new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
+            else
+                new_secret=$(/usr/local/bin/mtg generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
+            fi
                 if [ -z "$new_secret" ]; then
                     echo -e "${RED}Ошибка генерации секрета.${NC}"; read -p "Enter..."; continue
                 fi
