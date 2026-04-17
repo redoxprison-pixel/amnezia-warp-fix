@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.53"
+VERSION="5.55"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6455,7 +6455,7 @@ _mtg_add() {
 
     if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
         # Docker доступен
-        secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+        secret=$(docker run --rm "$MTG_IMAGE" generate-secret "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
     fi
 
     if [ -z "$secret" ]; then
@@ -6494,7 +6494,7 @@ _mtg_add() {
             fi
         fi
         if [ -x "$mtg_bin" ]; then
-            secret=$("$mtg_bin" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+            secret=$("$mtg_bin" generate-secret "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
         fi
     fi
 
@@ -6518,12 +6518,13 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
     fi
     echo -e "${GREEN}  ✓ Секрет: ${secret:0:20}...${NC}"
 
-    # Конфиг файл для mtg
+    # Конфиг файл для mtg v2 (bind-to внутри toml, не как аргумент)
     mkdir -p "$MTG_CONF_DIR"
     local conf_file="${MTG_CONF_DIR}/${name}.toml"
+    # mtg v2 формат: secret + bind-to в одном файле
     cat > "$conf_file" << TOML
 secret = "${secret}"
-bind-to = "0.0.0.0:3128"
+bind-to = "0.0.0.0:${chosen_port}"
 
 [network]
 dns = "https://1.1.1.1/dns-query"
@@ -6536,7 +6537,7 @@ TOML
             --name "$name" \
             --restart unless-stopped \
             -v "${conf_file}:/config.toml" \
-            -p "${chosen_port}:3128" \
+            -p "${chosen_port}:${chosen_port}" \
             "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
         sleep 3
         if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
@@ -6545,17 +6546,18 @@ TOML
             read -p "Enter..."; return
         fi
     else
-        # Нативный запуск через systemd service
+        # Нативный запуск через systemd service (mtg v2)
         echo -e "${YELLOW}Запускаю mtg нативно (без Docker)...${NC}"
         local mtg_bin="/usr/local/bin/mtg"
         local svc_name="mtg-${chosen_port}"
+        # mtg v2: ExecStart без --bind (порт уже в конфиге)
         cat > "/etc/systemd/system/${svc_name}.service" << SYSTEMD
 [Unit]
 Description=MTProto proxy ${name}
 After=network.target
 
 [Service]
-ExecStart=${mtg_bin} run /etc/mtg/${name}.toml --bind 0.0.0.0:${chosen_port}
+ExecStart=${mtg_bin} run ${conf_file}
 Restart=always
 RestartSec=5
 
@@ -6663,9 +6665,9 @@ _mtg_manage() {
                 echo -e "${YELLOW}Генерируем новый секрет для домена ${domain}...${NC}"
                 local new_secret
                 if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-                new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
+                new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret "${domain}" 2>/dev/null | tr -d '[:space:]')
             elif [ -x /usr/local/bin/mtg ]; then
-                new_secret=$(/usr/local/bin/mtg generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
+                new_secret=$(/usr/local/bin/mtg generate-secret "${domain}" 2>/dev/null | tr -d '[:space:]')
             fi
             # Локальная генерация если нет ни Docker ни mtg
             if [ -z "$new_secret" ]; then
