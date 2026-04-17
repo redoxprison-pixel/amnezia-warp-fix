@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.51"
+VERSION="5.52"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6459,22 +6459,45 @@ _mtg_add() {
     fi
 
     if [ -z "$secret" ]; then
-        # Fallback: нативный mtg (скачиваем если нет)
+        # Fallback: нативный mtg бинарник
         local mtg_bin="/usr/local/bin/mtg"
         if [ ! -x "$mtg_bin" ]; then
             echo -e "  ${CYAN}Docker недоступен — скачиваю mtg бинарник...${NC}"
-            local arch
-            arch=$(uname -m)
+            local arch; arch=$(uname -m)
             local mtg_arch="amd64"
             [ "$arch" = "aarch64" ] && mtg_arch="arm64"
-            local mtg_url="https://github.com/9seconds/mtg/releases/latest/download/mtg-linux-${mtg_arch}"
-            curl -fsSL "$mtg_url" -o "$mtg_bin" 2>/dev/null && chmod +x "$mtg_bin" || {
-                echo -e "${RED}  ✗ Не удалось скачать mtg${NC}"
-                read -p "Enter..."; return
-            }
-            echo -e "  ${GREEN}✓ mtg установлен${NC}"
+            # Пробуем несколько источников (GitHub может быть заблокирован)
+            local mtg_urls=(
+                "https://github.com/9seconds/mtg/releases/latest/download/mtg-linux-${mtg_arch}"
+                "https://objects.githubusercontent.com/github-production-release-asset-2e65be/161644585/mtg-linux-${mtg_arch}"
+            )
+            local downloaded=0
+            for url in "${mtg_urls[@]}"; do
+                curl -fsSL --connect-timeout 5 "$url" -o "$mtg_bin" 2>/dev/null &&                     chmod +x "$mtg_bin" && downloaded=1 && break
+            done
+            if [ "$downloaded" -eq 0 ]; then
+                echo -e "  ${YELLOW}GitHub недоступен — генерирую секрет локально${NC}"
+            else
+                echo -e "  ${GREEN}✓ mtg установлен${NC}"
+            fi
         fi
-        secret=$("$mtg_bin" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+        if [ -x "$mtg_bin" ]; then
+            secret=$("$mtg_bin" generate-secret tls "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+        fi
+    fi
+
+    # Финальный fallback: генерируем FakeTLS секрет без внешних зависимостей
+    # Формат: ee + hex(random 16 bytes) + hex(domain)
+    if [ -z "$secret" ]; then
+        secret=$(python3 -c "
+import os, binascii
+domain = '${chosen_domain}'.encode()
+rand = os.urandom(16)
+# FakeTLS: prefix ee + random + domain в hex
+raw = b'\xee' + rand + domain
+print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode())
+" 2>/dev/null)
+        [ -n "$secret" ] && echo -e "  ${GREEN}✓ Секрет сгенерирован локально${NC}"
     fi
 
     if [ -z "$secret" ]; then
@@ -6629,8 +6652,17 @@ _mtg_manage() {
                 local new_secret
                 if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
                 new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
-            else
+            elif [ -x /usr/local/bin/mtg ]; then
                 new_secret=$(/usr/local/bin/mtg generate-secret tls "${domain}" 2>/dev/null | tr -d '[:space:]')
+            fi
+            # Локальная генерация если нет ни Docker ни mtg
+            if [ -z "$new_secret" ]; then
+                new_secret=$(python3 -c "
+import os, binascii
+domain = '${domain}'.encode()
+rand = os.urandom(16)
+print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode())
+" 2>/dev/null)
             fi
                 if [ -z "$new_secret" ]; then
                     echo -e "${RED}Ошибка генерации секрета.${NC}"; read -p "Enter..."; continue
