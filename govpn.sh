@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.55"
+VERSION="5.56"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6455,7 +6455,7 @@ _mtg_add() {
 
     if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
         # Docker доступен
-        secret=$(docker run --rm "$MTG_IMAGE" generate-secret "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+        secret=$(docker run --rm "$MTG_IMAGE" generate-secret -x "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
     fi
 
     if [ -z "$secret" ]; then
@@ -6494,7 +6494,7 @@ _mtg_add() {
             fi
         fi
         if [ -x "$mtg_bin" ]; then
-            secret=$("$mtg_bin" generate-secret "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
+            secret=$("$mtg_bin" generate-secret -x "${chosen_domain}" 2>/dev/null | tr -d '[:space:]')
         fi
     fi
 
@@ -6665,9 +6665,9 @@ _mtg_manage() {
                 echo -e "${YELLOW}Генерируем новый секрет для домена ${domain}...${NC}"
                 local new_secret
                 if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-                new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret "${domain}" 2>/dev/null | tr -d '[:space:]')
+                new_secret=$(docker run --rm "$MTG_IMAGE" generate-secret -x "${domain}" 2>/dev/null | tr -d '[:space:]')
             elif [ -x /usr/local/bin/mtg ]; then
-                new_secret=$(/usr/local/bin/mtg generate-secret "${domain}" 2>/dev/null | tr -d '[:space:]')
+                new_secret=$(/usr/local/bin/mtg generate-secret -x "${domain}" 2>/dev/null | tr -d '[:space:]')
             fi
             # Локальная генерация если нет ни Docker ни mtg
             if [ -z "$new_secret" ]; then
