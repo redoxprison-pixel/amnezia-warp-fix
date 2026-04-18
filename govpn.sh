@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.63"
+VERSION="5.64"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1177,6 +1177,7 @@ PYEOF
 
         echo -e "  ${WHITE}── Подписка ──────────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
+        echo -e "  ${CYAN}[r]${NC}  QR roscomvpn (настройка маршрутизации для Happ/INCY)"
         echo -e "  ${WHITE}── Ограничения ───────────────────────${NC}"
         echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ          ${CYAN}(${lim_gb})${NC}"
         echo -e "  ${YELLOW}[3]${NC}  Срок действия     ${CYAN}(${lim_exp})${NC}"
@@ -1198,6 +1199,15 @@ PYEOF
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
 
         case "$ch" in
+            [rRрР])
+                command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+                echo -e "\n  ${WHITE}Шаг 1:${NC} Добавь подписку (QR выше)"
+                echo -e "  ${WHITE}Шаг 2:${NC} Настрой маршрутизацию roscomvpn — отсканируй:"
+                echo ""
+                echo "https://routing.help" | qrencode -t ANSIUTF8 2>/dev/null
+                echo -e "  ${CYAN}https://routing.help${NC}"
+                echo -e "  ${WHITE}Результат:${NC} РФ/РБ сайты напрямую, заблокированные через VPN"
+                read -p "  Enter..." < /dev/tty ;;
             1)
                 command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
                 echo ""; qrencode -t ANSIUTF8 "$sub_link"
@@ -5846,17 +5856,15 @@ _awg_show_client_menu() {
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Показать конфиг (текст)"
         echo -e "  ${YELLOW}[2]${NC}  QR код (AmneziaWG)"
-        echo -e "  ${CYAN}[3]${NC}  QR код roscomvpn (для Happ/INCY)"
-        echo -e "  ${YELLOW}[4]${NC}  Переименовать"
-        echo -e "  ${RED}[5]${NC}  Удалить клиента"
+        echo -e "  ${YELLOW}[3]${NC}  Переименовать"
+        echo -e "  ${RED}[4]${NC}  Удалить клиента"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _awg_show_config "$client_ip" ;;
             2) _awg_show_qr "$client_ip" ;;
-            3) _awg_show_roscomvpn_qr "$client_ip" ;;
-            4)
+            3)
                 echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_name < /dev/tty
                 [ -z "$new_name" ] && continue
                 local tmp_ct="/tmp/awg_ct_rename.json"
@@ -5882,7 +5890,7 @@ PYEOF
                     log_action "AWG PEER RENAME: ${client_ip} -> ${new_name}"
                 fi
                 read -p "  Enter..." < /dev/tty ;;
-            5)
+            4)
                 echo -ne "  ${RED}Удалить ${label}? (y/n): ${NC}"
                 read -r c < /dev/tty
                 if [ "$c" = "y" ]; then
