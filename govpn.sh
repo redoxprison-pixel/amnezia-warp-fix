@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.57"
+VERSION="5.58"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6527,7 +6527,7 @@ secret = "${secret}"
 bind-to = "0.0.0.0:${chosen_port}"
 
 [network]
-dns = "1.1.1.1:53"
+dns = "udp://1.1.1.1:53"
 TOML
 
     # Запускаем — через Docker или нативно
