@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.66"
+VERSION="5.67"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5793,9 +5793,7 @@ awg_peers_menu() {
                 local name; name=$(_awg_client_name "$ip")
                 local bare="${ip%/32}"
                 local hshake
-                hshake=$(echo "$wg_show" | \
-                    awk "/allowed ips:.*${bare}/{f=1} f && /latest handshake/{print; f=0}" | \
-                    sed 's/.*latest handshake: //')
+                hshake=$(echo "$wg_show" |                     awk "/allowed ips:.*${bare}\/32/{f=1} f && /latest handshake/{print; f=0}" |                     head -1 | sed 's/.*latest handshake: //')
                 case "$sort_mode" in
                     name)     pairs+=("${name:-zzz_$bare}|${ip}") ;;
                     ip)       pairs+=("${bare}|${ip}") ;;
@@ -5814,17 +5812,16 @@ awg_peers_menu() {
                 local name; name=$(_awg_client_name "$ip")
                 local bare="${ip%/32}"
                 local hshake
-                hshake=$(echo "$wg_show" | \
-                    awk "/allowed ips:.*${bare}/{f=1} f && /latest handshake/{print; f=0}" | \
-                    sed 's/.*latest handshake: //')
+                # head -1 чтобы брать только первое совпадение
+                hshake=$(echo "$wg_show" |                     awk "/allowed ips:.*${bare}\/32/{f=1} f && /latest handshake/{print; f=0}" |                     head -1 | sed 's/.*latest handshake: //')
                 local status_icon="${RED}●${NC}"
                 local status_txt="${RED}не подключён${NC}"
                 if [ -n "$hshake" ]; then
                     status_icon="${GREEN}●${NC}"
                     status_txt="${GREEN}${hshake}${NC}"
                 fi
-                printf "  ${YELLOW}[%d]${NC} %b ${WHITE}%-20s${NC}  ${CYAN}%s${NC}\n" \
-                    "$((i+1))" "$status_icon" "${name:-$bare}" "$ip"
+                printf "  ${YELLOW}[%d]${NC} %b ${WHITE}%-20s${NC}  ${CYAN}%s${NC}
+"                     "$((i+1))" "$status_icon" "${name:-$bare}" "$ip"
                 echo -e "       ${status_txt}"
             done
         else
