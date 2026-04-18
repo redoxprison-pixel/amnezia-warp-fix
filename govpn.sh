@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.62"
+VERSION="5.63"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1919,22 +1919,25 @@ _awg_warp_ip() {
 
 _awg_all_clients() {
     local raw
-    raw=$(docker exec "$AWG_CONTAINER" sh -c \
-        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
+    raw=$(docker exec "$AWG_CONTAINER" sh -c         "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
 
-    # Извлекаем allowedIps — работает и с однострочным и с многострочным JSON
     local result
-    result=$(echo "$raw" | grep -o '"allowedIps"[[:space:]]*:[[:space:]]*"[^"]*"' | \
-        sed 's/.*"allowedIps"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
-        grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | \
-        awk '{if($0 !~ /\//) print $0"/32"; else print $0}')
+    result=$(echo "$raw" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for c in d:
+        ip = c.get('userData', {}).get('allowedIps', '')
+        if ip and ip[0].isdigit():
+            print(ip if '/' in ip else ip + '/32')
+except Exception:
+    pass
+" 2>/dev/null)
 
-    # Fallback — конфиг
+    # Fallback — конфиг awg
     if [ -z "$result" ]; then
         local conf; conf=$(_awg_conf)
-        result=$(docker exec "$AWG_CONTAINER" sh -c \
-            "grep 'AllowedIPs' '$conf' 2>/dev/null" 2>/dev/null | \
-            grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32')
+        result=$(docker exec "$AWG_CONTAINER" sh -c             "grep 'AllowedIPs' '$conf' 2>/dev/null" 2>/dev/null |             grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32')
     fi
 
     echo "$result"
@@ -1943,13 +1946,20 @@ _awg_all_clients() {
 _awg_client_name() {
     local ip="${1%/32}"
     local raw
-    raw=$(docker exec "$AWG_CONTAINER" sh -c \
-        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
-    # Ищем clientName в той же строке или блоке где есть нужный IP
-    echo "$raw" | grep -B5 "\"allowedIps\".*${ip}" | \
-        grep -o '"clientName"[[:space:]]*:[[:space:]]*"[^"]*"' | \
-        sed 's/.*"clientName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
-        head -1
+    raw=$(docker exec "$AWG_CONTAINER" sh -c         "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
+    echo "$raw" | python3 -c "
+import json, sys
+target = '$ip'
+try:
+    d = json.load(sys.stdin)
+    for c in d:
+        ud = c.get('userData', {})
+        if ud.get('allowedIps', '').split('/')[0] == target:
+            print(ud.get('clientName', ''))
+            break
+except Exception:
+    pass
+" 2>/dev/null
 }
 
 _awg_selected_clients() {
@@ -2379,22 +2389,31 @@ warp_setup_wizard() {
                 read -r c < /dev/tty
                 [ "$c" != "y" ] && continue
                 echo -e "\n${YELLOW}Удаляю WARP...${NC}"
+                # Останавливаем warp-cli на хосте (работает в любом режиме)
+                warp-cli disconnect 2>/dev/null && echo -e "  ${GREEN}✓ warp-cli отключён${NC}"
+                systemctl stop warp-svc 2>/dev/null
+                systemctl disable warp-svc 2>/dev/null
+
                 if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
-                    docker exec "$AWG_CONTAINER" sh -c                         "wg-quick down /etc/amnezia/amneziawg/warp.conf 2>/dev/null;                          rm -f /etc/amnezia/amneziawg/warp.conf                                /etc/amnezia/amneziawg/warp-account.json 2>/dev/null" 2>/dev/null
-                    echo -e "  ${GREEN}✓ WARP туннель удалён${NC}"
+                    # Удаляем WARP конфиг из контейнера
+                    docker exec "$AWG_CONTAINER" sh -c                         "wg-quick down /etc/amnezia/amneziawg/warp.conf 2>/dev/null || true;                          rm -f /etc/amnezia/amneziawg/warp.conf                                /etc/amnezia/amneziawg/warp-account.json                                /etc/amnezia/amneziawg/wgcf-account.toml 2>/dev/null" 2>/dev/null
+                    # Убираем redsocks правила если были
+                    iptables -t nat -F REDSOCKS 2>/dev/null || true
+                    iptables -t nat -D PREROUTING -j REDSOCKS 2>/dev/null || true
+                    iptables -t nat -X REDSOCKS 2>/dev/null || true
+                    systemctl stop redsocks 2>/dev/null || true
+                    echo -e "  ${GREEN}✓ WARP туннель удалён из AWG${NC}"
                 fi
                 if is_3xui; then
-                    # Убираем WARP из xray (удаляем outbound WARP)
-                    warp-cli disconnect 2>/dev/null
                     warp-cli delete 2>/dev/null
-                    systemctl stop warp-svc 2>/dev/null
-                    systemctl disable warp-svc 2>/dev/null
                     apt-get remove -y cloudflare-warp 2>/dev/null
                     echo -e "  ${GREEN}✓ warp-cli удалён${NC}"
                 fi
+                # Очищаем govpn конфиг от WARP
+                sed -i '/^WARP_/d' /etc/govpn/config 2>/dev/null
                 log_action "WARP: удалён"
                 echo -e "  ${GREEN}✓ Готово. Перезапустите govpn.${NC}"
-                read -p "  Enter..."
+                read -p "  Enter..." < /dev/tty
                 return ;;
             2) # Перевыпуск — только wgcf регистрация заново
                 clear
