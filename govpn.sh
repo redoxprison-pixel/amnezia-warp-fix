@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.64"
+VERSION="5.65"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2399,27 +2399,42 @@ warp_setup_wizard() {
                 read -r c < /dev/tty
                 [ "$c" != "y" ] && continue
                 echo -e "\n${YELLOW}Удаляю WARP...${NC}"
-                # Останавливаем warp-cli на хосте (работает в любом режиме)
-                warp-cli disconnect 2>/dev/null && echo -e "  ${GREEN}✓ warp-cli отключён${NC}"
-                systemctl stop warp-svc 2>/dev/null
-                systemctl disable warp-svc 2>/dev/null
-
                 if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
-                    # Удаляем WARP конфиг из контейнера
-                    docker exec "$AWG_CONTAINER" sh -c                         "wg-quick down /etc/amnezia/amneziawg/warp.conf 2>/dev/null || true;                          rm -f /etc/amnezia/amneziawg/warp.conf                                /etc/amnezia/amneziawg/warp-account.json                                /etc/amnezia/amneziawg/wgcf-account.toml 2>/dev/null" 2>/dev/null
-                    # Убираем redsocks правила если были
-                    iptables -t nat -F REDSOCKS 2>/dev/null || true
-                    iptables -t nat -D PREROUTING -j REDSOCKS 2>/dev/null || true
-                    iptables -t nat -X REDSOCKS 2>/dev/null || true
-                    systemctl stop redsocks 2>/dev/null || true
-                    echo -e "  ${GREEN}✓ WARP туннель удалён из AWG${NC}"
+                    echo -e "  ${CYAN}Останавливаю WARP туннель...${NC}"
+                    # Опускаем warp интерфейс внутри контейнера
+                    docker exec "$AWG_CONTAINER" sh -c "
+                        wg-quick down warp 2>/dev/null || true
+                        wg-quick down /opt/warp/warp.conf 2>/dev/null || true
+                        wg-quick down /etc/amnezia/amneziawg/warp.conf 2>/dev/null || true
+                        ip link delete warp 2>/dev/null || true
+                    " 2>/dev/null
+                    # Удаляем все WARP файлы
+                    docker exec "$AWG_CONTAINER" sh -c "
+                        rm -f /opt/warp/warp.conf /opt/warp/clients.list
+                        rm -f /etc/amnezia/amneziawg/warp.conf
+                        rm -f /opt/warp/wgcf-account.toml /root/wgcf-account.toml
+                        rm -f /opt/warp/wgcf-profile.conf /root/wgcf-profile.conf
+                    " 2>/dev/null
+                    # Убираем ip rules для клиентов
+                    docker exec "$AWG_CONTAINER" sh -c "
+                        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' |                             xargs -I{} ip rule del priority {} 2>/dev/null || true
+                        ip route flush table 100 2>/dev/null || true
+                        iptables -t nat -F POSTROUTING 2>/dev/null || true
+                    " 2>/dev/null
+                    # Убираем WARP из start.sh
+                    docker exec "$AWG_CONTAINER" sh -c "
+                        sed -i '/warp/Id' /opt/amnezia/start.sh 2>/dev/null || true
+                        sed -i '/wg-quick.*warp/d' /opt/amnezia/start.sh 2>/dev/null || true
+                    " 2>/dev/null
+                    echo -e "  ${GREEN}✓ WARP туннель удалён${NC}"
                 fi
                 if is_3xui; then
-                    warp-cli delete 2>/dev/null
+                    warp-cli disconnect 2>/dev/null || true
+                    systemctl stop warp-svc 2>/dev/null
+                    systemctl disable warp-svc 2>/dev/null
                     apt-get remove -y cloudflare-warp 2>/dev/null
                     echo -e "  ${GREEN}✓ warp-cli удалён${NC}"
                 fi
-                # Очищаем govpn конфиг от WARP
                 sed -i '/^WARP_/d' /etc/govpn/config 2>/dev/null
                 log_action "WARP: удалён"
                 echo -e "  ${GREEN}✓ Готово. Перезапустите govpn.${NC}"
