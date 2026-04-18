@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.61"
+VERSION="5.62"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2376,7 +2376,7 @@ warp_setup_wizard() {
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
             4) # Удаление WARP
                 echo -ne "\n  ${RED}Удалить WARP полностью? (y/n): ${NC}"
-                read -r c
+                read -r c < /dev/tty
                 [ "$c" != "y" ] && continue
                 echo -e "\n${YELLOW}Удаляю WARP...${NC}"
                 if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
@@ -5826,16 +5826,18 @@ _awg_show_client_menu() {
         echo -e "  ${WHITE}IP:   ${CYAN}${client_ip}${NC}"
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Показать конфиг (текст)"
-        echo -e "  ${YELLOW}[2]${NC}  Показать QR код"
-        echo -e "  ${YELLOW}[3]${NC}  Переименовать"
-        echo -e "  ${RED}[4]${NC}  Удалить клиента"
+        echo -e "  ${YELLOW}[2]${NC}  QR код (AmneziaWG)"
+        echo -e "  ${CYAN}[3]${NC}  QR код roscomvpn (для Happ/INCY)"
+        echo -e "  ${YELLOW}[4]${NC}  Переименовать"
+        echo -e "  ${RED}[5]${NC}  Удалить клиента"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
         case "$ch" in
             1) _awg_show_config "$client_ip" ;;
             2) _awg_show_qr "$client_ip" ;;
-            3)
+            3) _awg_show_roscomvpn_qr "$client_ip" ;;
+            4)
                 echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_name < /dev/tty
                 [ -z "$new_name" ] && continue
                 local tmp_ct="/tmp/awg_ct_rename.json"
@@ -5861,7 +5863,7 @@ PYEOF
                     log_action "AWG PEER RENAME: ${client_ip} -> ${new_name}"
                 fi
                 read -p "  Enter..." < /dev/tty ;;
-            4)
+            5)
                 echo -ne "  ${RED}Удалить ${label}? (y/n): ${NC}"
                 read -r c < /dev/tty
                 if [ "$c" = "y" ]; then
@@ -5969,6 +5971,41 @@ _awg_show_qr() {
     echo -e "${WHITE}Отсканируйте QR в приложении.${NC}"
     read -p "Нажмите Enter..."
 }
+
+# QR код roscomvpn deeplink для Happ/INCY
+_awg_show_roscomvpn_qr() {
+    local client_ip="$1"
+    local name; name=$(_awg_client_name "$client_ip")
+    clear
+    echo -e "\n${CYAN}━━━ roscomvpn QR: ${WHITE}${name:-${client_ip%/32}}${CYAN} ━━━${NC}\n"
+
+    local cfg; cfg=$(_awg_get_client_config "$client_ip")
+    if [ -z "$cfg" ]; then
+        echo -e "${YELLOW}Конфиг не найден.${NC}"
+        echo -e "${WHITE}Клиент добавлен через Amnezia — ключ только на устройстве.${NC}"
+        echo ""; read -p "Нажмите Enter..."; return
+    fi
+
+    # Генерируем deeplink для roscomvpn routing
+    # Формат: https://routing.help — редирект на Happ deeplink с roscomvpn профилем
+    local ROSCOM_DEEPLINK="https://routing.help"
+    
+    echo -e "  ${WHITE}Шаг 1:${NC} Отсканируй QR конфига AWG в Happ/AmneziaWG:"
+    echo ""
+    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+    echo "$cfg" | qrencode -t ANSIUTF8 2>/dev/null || echo -e "${RED}qrencode не установлен${NC}"
+    
+    echo ""
+    echo -e "  ${WHITE}Шаг 2:${NC} Добавь roscomvpn маршрутизацию — отсканируй:"
+    echo ""
+    echo "$ROSCOM_DEEPLINK" | qrencode -t ANSIUTF8 2>/dev/null
+    echo -e "  ${CYAN}${ROSCOM_DEEPLINK}${NC}"
+    echo ""
+    echo -e "  ${WHITE}Результат:${NC} РФ/РБ сайты — напрямую, заблокированные — через VPN"
+    echo ""
+    read -p "Нажмите Enter..."
+}
+
 
 _awg_next_ip() {
     # Найти следующий свободный IP в подсети 10.8.1.x
