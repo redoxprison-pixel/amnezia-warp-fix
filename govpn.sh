@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.65"
+VERSION="5.66"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2415,11 +2415,14 @@ warp_setup_wizard() {
                         rm -f /opt/warp/wgcf-account.toml /root/wgcf-account.toml
                         rm -f /opt/warp/wgcf-profile.conf /root/wgcf-profile.conf
                     " 2>/dev/null
-                    # Убираем ip rules для клиентов
+                    # Убираем ip rules для клиентов (только таблица 100, не трогаем основные)
                     docker exec "$AWG_CONTAINER" sh -c "
-                        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' |                             xargs -I{} ip rule del priority {} 2>/dev/null || true
+                        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' | \
+                            while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done
                         ip route flush table 100 2>/dev/null || true
-                        iptables -t nat -F POSTROUTING 2>/dev/null || true
+                        # Удаляем только WARP MASQUERADE правила, не трогаем базовые
+                        iptables -t nat -S POSTROUTING 2>/dev/null | grep 'warp' | \
+                            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
                     " 2>/dev/null
                     # Убираем WARP из start.sh
                     docker exec "$AWG_CONTAINER" sh -c "
