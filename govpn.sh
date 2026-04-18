@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.60"
+VERSION="5.61"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2051,36 +2051,93 @@ _awg_cleanup_legacy() {
 _awg_apply_rules() {
     local -a selected=("$@")
     local iface; iface=$(_awg_iface)
+    local WARP_SOCKS="127.0.0.1:40000"  # warp-cli socks proxy
 
-    # Полная очистка — и ip rule from IP и fwmark (старый подход)
+    # Очищаем старые правила
     docker exec "$AWG_CONTAINER" sh -c "
-        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' | sort -rn | \
-            while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done
-        ip rule del fwmark 0x64 lookup 100 2>/dev/null || true
-        ip rule del fwmark 100 lookup 100 2>/dev/null || true
-        iptables -t mangle -D PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true
-        iptables -t nat -S POSTROUTING 2>/dev/null | grep 'warp.*MASQUERADE' | \
-            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
+        iptables -t nat -F WARP_OUT 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i ${iface} -j WARP_OUT 2>/dev/null || true
+        iptables -t nat -X WARP_OUT 2>/dev/null || true
+        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' | sort -rn |             while read -r pr; do ip rule del priority "\$pr" 2>/dev/null || true; done
         ip route flush table 100 2>/dev/null || true
     " > /dev/null 2>&1
 
     [ "${#selected[@]}" -eq 0 ] && return 0
 
-    # Маршрут через warp
-    docker exec "$AWG_CONTAINER" sh -c \
-        "ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"
+    # Определяем метод: есть warp интерфейс на хосте или только socks прокси?
+    if ip link show warp &>/dev/null 2>&1; then
+        # Старый метод: warp интерфейс (WireGuard режим)
+        docker exec "$AWG_CONTAINER" sh -c             "ip route add default dev warp table 100 2>/dev/null || true"
+        local prio=100
+        for ip in "${selected[@]}"; do
+            local bare="${ip%/32}"
+            docker exec "$AWG_CONTAINER" sh -c "
+                ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true
+                iptables -t nat -A POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true
+            " > /dev/null 2>&1
+            ((prio++))
+        done
+    else
+        # MASQUE режим: WARP работает как socks5 на хосте
+        # Используем redsocks для прозрачного проксирования
+        _awg_setup_redsocks "$WARP_SOCKS" "${selected[@]}"
+    fi
+}
 
-    # Per-client ip rule from IP (без fwmark)
-    local prio=100
-    for ip in "${selected[@]}"; do
+_awg_setup_redsocks() {
+    local warp_socks="$1"; shift
+    local -a client_ips=("$@")
+    local warp_host="${warp_socks%%:*}"
+    local warp_port="${warp_socks##*:}"
+    local iface; iface=$(_awg_iface)
+    local REDSOCKS_PORT=12345
+
+    # Устанавливаем redsocks если нет
+    if ! command -v redsocks &>/dev/null; then
+        echo -e "  ${CYAN}Устанавливаю redsocks...${NC}"
+        apt-get install -y redsocks > /dev/null 2>&1 || {
+            echo -e "  ${YELLOW}⚠ redsocks не установлен — WARP для клиентов недоступен${NC}"
+            return 1
+        }
+    fi
+
+    # Конфиг redsocks
+    cat > /etc/redsocks.conf << REDSOCKS_EOF
+base {
+    log_debug = off;
+    log_info = on;
+    log = "syslog:daemon";
+    daemon = on;
+    redirector = iptables;
+}
+redsocks {
+    local_ip = 0.0.0.0;
+    local_port = ${REDSOCKS_PORT};
+    ip = ${warp_host};
+    port = ${warp_port};
+    type = socks5;
+}
+REDSOCKS_EOF
+
+    systemctl restart redsocks > /dev/null 2>&1 || redsocks -c /etc/redsocks.conf &
+
+    # iptables правила на ХОСТЕ — перехватываем трафик от AWG клиентов
+    iptables -t nat -N REDSOCKS 2>/dev/null || iptables -t nat -F REDSOCKS
+    # Не проксируем локальные адреса
+    iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 162.159.192.0/24 -j RETURN  # Cloudflare WARP
+    # Перенаправляем TCP трафик клиентов через redsocks
+    for ip in "${client_ips[@]}"; do
         local bare="${ip%/32}"
-        docker exec "$AWG_CONTAINER" sh -c "
-            ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true
-            iptables -t nat -C POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || \
-            iptables -t nat -I POSTROUTING 1 -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true
-        " > /dev/null 2>&1
-        ((prio++))
+        iptables -t nat -A REDSOCKS -s "${bare}" -p tcp -j REDIRECT --to-port ${REDSOCKS_PORT}
     done
+    iptables -t nat -C PREROUTING -j REDSOCKS 2>/dev/null ||         iptables -t nat -I PREROUTING 1 -j REDSOCKS
+
+    echo -e "  ${GREEN}✓ WARP через redsocks (socks5://${warp_socks})${NC}"
+    log_action "AWG: WARP через redsocks настроен для ${#client_ips[@]} клиентов"
 }
 
 _awg_patch_start_sh() {
@@ -6347,16 +6404,26 @@ MTG_IMAGE="nineseconds/mtg:2"
 
 # Список доменов для FakeTLS с описаниями
 MTG_DOMAINS=(
-    "bing.com:Microsoft Bing"
-    "apple.com:Apple"
-    "microsoft.com:Microsoft"
-    "amazon.com:Amazon"
-    "cloudflare.com:Cloudflare"
+    "google.com:Google"
     "wikipedia.org:Wikipedia"
-    "speedtest.net:Speedtest"
     "github.com:GitHub"
     "stackoverflow.com:StackOverflow"
     "medium.com:Medium"
+    "bbc.com:BBC"
+    "reuters.com:Reuters"
+    "nytimes.com:NYTimes"
+    "lenta.ru:Лента.ру"
+    "rbc.ru:РБК"
+    "ria.ru:РИА Новости"
+    "kommersant.ru:Коммерсантъ"
+    "habr.com:Хабр"
+    "stepik.org:Stepik"
+    "duolingo.com:Duolingo"
+    "coursera.org:Coursera"
+    "udemy.com:Udemy"
+    "khanacademy.org:Khan Academy"
+    "ted.com:TED"
+    "cloudflare.com:Cloudflare"
 )
 
 # Популярные порты для MTProto
