@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.58"
+VERSION="5.60"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2309,6 +2309,7 @@ warp_setup_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
         echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
+        echo -e "  ${RED}[4]${NC}  Удалить WARP"
         is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -2316,6 +2317,28 @@ warp_setup_wizard() {
         case "$warp_action" in
             1) warp_test; return ;;
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
+            4) # Удаление WARP
+                echo -ne "\n  ${RED}Удалить WARP полностью? (y/n): ${NC}"
+                read -r c
+                [ "$c" != "y" ] && continue
+                echo -e "\n${YELLOW}Удаляю WARP...${NC}"
+                if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
+                    docker exec "$AWG_CONTAINER" sh -c                         "wg-quick down /etc/amnezia/amneziawg/warp.conf 2>/dev/null;                          rm -f /etc/amnezia/amneziawg/warp.conf                                /etc/amnezia/amneziawg/warp-account.json 2>/dev/null" 2>/dev/null
+                    echo -e "  ${GREEN}✓ WARP туннель удалён${NC}"
+                fi
+                if is_3xui; then
+                    # Убираем WARP из xray (удаляем outbound WARP)
+                    warp-cli disconnect 2>/dev/null
+                    warp-cli delete 2>/dev/null
+                    systemctl stop warp-svc 2>/dev/null
+                    systemctl disable warp-svc 2>/dev/null
+                    apt-get remove -y cloudflare-warp 2>/dev/null
+                    echo -e "  ${GREEN}✓ warp-cli удалён${NC}"
+                fi
+                log_action "WARP: удалён"
+                echo -e "  ${GREEN}✓ Готово. Перезапустите govpn.${NC}"
+                read -p "  Enter..."
+                return ;;
             2) # Перевыпуск — только wgcf регистрация заново
                 clear
                 echo -e "\n${CYAN}━━━ Перевыпуск ключа WARP ━━━${NC}\n"
@@ -3969,6 +3992,68 @@ EOF
 }
 
 # Установка 3X-UI
+# Установка/обновление roscomvpn geoip+geosite для 3X-UI
+_3xui_update_geofiles() {
+    echo -e "\n${CYAN}━━━ Обновление GeoIP / GeoSite (roscomvpn) ━━━${NC}\n"
+    local xray_dir="/usr/local/x-ui/bin"
+    [ ! -d "$xray_dir" ] && xray_dir="/usr/local/share/xray" 
+    [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname)
+    if [ -z "$xray_dir" ]; then
+        echo -e "  ${RED}✗ Не удалось найти директорию xray${NC}"
+        return 1
+    fi
+    echo -e "  ${WHITE}Директория:${NC} ${CYAN}${xray_dir}${NC}"
+
+    local CDN="https://cdn.jsdelivr.net/gh/hydraponique"
+    local ok=0
+
+    echo -ne "  ${CYAN}→ geoip.dat...${NC} "
+    if curl -fsSL --max-time 30         "${CDN}/roscomvpn-geoip/release/geoip.dat"         -o "${xray_dir}/geoip.dat" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC}"
+        (( ok++ ))
+    else
+        echo -e "${RED}✗${NC}"
+    fi
+
+    echo -ne "  ${CYAN}→ geosite.dat...${NC} "
+    if curl -fsSL --max-time 30         "${CDN}/roscomvpn-geosite/release/geosite.dat"         -o "${xray_dir}/geosite.dat" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC}"
+        (( ok++ ))
+    else
+        echo -e "${RED}✗${NC}"
+    fi
+
+    if [ "$ok" -eq 2 ]; then
+        echo -e "\n  ${GREEN}✅ GeoIP и GeoSite обновлены${NC}"
+        echo -e "  ${WHITE}Источник:${NC} roscomvpn (Россия+Беларусь прямые, остальное через прокси)"
+        # Перезапускаем xray чтобы применить
+        systemctl restart x-ui > /dev/null 2>&1
+        echo -e "  ${CYAN}↻ xray перезапущен${NC}"
+        log_action "3XUI: обновлены geoip/geosite (roscomvpn)"
+    else
+        echo -e "\n  ${YELLOW}⚠ Обновление частичное — проверьте интернет${NC}"
+    fi
+    read -p "  Enter..." < /dev/tty
+}
+
+# Автообновление geofiles через cron
+_3xui_setup_geo_autoupdate() {
+    local CDN="https://cdn.jsdelivr.net/gh/hydraponique"
+    local xray_dir="/usr/local/x-ui/bin"
+    [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname)
+    [ -z "$xray_dir" ] && return 1
+
+    cat > /etc/cron.daily/govpn-geo-update << CRONEOF
+#!/bin/bash
+# Автообновление roscomvpn geoip/geosite
+curl -fsSL --max-time 60 "${CDN}/roscomvpn-geoip/release/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null
+curl -fsSL --max-time 60 "${CDN}/roscomvpn-geosite/release/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null
+systemctl restart x-ui > /dev/null 2>&1
+CRONEOF
+    chmod +x /etc/cron.daily/govpn-geo-update
+    echo -e "  ${GREEN}✓ Автообновление настроено (ежедневно)${NC}"
+}
+
 _install_3xui() {
     clear
     echo -e "\n${CYAN}━━━ Установка 3X-UI ━━━${NC}\n"
@@ -4383,6 +4468,7 @@ install_wizard() {
 
         echo -e "  ${YELLOW}[1]${NC}  AmneziaWG (Docker)     ${status_awg}"
         echo -e "  ${YELLOW}[2]${NC}  3X-UI / 3X-UI Pro      ${status_xui}"
+        is_3xui && echo -e "  ${CYAN}[g]${NC}  Обновить GeoIP/GeoSite (roscomvpn)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -4390,6 +4476,7 @@ install_wizard() {
         case "$ch" in
             1) _install_amnezia_awg ;;
             2) _install_3xui ;;
+            [gGгГ]) _3xui_update_geofiles; _3xui_setup_geo_autoupdate ;;
             0|"") return ;;
         esac
     done
@@ -6886,7 +6973,13 @@ show_menu() {
             echo -e "  ${GREEN}3)  Клиенты 3X-UI${NC}"
         fi
         echo -e " ${CYAN}── ПРОКСИ ────────────────────────────${NC}"
-        echo -e "  5)  MTProto прокси"
+        # MTProto показываем всегда — порты можно выбрать вручную
+        local _mtg_cnt; _mtg_cnt=$(_mtg_count_running 2>/dev/null || echo 0)
+        if [ "$_mtg_cnt" -gt 0 ]; then
+            echo -e "  ${GREEN}5)  MTProto прокси${NC}  ${CYAN}(${_mtg_cnt} активных)${NC}"
+        else
+            echo -e "  5)  MTProto прокси"
+        fi
         echo -e "  6)  iptables проброс"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
         echo -e "  7)  Серверы, скорость, тесты"
