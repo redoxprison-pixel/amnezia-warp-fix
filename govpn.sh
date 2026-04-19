@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.75"
+VERSION="5.76"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1977,40 +1977,12 @@ _awg_install_wgcf() {
     return 0
 }
 
-# Регионы WARP — эндпоинты Cloudflare по странам
-# Источник: публичные IP Cloudflare WARP
+# Эндпоинты WARP
+# Примечание: конкретные IP не работают с AmneziaWG — только авто DNS
 declare -A WARP_REGIONS=(
-    ["Авто"]="engage.cloudflareclient.com:2408"
-    ["США (Сан-Хосе)"]="162.159.192.1:2408"
-    ["США (Лос-Анджелес)"]="162.159.193.1:2408"
-    ["США (Нью-Йорк)"]="162.159.195.1:2408"
-    ["Великобритания"]="188.114.96.1:2408"
-    ["Германия"]="188.114.97.1:2408"
-    ["Франция"]="188.114.98.1:2408"
-    ["Нидерланды"]="188.114.99.1:2408"
-    ["Сингапур"]="162.159.194.1:2408"
-    ["Япония"]="162.159.196.1:2408"
-    ["Австралия"]="162.159.197.1:2408"
-    ["Бразилия"]="162.159.198.1:2408"
-    ["Индия"]="162.159.199.1:2408"
+    ["Авто (ближайший)"]="engage.cloudflareclient.com:2408"
 )
-
-# Порядок отображения регионов
-WARP_REGION_ORDER=(
-    "Авто"
-    "США (Сан-Хосе)"
-    "США (Лос-Анджелес)"
-    "США (Нью-Йорк)"
-    "Великобритания"
-    "Германия"
-    "Франция"
-    "Нидерланды"
-    "Сингапур"
-    "Япония"
-    "Австралия"
-    "Бразилия"
-    "Индия"
-)
+WARP_REGION_ORDER=("Авто (ближайший)")
 
 _awg_ping_endpoint() {
     local host="${1%%:*}"
@@ -2419,10 +2391,9 @@ _awg_patch_start_sh() {
 _awg_install_warp() {
     echo -e "\n${CYAN}[Amnezia] Установка WARP в контейнер ${AWG_CONTAINER}...${NC}\n"
 
-    # Выбор региона перед установкой
+    # Регион выбирается автоматически Cloudflare
     WARP_SELECTED_REGION="Авто"
-    WARP_SELECTED_ENDPOINT="${WARP_REGIONS[Авто]:-engage.cloudflareclient.com:2408}"
-    _awg_select_region || true
+    WARP_SELECTED_ENDPOINT="engage.cloudflareclient.com:2408"
 
     echo -e "${YELLOW}[1/4]${NC} Скачивание wgcf в контейнер..."
     _awg_install_wgcf || { read -p "Enter..."; return 1; }
@@ -2580,7 +2551,6 @@ warp_setup_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
         echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
-        echo -e "  ${CYAN}[r]${NC}  Сменить регион / эндпоинт"
         echo -e "  ${RED}[4]${NC}  Удалить WARP"
         is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
@@ -2588,7 +2558,6 @@ warp_setup_wizard() {
         read -p "Выбор: " warp_action
         case "$warp_action" in
             1) warp_test; return ;;
-            [rRрР]) is_amnezia && _awg_change_region ;;
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
             4) # Удаление WARP
                 echo -ne "\n  ${RED}Удалить WARP полностью? (y/n): ${NC}"
