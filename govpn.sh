@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.72"
+VERSION="5.73"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1977,6 +1977,182 @@ _awg_install_wgcf() {
     return 0
 }
 
+# Регионы WARP — эндпоинты Cloudflare по странам
+# Источник: публичные IP Cloudflare WARP
+declare -A WARP_REGIONS=(
+    ["Авто"]="engage.cloudflareclient.com:2408"
+    ["США (Сан-Хосе)"]="162.159.192.1:2408"
+    ["США (Лос-Анджелес)"]="162.159.193.1:2408"
+    ["США (Нью-Йорк)"]="162.159.195.1:2408"
+    ["Великобритания"]="188.114.96.1:2408"
+    ["Германия"]="188.114.97.1:2408"
+    ["Франция"]="188.114.98.1:2408"
+    ["Нидерланды"]="188.114.99.1:2408"
+    ["Сингапур"]="162.159.194.1:2408"
+    ["Япония"]="162.159.196.1:2408"
+    ["Австралия"]="162.159.197.1:2408"
+    ["Бразилия"]="162.159.198.1:2408"
+    ["Индия"]="162.159.199.1:2408"
+)
+
+# Порядок отображения регионов
+WARP_REGION_ORDER=(
+    "Авто"
+    "США (Сан-Хосе)"
+    "США (Лос-Анджелес)"
+    "США (Нью-Йорк)"
+    "Великобритания"
+    "Германия"
+    "Франция"
+    "Нидерланды"
+    "Сингапур"
+    "Япония"
+    "Австралия"
+    "Бразилия"
+    "Индия"
+)
+
+_awg_ping_endpoint() {
+    local host="${1%%:*}"
+    local port="${1##*:}"
+    # UDP пинг через nc или python3
+    python3 -c "
+import socket, time, sys
+host, port = '$host', int('$port')
+results = []
+for _ in range(3):
+    try:
+        t = time.time()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.5)
+        s.sendto(b'x', (host, port))
+        try: s.recv(1)
+        except: pass
+        results.append(int((time.time()-t)*1000))
+        s.close()
+    except: pass
+if results:
+    print(min(results))
+else:
+    # fallback TCP
+    try:
+        t = time.time()
+        s = socket.create_connection((host, 443), timeout=2)
+        s.close()
+        print(int((time.time()-t)*1000))
+    except:
+        print(9999)
+" 2>/dev/null || echo 9999
+}
+
+_awg_select_region() {
+    # Показываем регионы с пингом и даём выбрать
+    clear
+    echo -e "\n${CYAN}━━━ Выбор региона WARP ━━━${NC}\n"
+    echo -e "  ${YELLOW}Тестирую задержку до эндпоинтов...${NC}\n"
+
+    local -a pings=()
+    local i=1
+    for region in "${WARP_REGION_ORDER[@]}"; do
+        local endpoint="${WARP_REGIONS[$region]}"
+        local host="${endpoint%%:*}"
+        echo -ne "  ${WHITE}[${i}]${NC} ${WHITE}${region}${NC}  "
+        local ms
+        if [ "$region" = "Авто" ]; then
+            ms=0
+        else
+            ms=$(_awg_ping_endpoint "$endpoint")
+        fi
+        pings+=("$ms")
+        if [ "$ms" -eq 9999 ]; then
+            echo -e "${RED}недоступен${NC}"
+        elif [ "$ms" -eq 0 ]; then
+            echo -e "${CYAN}авто${NC}"
+        elif [ "$ms" -lt 80 ]; then
+            echo -e "${GREEN}${ms}ms${NC}"
+        elif [ "$ms" -lt 150 ]; then
+            echo -e "${YELLOW}${ms}ms${NC}"
+        else
+            echo -e "${RED}${ms}ms${NC}"
+        fi
+        (( i++ ))
+    done
+
+    echo ""
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор [1]: " region_ch < /dev/tty
+    [ -z "$region_ch" ] && region_ch=1
+    [ "$region_ch" = "0" ] && return 1
+
+    if [[ "$region_ch" =~ ^[0-9]+$ ]] && \
+       (( region_ch >= 1 && region_ch <= ${#WARP_REGION_ORDER[@]} )); then
+        local selected_region="${WARP_REGION_ORDER[$((region_ch-1))]}"
+        local selected_endpoint="${WARP_REGIONS[$selected_region]}"
+        echo -e "\n  ${GREEN}✓ Выбран регион: ${selected_region}${NC}"
+        echo -e "  ${WHITE}Эндпоинт: ${CYAN}${selected_endpoint}${NC}"
+        # Экспортируем выбор
+        WARP_SELECTED_REGION="$selected_region"
+        WARP_SELECTED_ENDPOINT="$selected_endpoint"
+        return 0
+    fi
+    return 1
+}
+
+_awg_change_region() {
+    # Смена региона для уже установленного WARP
+    clear
+    echo -e "\n${CYAN}━━━ Смена региона WARP ━━━${NC}\n"
+
+    if ! _awg_warp_running; then
+        echo -e "  ${RED}✗ WARP не запущен${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    WARP_SELECTED_REGION=""
+    WARP_SELECTED_ENDPOINT=""
+    _awg_select_region || return
+
+    local endpoint="$WARP_SELECTED_ENDPOINT"
+    local host="${endpoint%%:*}"
+    local port="${endpoint##*:}"
+
+    echo -e "\n  ${YELLOW}Меняю регион...${NC}"
+
+    # Обновляем Endpoint в warp.conf
+    docker exec "$AWG_CONTAINER" sh -c "
+        if [ -f '${AWG_WARP_CONF}' ]; then
+            sed -i 's|^Endpoint = .*|Endpoint = ${host}:${port}|g' '${AWG_WARP_CONF}'
+            echo 'ok'
+        else
+            echo 'no_conf'
+        fi
+    " 2>/dev/null | grep -q 'ok' || {
+        echo -e "  ${RED}✗ Файл конфига не найден${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    }
+
+    # Перезапускаем туннель
+    echo -e "  ${CYAN}↻ Перезапускаю туннель...${NC}"
+    docker exec "$AWG_CONTAINER" sh -c "
+        wg-quick down '${AWG_WARP_CONF}' 2>/dev/null || true
+        sleep 1
+        wg-quick up '${AWG_WARP_CONF}' 2>/dev/null
+    " 2>/dev/null
+    sleep 3
+
+    # Проверяем новый IP
+    local new_ip; new_ip=$(_awg_warp_ip)
+    if [ -n "$new_ip" ]; then
+        echo -e "  ${GREEN}✓ Регион изменён!${NC}"
+        echo -e "  ${WHITE}Новый WARP IP: ${GREEN}${new_ip}${NC}"
+        log_action "AWG WARP REGION: ${WARP_SELECTED_REGION} → ${new_ip}"
+    else
+        echo -e "  ${YELLOW}⚠ Туннель поднялся но IP не определён${NC}"
+    fi
+    read -p "  Enter..." < /dev/tty
+}
+
 _awg_create_warp_conf() {
     # Регистрация и генерация профиля внутри контейнера
     docker exec "$AWG_CONTAINER" sh -c "
@@ -2014,6 +2190,14 @@ _awg_create_warp_conf() {
         chmod 600 '${AWG_WARP_CONF}'
         mv /tmp/wgcf-account.toml '${AWG_WARP_DIR}/' 2>/dev/null || true
     " 2>/dev/null
+
+    # Применяем выбранный регион если был выбран
+    if [ -n "${WARP_SELECTED_ENDPOINT:-}" ] && [ "${WARP_SELECTED_REGION:-}" != "Авто" ]; then
+        local host="${WARP_SELECTED_ENDPOINT%%:*}"
+        local port="${WARP_SELECTED_ENDPOINT##*:}"
+        docker exec "$AWG_CONTAINER" sh -c             "sed -i 's|^Endpoint = .*|Endpoint = ${host}:${port}|g' '${AWG_WARP_CONF}'" 2>/dev/null
+        echo -e "  ${GREEN}✓ Эндпоинт: ${WARP_SELECTED_ENDPOINT}${NC}"
+    fi
     return 0
 }
 
@@ -2229,6 +2413,16 @@ _awg_patch_start_sh() {
 _awg_install_warp() {
     echo -e "\n${CYAN}[Amnezia] Установка WARP в контейнер ${AWG_CONTAINER}...${NC}\n"
 
+    # Выбор региона перед установкой
+    WARP_SELECTED_REGION="Авто"
+    WARP_SELECTED_ENDPOINT="${WARP_REGIONS[Авто]}"
+    echo -e "  ${WHITE}Выберите регион WARP (или Enter для автовыбора):${NC}"
+    echo -ne "  ${YELLOW}[r]${NC} Выбрать регион с пингом  ${YELLOW}[Enter]${NC} Авто: "
+    read -r _region_choice < /dev/tty
+    if [[ "$_region_choice" =~ ^[rRrR]$ ]]; then
+        _awg_select_region || true
+    fi
+
     echo -e "${YELLOW}[1/4]${NC} Скачивание wgcf в контейнер..."
     _awg_install_wgcf || { read -p "Enter..."; return 1; }
     echo -e "${GREEN}  ✓ wgcf ${WGCF_VER}${NC}"
@@ -2385,6 +2579,7 @@ warp_setup_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
         echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
+        echo -e "  ${CYAN}[r]${NC}  Сменить регион / эндпоинт"
         echo -e "  ${RED}[4]${NC}  Удалить WARP"
         is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
@@ -2392,6 +2587,7 @@ warp_setup_wizard() {
         read -p "Выбор: " warp_action
         case "$warp_action" in
             1) warp_test; return ;;
+            [rRрР]) is_amnezia && _awg_change_region ;;
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
             4) # Удаление WARP
                 echo -ne "\n  ${RED}Удалить WARP полностью? (y/n): ${NC}"
