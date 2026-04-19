@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.67"
+VERSION="5.68"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2162,70 +2162,52 @@ REDSOCKS_EOF
 
 _awg_patch_start_sh() {
     local start_sh="/opt/amnezia/start.sh"
-    local iface; iface=$(_awg_iface)
     local -a selected=("$@")
 
-    # Бэкап
+    # Бэкап оригинала
     docker exec "$AWG_CONTAINER" sh -c \
-        "[ -f /opt/amnezia/start.sh.govpn-backup ] || cp '${start_sh}' /opt/amnezia/start.sh.govpn-backup" 2>/dev/null
+        "[ -f /opt/amnezia/start.sh.orig ] || cp '${start_sh}' /opt/amnezia/start.sh.orig" 2>/dev/null
 
-    # Собираем блок
-    local block="${AWG_MARKER_B}"$'\n'
-    block+="if [ -f '${AWG_WARP_CONF}' ]; then"$'\n'
-    block+="  wg-quick up '${AWG_WARP_CONF}' 2>/dev/null || true"$'\n'
-    block+="  sleep 2"$'\n'
-    block+="fi"$'\n'
+    # Читаем оригинальный start.sh (до любых GOVPN/WARP блоков)
+    local orig
+    orig=$(docker exec "$AWG_CONTAINER" sh -c \
+        "sed '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d; /# --- WARP BEGIN ---/,/# --- WARP END ---/d' '${start_sh}' 2>/dev/null" 2>/dev/null)
 
+    # Убираем tail -f /dev/null если есть (добавим в конец сами)
+    orig=$(echo "$orig" | grep -v '^tail -f /dev/null')
+
+    # Строим WARP блок
+    local warp_block="# --- GOVPN WARP BEGIN ---"$'\n'
+    warp_block+="if [ -f '${AWG_WARP_CONF}' ]; then"$'\n'
+    warp_block+="  wg-quick up '${AWG_WARP_CONF}' 2>/dev/null || true"$'\n'
+    warp_block+="  sleep 2"$'\n'
     if [ "${#selected[@]}" -gt 0 ]; then
-        # Очистка устаревших глобальных правил при старте
-        block+="iptables -t mangle -D PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true"$'\n'
-        block+="ip rule del fwmark 0x64 lookup 100 2>/dev/null || true"$'\n'
-        block+="ip rule del fwmark 100 lookup 100 2>/dev/null || true"$'\n'
-        block+="ip rule list | awk '/fwmark.*lookup 100/{print \$1}' | sed 's/://' | sort -rn | while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done"$'\n'
-        # Таблица маршрутизации
-        block+="ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
-        # Per-client правила
+        warp_block+="  ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
         local prio=100
         for ip in "${selected[@]}"; do
             local bare="${ip%/32}"
-            block+="ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true"$'\n'
-            block+="iptables -t nat -C POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
+            warp_block+="  ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true"$'\n'
+            warp_block+="  iptables -t nat -C POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
             ((prio++))
         done
     fi
-    block+="${AWG_MARKER_E}"
+    warp_block+="fi"$'\n'
+    warp_block+="# --- GOVPN WARP END ---"
 
-    # Удалить старый GOVPN блок (все варианты названий)
-    docker exec "$AWG_CONTAINER" sh -c "
-        sed -i '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d' '${start_sh}' 2>/dev/null || true
-        sed -i '/# --- WARP BEGIN ---/,/# --- WARP END ---/d' '${start_sh}' 2>/dev/null || true
-    " 2>/dev/null
+    # Записываем новый start.sh через docker cp (надёжнее чем echo внутри контейнера)
+    local new_content="${orig}"$'\n\n'"${warp_block}"$'\n\n'"tail -f /dev/null"$'\n'
+    local tmp_file; tmp_file=$(mktemp)
+    echo "$new_content" > "$tmp_file"
 
-    # Вставить ПОСЛЕ WARP-MANAGER END если есть, иначе перед tail
-    docker exec "$AWG_CONTAINER" bash -c "
-tmpf=\$(mktemp)
-if grep -qF '# --- WARP-MANAGER END ---' '${start_sh}'; then
-    while IFS= read -r line; do
-        echo \"\$line\"
-        if echo \"\$line\" | grep -qF '# --- WARP-MANAGER END ---'; then
-            printf '%s\n' '${block}'
-        fi
-    done < '${start_sh}' > \"\$tmpf\"
-elif grep -qF 'tail -f /dev/null' '${start_sh}'; then
-    while IFS= read -r line; do
-        if echo \"\$line\" | grep -qF 'tail -f /dev/null'; then
-            printf '%s\n' '${block}'
-        fi
-        echo \"\$line\"
-    done < '${start_sh}' > \"\$tmpf\"
-else
-    cp '${start_sh}' \"\$tmpf\"
-    printf '\n%s\n' '${block}' >> \"\$tmpf\"
-fi
-mv \"\$tmpf\" '${start_sh}'
-chmod +x '${start_sh}'
-" 2>/dev/null
+    # Копируем во все overlay слои
+    for f in /var/lib/docker/overlay2/*/diff/opt/amnezia/start.sh; do
+        cp "$tmp_file" "$f" && chmod +x "$f"
+    done
+    rm -f "$tmp_file"
+
+    echo -e "  ${GREEN}✓ start.sh обновлён (${#selected[@]} клиентов через WARP)${NC}"
 }
+
 
 _awg_install_warp() {
     echo -e "\n${CYAN}[Amnezia] Установка WARP в контейнер ${AWG_CONTAINER}...${NC}\n"
