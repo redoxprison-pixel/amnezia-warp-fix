@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.70"
+VERSION="5.71"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2092,22 +2092,40 @@ _awg_apply_rules() {
         return 1
     fi
 
-    # fwmark маршрутизация — весь трафик через awg0 → warp
+    # Получаем всех клиентов чтобы найти исключённых
+    local -a all_ips=()
+    while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
+
+    # fwmark маршрутизация
     docker exec "$AWG_CONTAINER" sh -c "
-        ip route add default dev warp table 100 2>/dev/null || \
-            ip route replace default dev warp table 100 2>/dev/null || true
-        iptables -t mangle -C PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || \
-            iptables -t mangle -A PREROUTING -i ${iface} -j MARK --set-mark 100
+        ip route add default dev warp table 100 2>/dev/null ||             ip route replace default dev warp table 100 2>/dev/null || true
         ip rule add fwmark 100 table 100 priority 100 2>/dev/null || true
-        iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || \
-            iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
-        iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN \
-            -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-        iptables -t mangle -A FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN \
-            -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null ||             iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE 2>/dev/null || true
+        iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN             -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null ||         iptables -t mangle -A FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN             -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     " 2>/dev/null
 
-    echo -e "  ${GREEN}✓ WARP маршрутизация (fwmark) для ${#selected[@]} клиентов${NC}"
+    # Сначала сбрасываем цепочку AWG_WARP
+    docker exec "$AWG_CONTAINER" sh -c "
+        iptables -t mangle -F AWG_WARP 2>/dev/null || true
+        iptables -t mangle -N AWG_WARP 2>/dev/null || true
+        iptables -t mangle -D PREROUTING -i ${iface} -j AWG_WARP 2>/dev/null || true
+        iptables -t mangle -I PREROUTING 1 -i ${iface} -j AWG_WARP
+    " 2>/dev/null
+
+    # Добавляем RETURN для исключённых клиентов (не в списке selected)
+    for ip in "${all_ips[@]}"; do
+        local in_sel=0
+        for s in "${selected[@]}"; do [ "$s" = "$ip" ] && in_sel=1 && break; done
+        if [ "$in_sel" -eq 0 ]; then
+            local bare="${ip%/32}"
+            docker exec "$AWG_CONTAINER" sh -c                 "iptables -t mangle -A AWG_WARP -s ${bare} -j RETURN" 2>/dev/null
+        fi
+    done
+
+    # Для включённых — ставим MARK
+    docker exec "$AWG_CONTAINER" sh -c         "iptables -t mangle -A AWG_WARP -j MARK --set-mark 100" 2>/dev/null
+
+    echo -e "  ${GREEN}✓ WARP маршрутизация для ${#selected[@]} из ${#all_ips[@]} клиентов${NC}"
 }
 
 
@@ -2191,11 +2209,29 @@ _awg_patch_start_sh() {
     warp_block+="  wg-quick up '${AWG_WARP_CONF}' 2>/dev/null || true"$'\n'
     warp_block+="  sleep 2"$'\n'
     if [ "${#selected[@]}" -gt 0 ]; then
+        # Получаем всех клиентов для определения исключённых
+        local -a all_for_patch=()
+        while IFS= read -r ip; do [ -n "$ip" ] && all_for_patch+=("$ip"); done <<< "$(_awg_all_clients)"
+
         warp_block+="  ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
-        warp_block+="  iptables -t mangle -C PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || iptables -t mangle -A PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true"$'\n'
         warp_block+="  ip rule add fwmark 100 table 100 priority 100 2>/dev/null || true"$'\n'
         warp_block+="  iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
         warp_block+="  iptables -t mangle -A FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"$'\n'
+        # Создаём цепочку AWG_WARP с исключениями
+        warp_block+="  iptables -t mangle -F AWG_WARP 2>/dev/null || true"$'\n'
+        warp_block+="  iptables -t mangle -N AWG_WARP 2>/dev/null || true"$'\n'
+        warp_block+="  iptables -t mangle -D PREROUTING -i ${iface} -j AWG_WARP 2>/dev/null || true"$'\n'
+        warp_block+="  iptables -t mangle -I PREROUTING 1 -i ${iface} -j AWG_WARP"$'\n'
+        # RETURN для исключённых
+        for ip in "${all_for_patch[@]}"; do
+            local in_sel=0
+            for s in "${selected[@]}"; do [ "$s" = "$ip" ] && in_sel=1 && break; done
+            if [ "$in_sel" -eq 0 ]; then
+                local bare="${ip%/32}"
+                warp_block+="  iptables -t mangle -A AWG_WARP -s ${bare} -j RETURN"$'\n'
+            fi
+        done
+        warp_block+="  iptables -t mangle -A AWG_WARP -j MARK --set-mark 100"$'\n'
     fi
     warp_block+="fi"$'\n'
     warp_block+="# --- GOVPN WARP END ---"
