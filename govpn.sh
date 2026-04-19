@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.69"
+VERSION="5.70"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2071,38 +2071,45 @@ _awg_cleanup_legacy() {
 _awg_apply_rules() {
     local -a selected=("$@")
     local iface; iface=$(_awg_iface)
-    local WARP_SOCKS="127.0.0.1:40000"  # warp-cli socks proxy
 
-    # Очищаем старые правила
+    # Полная очистка старых правил
     docker exec "$AWG_CONTAINER" sh -c "
-        iptables -t nat -F WARP_OUT 2>/dev/null || true
-        iptables -t nat -D PREROUTING -i ${iface} -j WARP_OUT 2>/dev/null || true
-        iptables -t nat -X WARP_OUT 2>/dev/null || true
-        ip rule list | awk '/lookup 100/{print \$1}' | sed 's/://' | sort -rn |             while read -r pr; do ip rule del priority "\$pr" 2>/dev/null || true; done
+        ip rule del fwmark 100 table 100 2>/dev/null || true
+        ip rule del fwmark 0x64 table 100 2>/dev/null || true
+        iptables -t mangle -D PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true
+        ip rule list | grep 'lookup 100' | awk '{print \$1}' | sed 's/://' | sort -rn | \
+            while read -r pr; do ip rule del priority \"\$pr\" 2>/dev/null || true; done
+        iptables -t nat -S POSTROUTING 2>/dev/null | grep ' warp ' | \
+            sed 's/^-A /-D /' | while read -r r; do iptables -t nat \$r 2>/dev/null || true; done
         ip route flush table 100 2>/dev/null || true
     " > /dev/null 2>&1
 
     [ "${#selected[@]}" -eq 0 ] && return 0
 
-    # Определяем метод: есть warp интерфейс на хосте или только socks прокси?
-    if ip link show warp &>/dev/null 2>&1; then
-        # Старый метод: warp интерфейс (WireGuard режим)
-        docker exec "$AWG_CONTAINER" sh -c             "ip route add default dev warp table 100 2>/dev/null || true"
-        local prio=100
-        for ip in "${selected[@]}"; do
-            local bare="${ip%/32}"
-            docker exec "$AWG_CONTAINER" sh -c "
-                ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true
-                iptables -t nat -A POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true
-            " > /dev/null 2>&1
-            ((prio++))
-        done
-    else
-        # MASQUE режим: WARP работает как socks5 на хосте
-        # Используем redsocks для прозрачного проксирования
-        _awg_setup_redsocks "$WARP_SOCKS" "${selected[@]}"
+    # Проверяем warp интерфейс внутри контейнера
+    if ! docker exec "$AWG_CONTAINER" sh -c "ip link show warp > /dev/null 2>&1"; then
+        echo -e "  ${RED}✗ warp интерфейс не найден в контейнере${NC}"
+        return 1
     fi
+
+    # fwmark маршрутизация — весь трафик через awg0 → warp
+    docker exec "$AWG_CONTAINER" sh -c "
+        ip route add default dev warp table 100 2>/dev/null || \
+            ip route replace default dev warp table 100 2>/dev/null || true
+        iptables -t mangle -C PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || \
+            iptables -t mangle -A PREROUTING -i ${iface} -j MARK --set-mark 100
+        ip rule add fwmark 100 table 100 priority 100 2>/dev/null || true
+        iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
+        iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN \
+            -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+        iptables -t mangle -A FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN \
+            -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    " 2>/dev/null
+
+    echo -e "  ${GREEN}✓ WARP маршрутизация (fwmark) для ${#selected[@]} клиентов${NC}"
 }
+
 
 _awg_setup_redsocks() {
     local warp_socks="$1"; shift
@@ -2176,20 +2183,19 @@ _awg_patch_start_sh() {
     # Убираем tail -f /dev/null если есть (добавим в конец сами)
     orig=$(echo "$orig" | grep -v '^tail -f /dev/null')
 
-    # Строим WARP блок
+    local iface; iface=$(_awg_iface)
+
+    # Строим WARP блок с fwmark маршрутизацией
     local warp_block="# --- GOVPN WARP BEGIN ---"$'\n'
     warp_block+="if [ -f '${AWG_WARP_CONF}' ]; then"$'\n'
     warp_block+="  wg-quick up '${AWG_WARP_CONF}' 2>/dev/null || true"$'\n'
     warp_block+="  sleep 2"$'\n'
     if [ "${#selected[@]}" -gt 0 ]; then
         warp_block+="  ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
-        local prio=100
-        for ip in "${selected[@]}"; do
-            local bare="${ip%/32}"
-            warp_block+="  ip rule add from ${bare} table 100 priority ${prio} 2>/dev/null || true"$'\n'
-            warp_block+="  iptables -t nat -C POSTROUTING -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -s ${bare}/32 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
-            ((prio++))
-        done
+        warp_block+="  iptables -t mangle -C PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || iptables -t mangle -A PREROUTING -i ${iface} -j MARK --set-mark 100 2>/dev/null || true"$'\n'
+        warp_block+="  ip rule add fwmark 100 table 100 priority 100 2>/dev/null || true"$'\n'
+        warp_block+="  iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
+        warp_block+="  iptables -t mangle -A FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"$'\n'
     fi
     warp_block+="fi"$'\n'
     warp_block+="# --- GOVPN WARP END ---"
