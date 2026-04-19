@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.71"
+VERSION="5.72"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -215,18 +215,6 @@ is_hysteria2() { [ "$HY2_RUNNING" -eq 1 ]; }
 #  МОНИТОРИНГ — системные метрики для шапки
 # ═══════════════════════════════════════════════════════════════
 
-_fmt_bytes() {
-    local b=$1
-    if (( b >= 1073741824 )); then
-        printf "%.1fG" "$(echo "scale=1; $b/1073741824" | bc 2>/dev/null || echo 0)"
-    elif (( b >= 1048576 )); then
-        printf "%.1fM" "$(echo "scale=1; $b/1048576" | bc 2>/dev/null || echo 0)"
-    elif (( b >= 1024 )); then
-        printf "%.0fK" "$(echo "scale=0; $b/1024" | bc 2>/dev/null || echo 0)"
-    else
-        printf "%dB" "$b"
-    fi
-}
 
 get_sys_stats() {
     local cpu_line1 cpu_line2
@@ -595,7 +583,6 @@ PYEOF
 }
 
 
-
 # Парсит клиентов
 _3xui_parse_clients() {
     local cookie="$1"
@@ -742,11 +729,6 @@ _3xui_update_client_field() {
     [ "$fail" -gt 0 ] && echo -e "  ${RED}✗ Не удалось: ${fail} протокол(ов)${NC}"
     read -p "  Enter..." < /dev/tty
 }
-
-
-
-
-
 
 
 # Добавить нового клиента
@@ -1741,13 +1723,6 @@ for ib in d.get('obj',[]):
         esac
     done
 }
-
-
-
-
-
-
-
 
 
 _3xui_warp_running() {
@@ -4611,7 +4586,6 @@ install_wizard() {
 }
 
 
-
 #  ДОМЕНЫ И SSL
 # ═══════════════════════════════════════════════════════════════
 
@@ -4922,7 +4896,7 @@ domain_menu() {
         case "$ch" in
             1|2)
                 echo -ne "\n  Введите домен (например vpn.example.com): "
-                read -r domain
+                read -r domain < /dev/tty
                 [ -z "$domain" ] && continue
                 # Предупреждение о клиентах
                 local old_domain
@@ -5303,7 +5277,7 @@ _backups_menu() {
                     read -p "  Enter..."; continue
                 fi
                 echo -ne "\n  Номер бэкапа для восстановления: "
-                read -r ch2
+                read -r ch2 < /dev/tty
                 [[ "$ch2" =~ ^[0-9]+$ ]] && (( ch2 >= 1 && ch2 <= ${#bak_arr[@]} )) || continue
                 local chosen="${bak_arr[$((ch2-1))]}"
                 echo ""
@@ -5659,7 +5633,7 @@ cmd_update() {
         if [ "$yes" -eq 1 ]; then
             echo "n"; rm -f "$tmp"; return 0
         fi
-        read -r ans
+        read -r ans < /dev/tty
         if [[ "$ans" != "y" ]]; then
             rm -f "$tmp"; return 0
         fi
@@ -5671,7 +5645,7 @@ cmd_update() {
         echo -e "  ${YELLOW}⚠ Версия в репо (v${new_ver}) старее текущей (v${VERSION})${NC}"
         echo -ne "  Продолжить? (y/n): "
         [ "$yes" -eq 1 ] && echo "n" && rm -f "$tmp" && return 0
-        read -r ans
+        read -r ans < /dev/tty
         [[ "$ans" != "y" ]] && rm -f "$tmp" && return 0
     fi
 
