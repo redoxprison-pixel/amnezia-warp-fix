@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.73"
+VERSION="5.74"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2014,35 +2014,28 @@ WARP_REGION_ORDER=(
 
 _awg_ping_endpoint() {
     local host="${1%%:*}"
-    local port="${1##*:}"
-    # UDP пинг через nc или python3
-    python3 -c "
-import socket, time, sys
-host, port = '$host', int('$port')
-results = []
-for _ in range(3):
+    # ICMP ping - самый надёжный метод
+    local ms
+    ms=$(ping -c 2 -W 2 -q "$host" 2>/dev/null |         awk '/^rtt/{split($4,a,"/"); printf "%d", a[2]}')
+    if [ -n "$ms" ] && [ "$ms" -gt 0 ] 2>/dev/null; then
+        echo "$ms"
+    else
+        # Fallback: TCP на порт 80 или 443
+        ms=$(python3 -c "
+import socket, time
+for port in [80, 443]:
     try:
         t = time.time()
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1.5)
-        s.sendto(b'x', (host, port))
-        try: s.recv(1)
-        except: pass
-        results.append(int((time.time()-t)*1000))
-        s.close()
-    except: pass
-if results:
-    print(min(results))
-else:
-    # fallback TCP
-    try:
-        t = time.time()
-        s = socket.create_connection((host, 443), timeout=2)
+        s = socket.create_connection(('$host', port), timeout=2)
         s.close()
         print(int((time.time()-t)*1000))
-    except:
-        print(9999)
-" 2>/dev/null || echo 9999
+        break
+    except: pass
+else:
+    print(9999)
+" 2>/dev/null || echo 9999)
+        echo "$ms"
+    fi
 }
 
 _awg_select_region() {
@@ -2055,8 +2048,6 @@ _awg_select_region() {
     local i=1
     for region in "${WARP_REGION_ORDER[@]}"; do
         local endpoint="${WARP_REGIONS[$region]}"
-        local host="${endpoint%%:*}"
-        echo -ne "  ${WHITE}[${i}]${NC} ${WHITE}${region}${NC}  "
         local ms
         if [ "$region" = "Авто" ]; then
             ms=0
@@ -2064,17 +2055,20 @@ _awg_select_region() {
             ms=$(_awg_ping_endpoint "$endpoint")
         fi
         pings+=("$ms")
+        local ping_str ms_color
         if [ "$ms" -eq 9999 ]; then
-            echo -e "${RED}недоступен${NC}"
+            ping_str="недоступен"; ms_color="${RED}"
         elif [ "$ms" -eq 0 ]; then
-            echo -e "${CYAN}авто${NC}"
+            ping_str="авто"; ms_color="${CYAN}"
         elif [ "$ms" -lt 80 ]; then
-            echo -e "${GREEN}${ms}ms${NC}"
+            ping_str="${ms}ms"; ms_color="${GREEN}"
         elif [ "$ms" -lt 150 ]; then
-            echo -e "${YELLOW}${ms}ms${NC}"
+            ping_str="${ms}ms"; ms_color="${YELLOW}"
         else
-            echo -e "${RED}${ms}ms${NC}"
+            ping_str="${ms}ms"; ms_color="${RED}"
         fi
+        printf "  ${YELLOW}[%-2d]${NC}  %-28s  %b%s${NC}
+"             "$i" "$region" "$ms_color" "$ping_str"
         (( i++ ))
     done
 
@@ -2415,13 +2409,8 @@ _awg_install_warp() {
 
     # Выбор региона перед установкой
     WARP_SELECTED_REGION="Авто"
-    WARP_SELECTED_ENDPOINT="${WARP_REGIONS[Авто]}"
-    echo -e "  ${WHITE}Выберите регион WARP (или Enter для автовыбора):${NC}"
-    echo -ne "  ${YELLOW}[r]${NC} Выбрать регион с пингом  ${YELLOW}[Enter]${NC} Авто: "
-    read -r _region_choice < /dev/tty
-    if [[ "$_region_choice" =~ ^[rRrR]$ ]]; then
-        _awg_select_region || true
-    fi
+    WARP_SELECTED_ENDPOINT="${WARP_REGIONS[Авто]:-engage.cloudflareclient.com:2408}"
+    _awg_select_region || true
 
     echo -e "${YELLOW}[1/4]${NC} Скачивание wgcf в контейнер..."
     _awg_install_wgcf || { read -p "Enter..."; return 1; }
