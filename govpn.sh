@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.68"
+VERSION="5.69"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -7128,7 +7128,12 @@ show_menu() {
         case "$ch" in
             1) ! is_bridge && warp_setup_wizard ;;
             2) ! is_bridge && warp_test ;;
-            3) is_3xui && _3xui_clients_menu ;;
+            3)
+                if is_amnezia && ! is_3xui; then
+                    awg_clients_menu
+                elif is_3xui; then
+                    _3xui_clients_menu
+                fi ;;
             4) is_amnezia && awg_peers_menu ;;
             5) mtproto_menu ;;
             6) iptables_menu ;;
