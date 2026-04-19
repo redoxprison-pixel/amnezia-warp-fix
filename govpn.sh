@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.74"
+VERSION="5.75"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2135,6 +2135,11 @@ _awg_change_region() {
     " 2>/dev/null
     sleep 3
 
+    # Восстанавливаем маршрут в таблице 100 (он исчезает при перезапуске туннеля)
+    docker exec "$AWG_CONTAINER" sh -c "
+        ip route add default dev warp table 100 2>/dev/null ||         ip route replace default dev warp table 100 2>/dev/null || true
+    " 2>/dev/null
+
     # Проверяем новый IP
     local new_ip; new_ip=$(_awg_warp_ip)
     if [ -n "$new_ip" ]; then
@@ -2248,6 +2253,12 @@ _awg_apply_rules() {
     # Получаем всех клиентов чтобы найти исключённых
     local -a all_ips=()
     while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
+
+    # Убеждаемся что warp интерфейс поднят
+    if ! docker exec "$AWG_CONTAINER" sh -c "ip link show warp > /dev/null 2>&1" 2>/dev/null; then
+        docker exec "$AWG_CONTAINER" sh -c             "wg-quick up '${AWG_WARP_CONF}' 2>/dev/null || true" 2>/dev/null
+        sleep 2
+    fi
 
     # fwmark маршрутизация
     docker exec "$AWG_CONTAINER" sh -c "
@@ -2367,6 +2378,7 @@ _awg_patch_start_sh() {
         while IFS= read -r ip; do [ -n "$ip" ] && all_for_patch+=("$ip"); done <<< "$(_awg_all_clients)"
 
         warp_block+="  ip route add default dev warp table 100 2>/dev/null || ip route replace default dev warp table 100 2>/dev/null || true"$'\n'
+        warp_block+="  sleep 1"$'\n'
         warp_block+="  ip rule add fwmark 100 table 100 priority 100 2>/dev/null || true"$'\n'
         warp_block+="  iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE 2>/dev/null || true"$'\n'
         warp_block+="  iptables -t mangle -A FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"$'\n'
