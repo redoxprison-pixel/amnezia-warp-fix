@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.90"
+VERSION="5.91"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -4599,6 +4599,76 @@ EOF
 
 # Установка 3X-UI
 # Установка/обновление roscomvpn geoip+geosite для 3X-UI
+_3xui_geo_menu() {
+    local xray_dir="/usr/local/x-ui/bin"
+    [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ GeoIP / GeoSite (roscomvpn) ━━━${NC}\n"
+
+        # Статус файлов
+        local geo_ok=0
+        if [ -f "${xray_dir}/geoip.dat" ] && [ -f "${xray_dir}/geosite.dat" ]; then
+            local gip_date; gip_date=$(date -r "${xray_dir}/geoip.dat" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "?")
+            local gst_date; gst_date=$(date -r "${xray_dir}/geosite.dat" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "?")
+            echo -e "  ${GREEN}✓ roscomvpn geoip.dat${NC}   обновлён: ${CYAN}${gip_date}${NC}"
+            echo -e "  ${GREEN}✓ roscomvpn geosite.dat${NC} обновлён: ${CYAN}${gst_date}${NC}"
+            geo_ok=1
+        else
+            echo -e "  ${RED}✗ Файлы не установлены${NC}"
+        fi
+
+        echo ""
+        echo -e "  ${WHITE}Как использовать в 3X-UI панели:${NC}"
+        echo -e "  Настройки → Xray конфигурация → Routing → Добавить правило:"
+        echo -e "  ${CYAN}РФ сайты напрямую:${NC}  domain=[\"geosite:category-ru\"]  → outbound: direct"
+        echo -e "  ${CYAN}Заблокированные:${NC}    domain=[\"geosite:category-ru-blocked\"] → outbound: proxy"
+        echo ""
+        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы"
+        echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (cron)"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${RED}[3]${NC}  Удалить (вернуть стандартные файлы Cloudflare)"
+        fi
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+
+        case "$ch" in
+            1)
+                _3xui_update_geofiles ;;
+            2)
+                _3xui_setup_geo_autoupdate
+                echo -e "  ${GREEN}✓ Автообновление настроено (/etc/cron.daily/govpn-geo-update)${NC}"
+                read -p "  Enter..." < /dev/tty ;;
+            3)
+                if [ "$geo_ok" -eq 1 ]; then
+                    echo -ne "\n  ${RED}Удалить roscomvpn файлы и восстановить стандартные? (y/n): ${NC}"
+                    read -r c < /dev/tty
+                    if [ "$c" = "y" ]; then
+                        # Скачиваем стандартные файлы Cloudflare/v2fly
+                        echo -e "  ${CYAN}Восстанавливаю стандартные файлы...${NC}"
+                        curl -fsSL --max-time 30 \
+                            "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" \
+                            -o "${xray_dir}/geoip.dat" 2>/dev/null && \
+                            echo -e "  ${GREEN}✓ geoip.dat${NC}" || echo -e "  ${RED}✗ geoip.dat${NC}"
+                        curl -fsSL --max-time 30 \
+                            "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" \
+                            -o "${xray_dir}/geosite.dat" 2>/dev/null && \
+                            echo -e "  ${GREEN}✓ geosite.dat${NC}" || echo -e "  ${RED}✗ geosite.dat${NC}"
+                        # Удаляем автообновление
+                        rm -f /etc/cron.daily/govpn-geo-update
+                        systemctl restart x-ui > /dev/null 2>&1
+                        echo -e "  ${GREEN}✓ Восстановлено, xray перезапущен${NC}"
+                        log_action "3XUI: geofiles восстановлены (стандартные)"
+                    fi
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 _3xui_update_geofiles() {
     echo -e "\n${CYAN}━━━ Обновление GeoIP / GeoSite (roscomvpn) ━━━${NC}\n"
     local xray_dir="/usr/local/x-ui/bin"
@@ -5074,7 +5144,7 @@ install_wizard() {
 
         echo -e "  ${YELLOW}[1]${NC}  AmneziaWG (Docker)     ${status_awg}"
         echo -e "  ${YELLOW}[2]${NC}  3X-UI / 3X-UI Pro      ${status_xui}"
-        is_3xui && echo -e "  ${CYAN}[g]${NC}  Обновить GeoIP/GeoSite (roscomvpn)"
+        is_3xui && echo -e "  ${YELLOW}[3]${NC}  GeoIP/GeoSite (roscomvpn)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -5082,7 +5152,7 @@ install_wizard() {
         case "$ch" in
             1) _install_amnezia_awg ;;
             2) _install_3xui ;;
-            [gGгГ]) _3xui_update_geofiles; _3xui_setup_geo_autoupdate ;;
+            3) is_3xui && _3xui_geo_menu ;;
             0|"") return ;;
         esac
     done
