@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.86"
+VERSION="5.87"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -119,8 +119,13 @@ ru_to_en() {
 read_choice() {
     local prompt="${1:-Выбор: }"
     local ch
-    read -p "$prompt" ch
-    ru_to_en "$ch"
+    read -p "$prompt" ch < /dev/tty
+    # Если латиница или цифра — возвращаем как есть
+    if [[ "$ch" =~ ^[a-zA-Z0-9+/\.,-]$ ]]; then
+        echo "$ch"
+    else
+        ru_to_en "$ch"
+    fi
 }
 
 prepare_system() {
@@ -1181,14 +1186,21 @@ PYEOF
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
 
         case "$ch" in
-            [rRрР])
+            [rR])
                 command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
-                echo -e "\n  ${WHITE}Шаг 1:${NC} Добавь подписку (QR выше)"
-                echo -e "  ${WHITE}Шаг 2:${NC} Настрой маршрутизацию roscomvpn — отсканируй:"
+                clear
+                echo -e "\n${CYAN}━━━ Настройка Happ / INCY (roscomvpn) ━━━${NC}\n"
+                echo -e "  ${WHITE}Шаг 1:${NC} Отсканируй QR подписки (п.[1]) и добавь в Happ"
+                echo -e "  ${WHITE}Шаг 2:${NC} Добавь маршрутизацию roscomvpn — отсканируй QR ниже:"
                 echo ""
                 echo "https://routing.help" | qrencode -t ANSIUTF8 2>/dev/null
-                echo -e "  ${CYAN}https://routing.help${NC}"
-                echo -e "  ${WHITE}Результат:${NC} РФ/РБ сайты напрямую, заблокированные через VPN"
+                echo -e "\n  ${CYAN}https://routing.help${NC}"
+                echo -e "\n  ${WHITE}Что получишь:${NC}"
+                echo -e "  ${GREEN}✓${NC} РФ/РБ сайты — напрямую (без VPN)"
+                echo -e "  ${GREEN}✓${NC} Заблокированные (YouTube, Instagram) — через VPN"
+                echo -e "  ${GREEN}✓${NC} Реклама — заблокирована"
+                echo -e "  ${GREEN}✓${NC} Автообновление правил"
+                echo ""
                 read -p "  Enter..." < /dev/tty ;;
             1)
                 command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
