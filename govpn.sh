@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.76"
+VERSION="5.77"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2455,6 +2455,68 @@ _awg_warp_status() {
 #  МАСТЕР НАСТРОЙКИ WARP
 # ═══════════════════════════════════════════════════════════════
 
+_3xui_warp_change_region() {
+    clear
+    echo -e "\n${CYAN}━━━ Смена региона WARP (warp-cli) ━━━${NC}\n"
+
+    if ! command -v warp-cli &>/dev/null; then
+        echo -e "  ${RED}✗ warp-cli не установлен${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    # Получаем список доступных локаций
+    echo -e "  ${YELLOW}Загружаю список локаций...${NC}"
+    local locations
+    locations=$(warp-cli tunnel stats 2>/dev/null | head -3)
+    echo -e "  ${WHITE}Текущее состояние:${NC}"
+    echo "$locations" | while read -r l; do echo "    $l"; done
+    echo ""
+
+    # warp-cli поддерживает выбор региона через set-custom-endpoint
+    # Но проще использовать встроенные локации
+    echo -e "  ${WHITE}Доступные методы смены региона:${NC}\n"
+    echo -e "  ${YELLOW}[1]${NC}  Авто (ближайший Cloudflare DC)"
+    echo -e "  ${YELLOW}[2]${NC}  Указать свой IP:порт эндпоинта"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+
+    # Показываем текущий IP через WARP
+    local cur_ip; cur_ip=$(_3xui_warp_ip)
+    [ -n "$cur_ip" ] && echo -e "  ${WHITE}Текущий WARP IP:${NC} ${GREEN}${cur_ip}${NC}\n"
+
+    read -p "  Выбор: " reg_ch < /dev/tty
+
+    case "$reg_ch" in
+        1)
+            warp-cli disconnect 2>/dev/null
+            sleep 1
+            warp-cli connect 2>/dev/null
+            sleep 3
+            local new_ip; new_ip=$(_3xui_warp_ip)
+            echo -e "  ${GREEN}✓ Переподключено${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
+            log_action "WARP region: reconnect auto" ;;
+        2)
+            echo -e "  ${WHITE}Введите эндпоинт (IP:порт, например 162.159.192.1:2408):${NC}"
+            read -r custom_ep < /dev/tty
+            if [[ "$custom_ep" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+                warp-cli set-custom-endpoint "$custom_ep" 2>/dev/null && {
+                    warp-cli disconnect 2>/dev/null
+                    sleep 1
+                    warp-cli connect 2>/dev/null
+                    sleep 3
+                    local new_ip; new_ip=$(_3xui_warp_ip)
+                    echo -e "  ${GREEN}✓ Эндпоинт: ${custom_ep}${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
+                    log_action "WARP region: custom endpoint ${custom_ep}"
+                } || echo -e "  ${RED}✗ Не удалось установить эндпоинт${NC}"
+            else
+                echo -e "  ${RED}✗ Неверный формат. Используйте IP:порт${NC}"
+            fi ;;
+        0|"") return ;;
+    esac
+    echo ""
+    read -p "  Enter..." < /dev/tty
+}
+
 _3xui_warp_instruction() {
     clear
     local socks_port="${WARP_SOCKS_PORT:-40000}"
@@ -2551,6 +2613,7 @@ warp_setup_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
         echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
+        is_3xui && [ "$xui_running" -eq 1 ] &&             echo -e "  ${CYAN}[r]${NC}  Сменить регион WARP (через warp-cli)"
         echo -e "  ${RED}[4]${NC}  Удалить WARP"
         is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
@@ -2558,6 +2621,7 @@ warp_setup_wizard() {
         read -p "Выбор: " warp_action
         case "$warp_action" in
             1) warp_test; return ;;
+            [rRрР]) is_3xui && _3xui_warp_change_region ;;
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
             4) # Удаление WARP
                 echo -ne "\n  ${RED}Удалить WARP полностью? (y/n): ${NC}"
@@ -6719,18 +6783,32 @@ _mtg_ping_domain() {
 }
 
 _mtg_detect_country() {
-    local geo
+    local geo cc country city
+    # Пробуем несколько источников
     geo=$(curl -s --max-time 5 "http://ip-api.com/json/${MY_IP}?fields=country,countryCode,city" 2>/dev/null)
-    local country city cc
-    country=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
-    city=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
-    cc=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('countryCode',''))" 2>/dev/null)
-    echo "${cc}|${country}|${city}"
+    if [ -n "$geo" ]; then
+        country=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+        city=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
+        cc=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('countryCode',''))" 2>/dev/null)
+    fi
+    # Fallback через ipinfo.io
+    if [ -z "$cc" ]; then
+        geo=$(curl -s --max-time 5 "https://ipinfo.io/${MY_IP}/json" 2>/dev/null)
+        country=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('country',''))" 2>/dev/null)
+        city=$(echo "$geo" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('city',''))" 2>/dev/null)
+        cc="$country"
+    fi
+    echo "${cc:-??}|${country:-Unknown}|${city:-}"
 }
 
 _mtg_check_port() {
     local port="$1"
-    ss -tlnup 2>/dev/null | grep -q ":${port} " && return 1 || return 0
+    ss -tlnup 2>/dev/null | grep -q ":${port}[[:space:]]" && return 1 || return 0
+}
+
+_mtg_port_process() {
+    local port="$1"
+    ss -tlnup 2>/dev/null | grep ":${port}[[:space:]]" |         grep -oP '(?<=users:\(\(")[^"]+' | head -1
 }
 
 _mtg_add() {
