@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.77"
+VERSION="5.78"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6817,6 +6817,9 @@ _mtg_add() {
 
     # Определяем страну сервера
     echo -ne "${WHITE}Определяю страну сервера...${NC} "
+    # Убеждаемся что MY_IP определён
+    [ -z "$MY_IP" ] && MY_IP=$(curl -s --max-time 5 https://api4.ipify.org 2>/dev/null)
+    [ -z "$MY_IP" ] && MY_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null)
     local geo_info; geo_info=$(_mtg_detect_country)
     local geo_cc="${geo_info%%|*}"
     local geo_rest="${geo_info#*|}"
@@ -6841,8 +6844,13 @@ _mtg_add() {
         if _mtg_check_port "$p"; then
             echo -e "  ${YELLOW}[$i]${NC} ${col}${p}${NC}  — ${note}"
         else
-            local occ; occ=$(ss -tlnup 2>/dev/null | grep ":${p} " | sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
-            echo -e "  ${YELLOW}[$i]${NC} ${RED}${p}${NC}  — ${RED}занят (${occ})${NC}"
+            local occ; occ=$(ss -tlnup 2>/dev/null | grep ":${p}[[:space:]]" |                 sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
+            # nginx/certbot не конфликт — MTProto на другом порту
+            if [[ "$occ" =~ ^(nginx|certbot)$ ]]; then
+                echo -e "  ${YELLOW}[$i]${NC} ${YELLOW}${p}${NC}  — ${YELLOW}занят (${occ}) — можно использовать с осторожностью${NC}"
+            else
+                echo -e "  ${YELLOW}[$i]${NC} ${RED}${p}${NC}  — ${RED}занят (${occ})${NC}"
+            fi
         fi
         ((i++))
     done
@@ -6867,7 +6875,7 @@ _mtg_add() {
 
     # Предупреждение если порт занят
     if ! _mtg_check_port "$chosen_port"; then
-        local occ; occ=$(ss -tlnup 2>/dev/null | grep ":${chosen_port} " | sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
+        local occ; occ=$(ss -tlnup 2>/dev/null | grep ":${chosen_port}[[:space:]]" |             sed 's/.*users:(("//' | cut -d'"' -f1 | head -1)
         echo -e "\n${RED}  ⚠ Порт ${chosen_port} занят процессом: ${occ}${NC}"
         echo -e "${WHITE}  Это может вызвать конфликт. Продолжить всё равно? (y/n):${NC}"
         read -p "  > " force_port
