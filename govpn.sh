@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.87"
+VERSION="5.88"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2854,7 +2854,7 @@ warp_setup_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить ключ (новый аккаунт WARP)"
         echo -e "  ${YELLOW}[3]${NC}  Переустановить полностью"
-        is_3xui && [ "$xui_running" -eq 1 ] &&             echo -e "  ${CYAN}[r]${NC}  Сменить регион WARP (через warp-cli)"
+        is_3xui && [ "$xui_running" -eq 1 ] &&             echo -e "  ${CYAN}[r]${NC}  Переподключить WARP (обновить датацентр)"
         echo -e "  ${RED}[4]${NC}  Удалить WARP"
         is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
@@ -2862,7 +2862,16 @@ warp_setup_wizard() {
         read -p "Выбор: " warp_action
         case "$warp_action" in
             1) warp_test; return ;;
-            [rRрР]) is_3xui && _3xui_warp_change_region ;;
+            [rRрР])
+                if is_3xui; then
+                    echo -e "  ${CYAN}↻ Переподключаю WARP...${NC}"
+                    warp-cli disconnect 2>/dev/null; sleep 2; warp-cli connect 2>/dev/null
+                    sleep 6
+                    local new_ip; new_ip=$(_3xui_warp_ip)
+                    local new_colo; new_colo=$(warp-cli tunnel stats 2>/dev/null | grep Colo | awk '{print $2}')
+                    echo -e "  ${GREEN}✓ ${new_colo:-?}  IP: ${new_ip:-?}${NC}"
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
             4) # Удаление WARP
                 echo -ne "\n  ${RED}Удалить WARP полностью? (y/n): ${NC}"
