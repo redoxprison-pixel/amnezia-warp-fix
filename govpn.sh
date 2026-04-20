@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.84"
+VERSION="5.85"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2542,13 +2542,24 @@ _3xui_warp_change_region() {
     echo -e "  ${WHITE}Эндпоинт:${NC} ${CYAN}${cur_ep:-?}${NC}\n"
 
     # Тестируем задержку до каждого эндпоинта
+    local has_ipv6=0
+    ip -6 addr show 2>/dev/null | grep -q "scope global" && has_ipv6=1
+    [ "$has_ipv6" -eq 0 ] &&         echo -e "  ${YELLOW}⚠ IPv6 недоступен — NAT64 опции скрыты${NC}\n" ||         echo -e "  ${GREEN}✓ IPv6 доступен — NAT64 опции активны${NC}\n"
     echo -e "  ${YELLOW}Тестирую задержку...${NC}\n"
+
     local i=1
     for colo in "${WARP_COLO_ORDER[@]}"; do
+        # Скрываем NAT64 если нет IPv6
+        if [[ "$colo" == *"[NAT64]"* ]]; then
+            [ "$has_ipv6" -eq 0 ] && continue
+            # NAT64 — не пингуем IPv6, просто показываем
+            printf "  ${CYAN}[%-2d]${NC}  %-32s  %b(NAT64 — через IPv6)${NC}\n"                 "$i" "$colo" "${CYAN}"
+            (( i++ ))
+            continue
+        fi
         local ep="${WARP_COLO_ENDPOINTS[$colo]}"
         local host="${ep%%:*}"
-        local ms
-        ms=$(ping -c 2 -W 2 -q "$host" 2>/dev/null |             awk '/^rtt/{split($4,a,"/"); printf "%d", a[2]}')
+        local ms; ms=$(_awg_ping_endpoint "$ep")
         [ -z "$ms" ] && ms=9999
         local ms_color
         if [ "$ms" -lt 50 ]; then ms_color="${GREEN}"
@@ -2563,9 +2574,16 @@ _3xui_warp_change_region() {
     echo ""
     echo -e "  ${YELLOW}[$i]${NC}  Авто (сбросить)"
     echo -e "  ${CYAN}[s]${NC}  Найти лучший IP (Cloudflare Scanner)"
-    echo -e "  ${CYAN}[n]${NC}  Конвертировать IPv4 → NAT64 (ввести свой IP)"
+    # NAT64 только если есть глобальный IPv6
+    local has_ipv6=0
+    ip -6 addr show 2>/dev/null | grep -q "scope global" && has_ipv6=1
+    if [ "$has_ipv6" -eq 1 ]; then
+        echo -e "  ${CYAN}[n]${NC}  Конвертировать IPv4 → NAT64 (смена страны)"
+        echo -e "  ${WHITE}[NAT64] меняет страну определения, [IPv4] меняет датацентр${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ NAT64 недоступен (нет IPv6 на сервере)${NC}"
+    fi
     echo -e "  ${YELLOW}[0]${NC}  Назад"
-    echo -e "  ${WHITE}NAT64 [NAT64] меняет страну определения, IPv4 меняет датацентр${NC}"
     echo ""
     read -p "  Выбор: " reg_ch < /dev/tty
     [ "$reg_ch" = "0" ] || [ -z "$reg_ch" ] && return
@@ -2623,6 +2641,10 @@ print('[${nat64_prefix}' + hex_ip + ']:2408')
     elif [[ "$reg_ch" =~ ^[0-9]+$ ]] && (( reg_ch >= 1 && reg_ch <= ${#WARP_COLO_ORDER[@]} )); then
         chosen_colo="${WARP_COLO_ORDER[$((reg_ch-1))]}"
         chosen_ep="${WARP_COLO_ENDPOINTS[$chosen_colo]}"
+        if [[ "$chosen_colo" == *"[NAT64]"* ]] && [ "$has_ipv6" -eq 0 ]; then
+            echo -e "  ${RED}✗ NAT64 требует IPv6. На этом сервере IPv6 недоступен.${NC}"
+            read -p "  Enter..." < /dev/tty; return
+        fi
         echo -e "\n  ${YELLOW}Применяю: ${chosen_colo}...${NC}"
     elif (( reg_ch == i )); then
         echo -e "\n  ${YELLOW}Сбрасываю на авто...${NC}"
