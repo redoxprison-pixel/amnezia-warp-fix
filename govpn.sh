@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.79"
+VERSION="5.80"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1758,30 +1758,49 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
         echo -e "${GREEN}  ✓ $(warp-cli --version 2>/dev/null)${NC}"
     fi
 
-    echo -e "${YELLOW}[2/3]${NC} Проверка API и регистрация..."
-    # Проверить доступность API
-    local api_ok=0
-    curl -s --max-time 5 https://api.cloudflareclient.com/v0a4005/reg > /dev/null 2>&1 && api_ok=1
+    echo -e "${YELLOW}[2/3]${NC} Регистрация и подключение..."
 
-    if [ "$api_ok" -eq 0 ]; then
-        echo -e "${RED}  ✗ Cloudflare API недоступен с этого IP (RU сервер?)${NC}"
-        echo -e "${WHITE}  WARP можно установить только на exit-ноду (не RU bridge)${NC}"
-        return 1
-    fi
+    # Если уже подключён — пропускаем
+    if _3xui_warp_running; then
+        echo -e "${GREEN}  ✓ WARP уже подключён${NC}"
+    else
+        # Сбрасываем старую регистрацию если есть
+        warp-cli registration delete > /dev/null 2>&1 || true
+        sleep 1
 
-    if ! _3xui_warp_running; then
-        warp-cli --accept-tos registration new > /dev/null 2>&1 || true
+        # Регистрируемся
+        local reg_out
+        reg_out=$(warp-cli --accept-tos registration new 2>&1)
+        if echo "$reg_out" | grep -qi "error\|fail\|unable"; then
+            echo -e "${RED}  ✗ Ошибка регистрации: $(echo "$reg_out" | head -1)${NC}"
+            echo -e "${WHITE}  Возможно API Cloudflare недоступен с этого IP${NC}"
+            return 1
+        fi
+
+        # Настраиваем режим proxy
         warp-cli --accept-tos mode proxy > /dev/null 2>&1
         warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT" > /dev/null 2>&1
+
+        # Подключаемся
         warp-cli --accept-tos connect > /dev/null 2>&1
 
         local connected=0
         for i in 1 2 3 4 5; do
             sleep 3
-            _3xui_warp_running && connected=1 && break
+            if _3xui_warp_running; then
+                connected=1; break
+            fi
             echo -e "  ${YELLOW}Ожидание... (${i}/5)${NC}"
+            # Пробуем ещё раз подключиться
+            [ "$i" -eq 3 ] && warp-cli connect > /dev/null 2>&1
         done
-        [ "$connected" -eq 0 ] && echo -e "${RED}  ✗ Не удалось подключить${NC}" && return 1
+
+        if [ "$connected" -eq 0 ]; then
+            echo -e "${RED}  ✗ Не удалось подключить${NC}"
+            echo -e "${YELLOW}  Диагностика:${NC}"
+            warp-cli status 2>&1 | head -3 | while read -r l; do echo "    $l"; done
+            return 1
+        fi
     fi
 
     local wip; wip=$(_3xui_warp_ip)
@@ -2470,6 +2489,68 @@ declare -A WARP_COLO_ENDPOINTS=(
     ["NRT — Токио (JP)"]="162.159.196.1:2408"
     ["SYD — Сидней (AU)"]="162.159.197.1:2408"
 )
+# ── Cloudflare IP Scanner ────────────────────────────────────
+_cf_scanner_install() {
+    local bin="/usr/local/bin/cfscanner"
+    [ -x "$bin" ] && return 0
+
+    echo -e "  ${CYAN}Скачиваю Cloudflare Scanner...${NC}"
+    local arch; arch=$(uname -m)
+    local cf_arch="amd64"
+    [ "$arch" = "aarch64" ] && cf_arch="arm64"
+
+    # Bia-pain-bache fork с поддержкой страны
+    local url="https://github.com/bia-pain-bache/Cloudflare-Clean-IP-Scanner/releases/latest/download/cfscanner-linux-${cf_arch}"
+    curl -fsSL --connect-timeout 10 "$url" -o "$bin" 2>/dev/null && \
+        chmod +x "$bin" && return 0
+
+    # Fallback на оригинальный
+    url="https://github.com/Ptechgithub/CloudflareScanner/releases/latest/download/CloudflareScanner_linux_${cf_arch}.zip"
+    local tmp_dir; tmp_dir=$(mktemp -d)
+    curl -fsSL --connect-timeout 10 "$url" -o "${tmp_dir}/cf.zip" 2>/dev/null && \
+        unzip -q "${tmp_dir}/cf.zip" -d "$tmp_dir" 2>/dev/null && \
+        mv "${tmp_dir}/CloudflareScanner" "$bin" 2>/dev/null && \
+        chmod +x "$bin" && rm -rf "$tmp_dir" && return 0
+
+    rm -rf "$tmp_dir"
+    return 1
+}
+
+_cf_scanner_run() {
+    # Запускаем сканер и возвращаем лучший IP
+    local bin="/usr/local/bin/cfscanner"
+    local result_file="/tmp/cf_result.csv"
+
+    echo -e "  ${CYAN}Сканирую IP диапазоны Cloudflare...${NC}"
+    echo -e "  ${WHITE}(тест ~100 IP, занимает 30-60 секунд)${NC}\n"
+
+    # Запускаем с таймаутом
+    timeout 90 "$bin" \
+        -n 100 \
+        -t 4 \
+        -o "$result_file" \
+        -tp 443 \
+        2>/dev/null
+
+    if [ ! -f "$result_file" ] || [ ! -s "$result_file" ]; then
+        echo -e "  ${RED}✗ Сканирование не дало результатов${NC}"
+        return 1
+    fi
+
+    # Показываем топ-5
+    echo -e "\n  ${GREEN}Топ результаты:${NC}\n"
+    echo -e "  ${WHITE}$(printf '%-18s %-8s %-8s %s' 'IP' 'Задержка' 'Потери' 'Скорость')${NC}"
+    echo -e "  ${CYAN}$(printf '%-18s %-8s %-8s %s' '─────────────────' '────────' '───────' '────────')${NC}"
+    head -6 "$result_file" | tail -5 | while IFS=, read -r ip latency loss speed _rest; do
+        printf "  ${GREEN}%-18s${NC} %-8s %-8s %s\n" \
+            "$ip" "${latency}ms" "${loss}%" "${speed:-?}MB/s"
+    done
+
+    # Возвращаем лучший IP
+    local best_ip; best_ip=$(head -2 "$result_file" | tail -1 | cut -d',' -f1)
+    echo "$best_ip"
+}
+
 WARP_COLO_ORDER=(
     "FRA — Франкфурт (DE)"
     "AMS — Амстердам (NL)"
@@ -2522,21 +2603,48 @@ _3xui_warp_change_region() {
 
     echo ""
     echo -e "  ${YELLOW}[$i]${NC}  Авто (сбросить)"
+    echo -e "  ${YELLOW}[$i]${NC}  Авто (сбросить)"
+    echo -e "  ${CYAN}[s]${NC}  Найти лучший IP (Cloudflare Scanner)"
     echo -e "  ${YELLOW}[0]${NC}  Назад"
     echo ""
     read -p "  Выбор: " reg_ch < /dev/tty
     [ "$reg_ch" = "0" ] || [ -z "$reg_ch" ] && return
 
-    local chosen_ep=""
-    if [[ "$reg_ch" =~ ^[0-9]+$ ]] && (( reg_ch >= 1 && reg_ch <= ${#WARP_COLO_ORDER[@]} )); then
-        local chosen_colo="${WARP_COLO_ORDER[$((reg_ch-1))]}"
+    local chosen_ep="" chosen_colo=""
+
+    if [[ "$reg_ch" =~ ^[sS]$ ]]; then
+        if _cf_scanner_install; then
+            local best_ip; best_ip=$(_cf_scanner_run)
+            best_ip=$(echo "$best_ip" | tail -1 | tr -d '[:space:]')
+            if [[ "$best_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                chosen_ep="${best_ip}:2408"
+                chosen_colo="Scanner: ${best_ip}"
+                echo -e "\n  ${GREEN}✓ Лучший IP: ${best_ip}${NC}"
+                echo -ne "  Применить ${best_ip}:2408? (y/n): "
+                read -r confirm < /dev/tty
+                [ "$confirm" != "y" ] && read -p "  Enter..." < /dev/tty && return
+            else
+                echo -e "  ${RED}✗ Не удалось получить IP${NC}"
+                read -p "  Enter..." < /dev/tty; return
+            fi
+        else
+            echo -e "  ${RED}✗ Не удалось установить cfscanner${NC}"
+            read -p "  Enter..." < /dev/tty; return
+        fi
+    elif [[ "$reg_ch" =~ ^[0-9]+$ ]] && (( reg_ch >= 1 && reg_ch <= ${#WARP_COLO_ORDER[@]} )); then
+        chosen_colo="${WARP_COLO_ORDER[$((reg_ch-1))]}"
         chosen_ep="${WARP_COLO_ENDPOINTS[$chosen_colo]}"
         echo -e "\n  ${YELLOW}Применяю: ${chosen_colo}...${NC}"
-        warp-cli tunnel endpoint set "$chosen_ep" 2>/dev/null ||             warp-cli set-custom-endpoint "$chosen_ep" 2>/dev/null
     elif (( reg_ch == i )); then
         echo -e "\n  ${YELLOW}Сбрасываю на авто...${NC}"
-        warp-cli tunnel endpoint reset 2>/dev/null ||             warp-cli set-custom-endpoint "" 2>/dev/null
+        warp-cli tunnel endpoint reset 2>/dev/null || \
+            warp-cli set-custom-endpoint "" 2>/dev/null
     fi
+
+    [ -n "$chosen_ep" ] && {
+        warp-cli tunnel endpoint set "$chosen_ep" 2>/dev/null || \
+            warp-cli set-custom-endpoint "$chosen_ep" 2>/dev/null
+    }
 
     # Переподключаем
     warp-cli disconnect 2>/dev/null
