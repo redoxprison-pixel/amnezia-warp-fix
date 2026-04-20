@@ -1781,16 +1781,22 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
         fi
 
         # Настраиваем режим proxy
+        # Настраиваем режим proxy
         warp-cli --accept-tos mode proxy > /dev/null 2>&1
         warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT" > /dev/null 2>&1
+
+        # Ждём инициализации настроек перед connect
+        echo -e "  ${YELLOW}Инициализация...${NC}"
+        sleep 6
         warp-cli --accept-tos connect > /dev/null 2>&1
 
         local connected=0
-        for i in 1 2 3 4 5; do
+        for i in $(seq 1 10); do
             sleep 3
-            if _3xui_warp_running; then connected=1; break; fi
-            echo -e "  ${YELLOW}Ожидание... (${i}/5)${NC}"
-            [ "$i" -eq 3 ] && warp-cli connect > /dev/null 2>&1
+            local st; st=$(warp-cli status 2>/dev/null | head -1)
+            if echo "$st" | grep -qi "Connected"; then connected=1; break; fi
+            echo -e "  ${YELLOW}Ожидание... (${i}/10) — ${st}${NC}"
+            (( i % 3 == 0 )) && warp-cli connect > /dev/null 2>&1
         done
 
         if [ "$connected" -eq 0 ]; then
@@ -2648,19 +2654,23 @@ _3xui_warp_change_region() {
     sleep 2
     warp-cli connect 2>/dev/null
 
-    # Ждём подключения до 15 сек
+    # Ждём подключения до 30 сек
     local new_colo="" new_ip=""
-    for _w in 1 2 3 4 5; do
+    for _w in $(seq 1 10); do
         sleep 3
-        local st; st=$(warp-cli status 2>/dev/null)
-        if echo "$st" | grep -q "Connected"; then
+        local st; st=$(warp-cli status 2>/dev/null | head -1)
+        echo -ne "  ${YELLOW}${st}${NC}
+"
+        if echo "$st" | grep -qi "Connected"; then
+            echo ""
             local new_stats; new_stats=$(warp-cli tunnel stats 2>/dev/null)
             new_colo=$(echo "$new_stats" | grep 'Colo:' | awk '{print $2}' | cut -d'(' -f1 | tr -d ' ')
             new_ip=$(_3xui_warp_ip)
             break
         fi
-        [ "$_w" -eq 3 ] && warp-cli connect 2>/dev/null
+        (( _w % 3 == 0 )) && warp-cli connect 2>/dev/null
     done
+    echo ""
 
     echo -e "  ${GREEN}✓ Готово!${NC}"
     if [ -n "$new_colo" ]; then
