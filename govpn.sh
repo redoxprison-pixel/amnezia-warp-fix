@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.89"
+VERSION="5.90"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1700,14 +1700,16 @@ for ib in d.get('obj',[]):
 
         echo ""
         echo -e "  ${WHITE}── Клиенты ──────────────────────────${NC}"
-        echo -e "  ${GREEN}[a]${NC}  Все клиенты    ${CYAN}[d]${NC}  Отключённые"
+        echo -e "  ${GREEN}[a]${NC}  Все клиенты"
+        echo -e "  ${CYAN}[d]${NC}  Отключённые клиенты"
+        echo -e "  ${WHITE}── Маршрутизация ─────────────────────${NC}"
+        echo -e "  ${CYAN}[r]${NC}  QR настройки Happ/INCY (roscomvpn)"
         echo -e "  ${WHITE}── Настройки ────────────────────────${NC}"
         echo -e "  ${YELLOW}[i]${NC}  Вкл/выкл протоколов"
         if [ -f "$ALIASES_FILE" ] && [ -s "$ALIASES_FILE" ]; then
-            echo -e "  ${YELLOW}[s]${NC}  Сменить сервер   ${YELLOW}[p]${NC}  Сменить пароль"
-        else
-            echo -e "  ${YELLOW}[p]${NC}  Сменить пароль"
+            echo -e "  ${YELLOW}[s]${NC}  Сменить сервер"
         fi
+        echo -e "  ${YELLOW}[p]${NC}  Сменить пароль"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
 
@@ -1724,6 +1726,18 @@ for ib in d.get('obj',[]):
             [dDдД])
                 _3xui_disabled_clients_menu "" "Все протоколы" "$cookie" "$SERVER_LABEL" "$SERVER_IP"
                 cookie=$(_3xui_auth) ;;
+            [rR])
+                command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+                clear
+                echo -e "\n${CYAN}━━━ Настройка Happ / INCY (roscomvpn) ━━━${NC}\n"
+                echo -e "  ${WHITE}Шаг 1:${NC} Добавь подписку клиента в Happ (QR из профиля клиента)"
+                echo -e "  ${WHITE}Шаг 2:${NC} Отсканируй QR ниже — добавит roscomvpn маршрутизацию:\n"
+                echo "https://routing.help" | qrencode -t ANSIUTF8 2>/dev/null
+                echo -e "\n  ${CYAN}https://routing.help${NC}\n"
+                echo -e "  ${GREEN}✓${NC} РФ/РБ сайты — напрямую   ${GREEN}✓${NC} Заблокированные — через VPN"
+                echo -e "  ${GREEN}✓${NC} Реклама — заблокирована   ${GREEN}✓${NC} Автообновление правил"
+                echo ""
+                read -p "  Enter..." < /dev/tty ;;
             *)
                 if [[ "$ch" =~ ^[1-9][0-9]*$ ]] && (( ch >= 1 && ch <= ${#ibs[@]} )); then
                     local ib="${ibs[$((ch-1))]}"
@@ -5040,7 +5054,7 @@ _hy2_install_warp() {
 install_wizard() {
     while true; do
         clear
-        echo -e "\n${CYAN}━━━ Установка сервера ━━━${NC}\n"
+        echo -e "\n${CYAN}━━━ Установка и компоненты ━━━${NC}\n"
 
         local status_awg="" status_xui=""
 
