@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.81"
+VERSION="5.82"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1769,8 +1769,12 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
         warp-cli registration show &>/dev/null 2>&1 && has_reg=1
         if [ "$has_reg" -eq 1 ]; then
             echo -e "  ${CYAN}Найдена существующая регистрация — сбрасываю...${NC}"
+            # Сбрасываем кастомный эндпоинт перед удалением регистрации
+            warp-cli tunnel endpoint reset > /dev/null 2>&1 || true
+            warp-cli disconnect > /dev/null 2>&1 || true
+            sleep 1
             warp-cli registration delete > /dev/null 2>&1 || true
-            sleep 2
+            sleep 3
         fi
 
         local reg_out
