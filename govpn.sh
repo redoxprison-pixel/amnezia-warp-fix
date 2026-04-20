@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.92"
+VERSION="5.93"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1845,6 +1845,87 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
 
     log_action "3XUI WARP SETUP: port=${WARP_SOCKS_PORT}, ip=${wip}"
     return 0
+}
+
+_3xui_add_geo_routing() {
+    # Добавляет правила geosite в xrayTemplateConfig
+    local db="/etc/x-ui/x-ui.db"
+    command -v sqlite3 &>/dev/null || apt-get install -y sqlite3 > /dev/null 2>&1
+    [ -f "$db" ] || { echo -e "  ${RED}✗ БД не найдена${NC}"; return 1; }
+
+    python3 - << 'PYEOF'
+import json, subprocess, sys
+
+db = '/etc/x-ui/x-ui.db'
+r = subprocess.run(['sqlite3', db,
+    "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
+    capture_output=True, text=True)
+tmpl_str = r.stdout.strip()
+if not tmpl_str:
+    print("  ERR: xrayTemplateConfig не найден")
+    sys.exit(1)
+
+cfg = json.loads(tmpl_str)
+routing = cfg.setdefault('routing', {})
+rules = routing.setdefault('rules', [])
+
+# Теги которые нас интересуют
+NEW_RULES = [
+    {
+        "type": "field",
+        "domain": ["geosite:category-ads-all"],
+        "outboundTag": "blocked",
+        "_comment": "roscomvpn: реклама"
+    },
+    {
+        "type": "field",
+        "domain": ["geosite:category-ru"],
+        "outboundTag": "direct",
+        "_comment": "roscomvpn: РФ/РБ напрямую"
+    },
+    {
+        "type": "field",
+        "domain": ["geosite:category-ru-blocked"],
+        "outboundTag": "proxy",
+        "_comment": "roscomvpn: заблокированные через прокси"
+    },
+]
+
+# Удаляем старые roscomvpn правила если есть
+rules = [r for r in rules if '_comment' not in r or 'roscomvpn' not in r.get('_comment','')]
+
+# Вставляем перед последними правилами (api, blocked)
+insert_pos = 0
+for i, rule in enumerate(rules):
+    if rule.get('outboundTag') in ('api', 'blocked') and not rule.get('domain'):
+        insert_pos = i
+        break
+    insert_pos = i + 1
+
+for i, rule in enumerate(NEW_RULES):
+    rules.insert(insert_pos + i, rule)
+
+routing['rules'] = rules
+cfg['routing'] = routing
+
+new_tmpl = json.dumps(cfg, ensure_ascii=False, indent=2).replace("'", "''")
+r2 = subprocess.run(['sqlite3', db,
+    f"UPDATE settings SET value='{new_tmpl}' WHERE key='xrayTemplateConfig';"],
+    capture_output=True, text=True)
+if r2.returncode == 0:
+    print("  OK: правила добавлены")
+else:
+    print(f"  ERR: {r2.stderr}")
+    sys.exit(1)
+PYEOF
+    local ret=$?
+    if [ "$ret" -eq 0 ]; then
+        systemctl restart x-ui > /dev/null 2>&1
+        sleep 2
+        echo -e "  ${GREEN}✓ Правила маршрутизации добавлены, xray перезапущен${NC}"
+        echo -e "  ${CYAN}Проверь в 3X-UI → Настройки → Xray → Routing${NC}"
+    fi
+    return $ret
 }
 
 _3xui_patch_db() {
@@ -4636,6 +4717,7 @@ _3xui_geo_menu() {
         echo -e "  ${YELLOW}[1]${NC}  Обновить файлы на сервере"
         echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (ежедневно)"
         if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${GREEN}[4]${NC}  Добавить правила routing в 3X-UI (авто)"
             echo -e "  ${CYAN}[q]${NC}  QR URL для Happ (исправить ошибку загрузки)"
             echo -e "  ${RED}[3]${NC}  Удалить (вернуть стандартные v2fly файлы)"
         fi
@@ -4650,6 +4732,12 @@ _3xui_geo_menu() {
                 _3xui_setup_geo_autoupdate
                 echo -e "  ${GREEN}✓ Автообновление настроено (/etc/cron.daily/govpn-geo-update)${NC}"
                 read -p "  Enter..." < /dev/tty ;;
+            4)
+                if [ "$geo_ok" -eq 1 ]; then
+                    echo ""
+                    _3xui_add_geo_routing
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
             [qQ])
                 if [ "$geo_ok" -eq 1 ]; then
                     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
