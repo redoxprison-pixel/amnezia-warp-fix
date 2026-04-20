@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.78"
+VERSION="5.79"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2455,65 +2455,101 @@ _awg_warp_status() {
 #  МАСТЕР НАСТРОЙКИ WARP
 # ═══════════════════════════════════════════════════════════════
 
+# Cloudflare WARP эндпоинты по регионам (Colo коды)
+# Диапазоны: 162.159.192.0/22 и 188.114.96.0/22
+declare -A WARP_COLO_ENDPOINTS=(
+    ["FRA — Франкфурт (DE)"]="162.159.198.2:2408"
+    ["AMS — Амстердам (NL)"]="162.159.198.1:2408"
+    ["LHR — Лондон (UK)"]="188.114.96.1:2408"
+    ["CDG — Париж (FR)"]="188.114.97.1:2408"
+    ["MIA — Майами (US)"]="162.159.192.1:2408"
+    ["LAX — Лос-Анджелес (US)"]="162.159.193.1:2408"
+    ["EWR — Нью-Йорк (US)"]="162.159.195.1:2408"
+    ["SJC — Сан-Хосе (US)"]="162.159.192.2:2408"
+    ["SIN — Сингапур"]="162.159.194.1:2408"
+    ["NRT — Токио (JP)"]="162.159.196.1:2408"
+    ["SYD — Сидней (AU)"]="162.159.197.1:2408"
+)
+WARP_COLO_ORDER=(
+    "FRA — Франкфурт (DE)"
+    "AMS — Амстердам (NL)"
+    "LHR — Лондон (UK)"
+    "CDG — Париж (FR)"
+    "MIA — Майами (US)"
+    "LAX — Лос-Анджелес (US)"
+    "EWR — Нью-Йорк (US)"
+    "SJC — Сан-Хосе (US)"
+    "SIN — Сингапур"
+    "NRT — Токио (JP)"
+    "SYD — Сидней (AU)"
+)
+
 _3xui_warp_change_region() {
     clear
-    echo -e "\n${CYAN}━━━ Смена региона WARP (warp-cli) ━━━${NC}\n"
+    echo -e "\n${CYAN}━━━ Смена региона WARP ━━━${NC}\n"
 
     if ! command -v warp-cli &>/dev/null; then
         echo -e "  ${RED}✗ warp-cli не установлен${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
-    # Получаем список доступных локаций
-    echo -e "  ${YELLOW}Загружаю список локаций...${NC}"
-    local locations
-    locations=$(warp-cli tunnel stats 2>/dev/null | head -3)
-    echo -e "  ${WHITE}Текущее состояние:${NC}"
-    echo "$locations" | while read -r l; do echo "    $l"; done
-    echo ""
+    # Показываем текущий датацентр
+    local cur_stats; cur_stats=$(warp-cli tunnel stats 2>/dev/null)
+    local cur_colo; cur_colo=$(echo "$cur_stats" | grep 'Colo:' | awk '{print $2}')
+    local cur_ep; cur_ep=$(echo "$cur_stats" | grep 'Endpoints:' | awk '{print $2}')
+    local cur_ip; cur_ip=$(_3xui_warp_ip)
+    echo -e "  ${WHITE}Текущий датацентр:${NC} ${GREEN}${cur_colo:-?}${NC}  IP: ${GREEN}${cur_ip:-?}${NC}"
+    echo -e "  ${WHITE}Эндпоинт:${NC} ${CYAN}${cur_ep:-?}${NC}\n"
 
-    # warp-cli поддерживает выбор региона через set-custom-endpoint
-    # Но проще использовать встроенные локации
-    echo -e "  ${WHITE}Доступные методы смены региона:${NC}\n"
-    echo -e "  ${YELLOW}[1]${NC}  Авто (ближайший Cloudflare DC)"
-    echo -e "  ${YELLOW}[2]${NC}  Указать свой IP:порт эндпоинта"
+    # Тестируем задержку до каждого эндпоинта
+    echo -e "  ${YELLOW}Тестирую задержку...${NC}\n"
+    local i=1
+    for colo in "${WARP_COLO_ORDER[@]}"; do
+        local ep="${WARP_COLO_ENDPOINTS[$colo]}"
+        local host="${ep%%:*}"
+        local ms
+        ms=$(ping -c 2 -W 2 -q "$host" 2>/dev/null |             awk '/^rtt/{split($4,a,"/"); printf "%d", a[2]}')
+        [ -z "$ms" ] && ms=9999
+        local ms_color
+        if [ "$ms" -lt 50 ]; then ms_color="${GREEN}"
+        elif [ "$ms" -lt 100 ]; then ms_color="${YELLOW}"
+        else ms_color="${RED}"; fi
+        local cur_mark=""
+        [[ "$cur_ep" == "$host"* ]] && cur_mark=" ${CYAN}← текущий${NC}"
+        printf "  ${YELLOW}[%-2d]${NC}  %-32s  %b%sms${NC}%b\n"             "$i" "$colo" "$ms_color" "$ms" "$cur_mark"
+        (( i++ ))
+    done
+
+    echo ""
+    echo -e "  ${YELLOW}[$i]${NC}  Авто (сбросить)"
     echo -e "  ${YELLOW}[0]${NC}  Назад"
     echo ""
-
-    # Показываем текущий IP через WARP
-    local cur_ip; cur_ip=$(_3xui_warp_ip)
-    [ -n "$cur_ip" ] && echo -e "  ${WHITE}Текущий WARP IP:${NC} ${GREEN}${cur_ip}${NC}\n"
-
     read -p "  Выбор: " reg_ch < /dev/tty
+    [ "$reg_ch" = "0" ] || [ -z "$reg_ch" ] && return
 
-    case "$reg_ch" in
-        1)
-            warp-cli disconnect 2>/dev/null
-            sleep 1
-            warp-cli connect 2>/dev/null
-            sleep 3
-            local new_ip; new_ip=$(_3xui_warp_ip)
-            echo -e "  ${GREEN}✓ Переподключено${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
-            log_action "WARP region: reconnect auto" ;;
-        2)
-            echo -e "  ${WHITE}Введите эндпоинт (IP:порт, например 162.159.192.1:2408):${NC}"
-            read -r custom_ep < /dev/tty
-            if [[ "$custom_ep" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
-                warp-cli set-custom-endpoint "$custom_ep" 2>/dev/null && {
-                    warp-cli disconnect 2>/dev/null
-                    sleep 1
-                    warp-cli connect 2>/dev/null
-                    sleep 3
-                    local new_ip; new_ip=$(_3xui_warp_ip)
-                    echo -e "  ${GREEN}✓ Эндпоинт: ${custom_ep}${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
-                    log_action "WARP region: custom endpoint ${custom_ep}"
-                } || echo -e "  ${RED}✗ Не удалось установить эндпоинт${NC}"
-            else
-                echo -e "  ${RED}✗ Неверный формат. Используйте IP:порт${NC}"
-            fi ;;
-        0|"") return ;;
-    esac
-    echo ""
+    local chosen_ep=""
+    if [[ "$reg_ch" =~ ^[0-9]+$ ]] && (( reg_ch >= 1 && reg_ch <= ${#WARP_COLO_ORDER[@]} )); then
+        local chosen_colo="${WARP_COLO_ORDER[$((reg_ch-1))]}"
+        chosen_ep="${WARP_COLO_ENDPOINTS[$chosen_colo]}"
+        echo -e "\n  ${YELLOW}Применяю: ${chosen_colo}...${NC}"
+        warp-cli tunnel endpoint set "$chosen_ep" 2>/dev/null ||             warp-cli set-custom-endpoint "$chosen_ep" 2>/dev/null
+    elif (( reg_ch == i )); then
+        echo -e "\n  ${YELLOW}Сбрасываю на авто...${NC}"
+        warp-cli tunnel endpoint reset 2>/dev/null ||             warp-cli set-custom-endpoint "" 2>/dev/null
+    fi
+
+    # Переподключаем
+    warp-cli disconnect 2>/dev/null
+    sleep 1
+    warp-cli connect 2>/dev/null
+    sleep 4
+
+    local new_stats; new_stats=$(warp-cli tunnel stats 2>/dev/null)
+    local new_colo; new_colo=$(echo "$new_stats" | grep 'Colo:' | awk '{print $2}')
+    local new_ip; new_ip=$(_3xui_warp_ip)
+    echo -e "  ${GREEN}✓ Готово!${NC}"
+    echo -e "  ${WHITE}Новый датацентр:${NC} ${GREEN}${new_colo:-?}${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
+    log_action "WARP region: ${chosen_colo:-авто} → ${new_colo} (${new_ip})"
     read -p "  Enter..." < /dev/tty
 }
 
