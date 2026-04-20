@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.91"
+VERSION="5.92"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -4619,16 +4619,25 @@ _3xui_geo_menu() {
             echo -e "  ${RED}✗ Файлы не установлены${NC}"
         fi
 
+
         echo ""
         echo -e "  ${WHITE}Как использовать в 3X-UI панели:${NC}"
-        echo -e "  Настройки → Xray конфигурация → Routing → Добавить правило:"
-        echo -e "  ${CYAN}РФ сайты напрямую:${NC}  domain=[\"geosite:category-ru\"]  → outbound: direct"
-        echo -e "  ${CYAN}Заблокированные:${NC}    domain=[\"geosite:category-ru-blocked\"] → outbound: proxy"
+        echo -e "  Настройки → Xray конфигурация → Routing → добавить правила:"
+        echo -e "  ${CYAN}РФ напрямую:${NC}      geosite:category-ru        → direct"
+        echo -e "  ${CYAN}Заблокированные:${NC}  geosite:category-ru-blocked → proxy/WARP"
+        echo -e "  ${CYAN}Реклама:${NC}          geosite:category-ads-all    → block"
         echo ""
-        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы"
-        echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (cron)"
         if [ "$geo_ok" -eq 1 ]; then
-            echo -e "  ${RED}[3]${NC}  Удалить (вернуть стандартные файлы Cloudflare)"
+            echo -e "  ${WHITE}Актуальные URL для Happ (если ошибка загрузки):${NC}"
+            echo -e "  ${CYAN}github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat${NC}"
+            echo -e "  ${CYAN}github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat${NC}"
+            echo ""
+        fi
+        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы на сервере"
+        echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (ежедневно)"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${CYAN}[q]${NC}  QR URL для Happ (исправить ошибку загрузки)"
+            echo -e "  ${RED}[3]${NC}  Удалить (вернуть стандартные v2fly файлы)"
         fi
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -4641,6 +4650,23 @@ _3xui_geo_menu() {
                 _3xui_setup_geo_autoupdate
                 echo -e "  ${GREEN}✓ Автообновление настроено (/etc/cron.daily/govpn-geo-update)${NC}"
                 read -p "  Enter..." < /dev/tty ;;
+            [qQ])
+                if [ "$geo_ok" -eq 1 ]; then
+                    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+                    clear
+                    echo -e "
+${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
+"
+                    echo -e "  В Happ → Правила маршрутизации → Гео файлы"
+                    echo -e "  Замени URL на актуальные:
+"
+                    echo -e "  ${WHITE}1. Файл Гео-айпи (geoip.dat):${NC}"
+                    echo "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat" | qrencode -t ANSIUTF8 2>/dev/null
+                    echo -e "  ${WHITE}2. Файл Гео-сайтов (geosite.dat):${NC}"
+                    echo "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" | qrencode -t ANSIUTF8 2>/dev/null
+                    echo ""
+                    read -p "  Enter..." < /dev/tty
+                fi ;;
             3)
                 if [ "$geo_ok" -eq 1 ]; then
                     echo -ne "\n  ${RED}Удалить roscomvpn файлы и восстановить стандартные? (y/n): ${NC}"
@@ -4684,7 +4710,11 @@ _3xui_update_geofiles() {
     local ok=0
 
     echo -ne "  ${CYAN}→ geoip.dat...${NC} "
-    if curl -fsSL --max-time 30         "${CDN}/roscomvpn-geoip/release/geoip.dat"         -o "${xray_dir}/geoip.dat" 2>/dev/null; then
+    # GitHub Releases как основной источник, jsDelivr как fallback
+    local GH_GEOIP="https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat"
+    local GH_GEOSITE="https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
+
+    if curl -fsSL --max-time 30 "${GH_GEOIP}"         -o "${xray_dir}/geoip.dat" 2>/dev/null ||        curl -fsSL --max-time 30         "${CDN}/roscomvpn-geoip/release/geoip.dat"         -o "${xray_dir}/geoip.dat" 2>/dev/null; then
         echo -e "${GREEN}✓${NC}"
         (( ok++ ))
     else
@@ -4692,7 +4722,7 @@ _3xui_update_geofiles() {
     fi
 
     echo -ne "  ${CYAN}→ geosite.dat...${NC} "
-    if curl -fsSL --max-time 30         "${CDN}/roscomvpn-geosite/release/geosite.dat"         -o "${xray_dir}/geosite.dat" 2>/dev/null; then
+    if curl -fsSL --max-time 30 "${GH_GEOSITE}"         -o "${xray_dir}/geosite.dat" 2>/dev/null ||        curl -fsSL --max-time 30         "${CDN}/roscomvpn-geosite/release/geosite.dat"         -o "${xray_dir}/geosite.dat" 2>/dev/null; then
         echo -e "${GREEN}✓${NC}"
         (( ok++ ))
     else
@@ -4722,8 +4752,8 @@ _3xui_setup_geo_autoupdate() {
     cat > /etc/cron.daily/govpn-geo-update << CRONEOF
 #!/bin/bash
 # Автообновление roscomvpn geoip/geosite
-curl -fsSL --max-time 60 "${CDN}/roscomvpn-geoip/release/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null
-curl -fsSL --max-time 60 "${CDN}/roscomvpn-geosite/release/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null
+curl -fsSL --max-time 60 "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geoip/release/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null
+curl -fsSL --max-time 60 "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geosite/release/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null
 systemctl restart x-ui > /dev/null 2>&1
 CRONEOF
     chmod +x /etc/cron.daily/govpn-geo-update
@@ -5554,7 +5584,7 @@ system_menu() {
         echo ""
         echo -e " ${CYAN}── Сервер ────────────────────────────${NC}"
         echo -e "  ${YELLOW}[8]${NC}  Домен и SSL"
-        echo -e "  ${YELLOW}[9]${NC}  Установить сервер"
+        echo -e "  ${YELLOW}[9]${NC}  Установка и компоненты"
         echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
         echo ""
         echo -e " ${CYAN}── Опасная зона ──────────────────────${NC}"
