@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.85"
+VERSION="5.86"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2010,40 +2010,93 @@ declare -A WARP_REGIONS=(
 )
 WARP_REGION_ORDER=("Авто (ближайший)")
 
+# ── Cloudflare IP Scanner ────────────────────────────────────
+_cf_scanner_install() {
+    local bin="/usr/local/bin/cfscanner"
+    [ -x "$bin" ] && return 0
+
+    echo -e "  ${CYAN}Скачиваю Cloudflare Scanner...${NC}"
+    local arch; arch=$(uname -m)
+    local cf_arch="amd64"
+    [ "$arch" = "aarch64" ] && cf_arch="arm64"
+
+    # Пробуем бинарник от bia-pain-bache
+    local url="https://github.com/bia-pain-bache/Cloudflare-Clean-IP-Scanner/releases/latest/download/cfscanner-linux-${cf_arch}"
+    if curl -fsSL --connect-timeout 10 "$url" -o "$bin" 2>/dev/null; then
+        chmod +x "$bin"
+        "$bin" --help &>/dev/null && return 0
+    fi
+
+    # Fallback: оригинальный CloudflareScanner
+    local tmp_dir; tmp_dir=$(mktemp -d)
+    url="https://github.com/Ptechgithub/CloudflareScanner/releases/latest/download/CloudflareScanner_linux_${cf_arch}.zip"
+    if curl -fsSL --connect-timeout 10 "$url" -o "${tmp_dir}/cf.zip" 2>/dev/null; then
+        unzip -q "${tmp_dir}/cf.zip" -d "$tmp_dir" 2>/dev/null
+        local found; found=$(find "$tmp_dir" -name "CloudflareScanner" -type f | head -1)
+        if [ -n "$found" ]; then
+            mv "$found" "$bin" && chmod +x "$bin"
+            rm -rf "$tmp_dir"
+            return 0
+        fi
+    fi
+    rm -rf "$tmp_dir"
+    return 1
+}
+
+_cf_scanner_run() {
+    local bin="/usr/local/bin/cfscanner"
+    local result_file="/tmp/cf_result.csv"
+    rm -f "$result_file"
+
+    echo -e "  ${CYAN}Сканирую IP диапазоны Cloudflare...${NC}"
+    echo -e "  ${WHITE}~100 IP, занимает 30-60 секунд${NC}\n"
+
+    timeout 90 "$bin" \
+        -n 100 -t 4 \
+        -o "$result_file" \
+        -tl 300 \
+        2>/dev/null
+
+    if [ ! -f "$result_file" ] || [ ! -s "$result_file" ]; then
+        echo -e "  ${RED}✗ Нет результатов${NC}"
+        return 1
+    fi
+
+    echo -e "\n  ${GREEN}Топ результаты:${NC}\n"
+    printf "  ${WHITE}%-18s %-10s %-8s\n${NC}" "IP" "Задержка" "Потери"
+    head -6 "$result_file" | tail -5 | while IFS=, read -r ip latency loss _rest; do
+        printf "  ${GREEN}%-18s${NC} %-10s %-8s\n" "$ip" "${latency}ms" "${loss}%"
+    done
+
+    # Возвращаем лучший IP последней строкой
+    head -2 "$result_file" | tail -1 | cut -d',' -f1
+}
+
 _awg_ping_endpoint() {
     local endpoint="$1"
     local host="${endpoint%%:*}"
-    local port="${endpoint##*:}"
-    [ "$port" = "$host" ] && port=2408
-    # UDP connect — проверяем реальную маршрутизацию до WARP порта
+    # Убираем IPv6 скобки
+    host="${host//[/}"; host="${host//]/}"
+    # ICMP ping — реальная RTT
     local ms
+    ms=$(ping -c 3 -W 2 -q "$host" 2>/dev/null | \
+        awk -F'/' '/^rtt|^round-trip/{printf "%d", $5; exit}')
+    if [ -n "$ms" ] && [[ "$ms" =~ ^[0-9]+$ ]] && [ "$ms" -gt 0 ] 2>/dev/null; then
+        echo "$ms"; return
+    fi
+    # Fallback TCP 443
     ms=$(python3 -c "
 import socket, time
-host, port = '$host', int('$port')
-best = 9999
-for _ in range(2):
-    try:
-        t = time.time()
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1.0)
-        s.connect((host, port))
-        elapsed = int((time.time()-t)*1000)
-        if elapsed < best: best = elapsed
-        s.close()
-    except: pass
-# Fallback ICMP
-if best == 9999:
-    import subprocess
-    r = subprocess.run(['ping','-c','1','-W','1','-q',host],
-        capture_output=True, text=True)
-    for line in r.stdout.splitlines():
-        if 'avg' in line or 'rtt' in line:
-            try: best = int(float(line.split('/')[4])); break
-            except: pass
-print(best)
+try:
+    t = time.time()
+    socket.create_connection(('$host', 443), timeout=2).close()
+    print(int((time.time()-t)*1000))
+except: print(9999)
 " 2>/dev/null || echo 9999)
     echo "$ms"
 }
+
+
 
 
 _awg_select_region() {
