@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.80"
+VERSION="5.81"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1764,41 +1764,38 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
     if _3xui_warp_running; then
         echo -e "${GREEN}  ✓ WARP уже подключён${NC}"
     else
-        # Сбрасываем старую регистрацию если есть
-        warp-cli registration delete > /dev/null 2>&1 || true
-        sleep 1
+        # Регистрируемся (удаляем старую только если есть)
+        local has_reg=0
+        warp-cli registration show &>/dev/null 2>&1 && has_reg=1
+        if [ "$has_reg" -eq 1 ]; then
+            echo -e "  ${CYAN}Найдена существующая регистрация — сбрасываю...${NC}"
+            warp-cli registration delete > /dev/null 2>&1 || true
+            sleep 2
+        fi
 
-        # Регистрируемся
         local reg_out
         reg_out=$(warp-cli --accept-tos registration new 2>&1)
-        if echo "$reg_out" | grep -qi "error\|fail\|unable"; then
+        if echo "$reg_out" | grep -qi "error\|fail"; then
             echo -e "${RED}  ✗ Ошибка регистрации: $(echo "$reg_out" | head -1)${NC}"
-            echo -e "${WHITE}  Возможно API Cloudflare недоступен с этого IP${NC}"
             return 1
         fi
 
         # Настраиваем режим proxy
         warp-cli --accept-tos mode proxy > /dev/null 2>&1
         warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT" > /dev/null 2>&1
-
-        # Подключаемся
         warp-cli --accept-tos connect > /dev/null 2>&1
 
         local connected=0
         for i in 1 2 3 4 5; do
             sleep 3
-            if _3xui_warp_running; then
-                connected=1; break
-            fi
+            if _3xui_warp_running; then connected=1; break; fi
             echo -e "  ${YELLOW}Ожидание... (${i}/5)${NC}"
-            # Пробуем ещё раз подключиться
             [ "$i" -eq 3 ] && warp-cli connect > /dev/null 2>&1
         done
 
         if [ "$connected" -eq 0 ]; then
             echo -e "${RED}  ✗ Не удалось подключить${NC}"
-            echo -e "${YELLOW}  Диагностика:${NC}"
-            warp-cli status 2>&1 | head -3 | while read -r l; do echo "    $l"; done
+            warp-cli status 2>&1 | head -2 | while read -r l; do echo "    $l"; done
             return 1
         fi
     fi
@@ -2642,22 +2639,38 @@ _3xui_warp_change_region() {
     fi
 
     [ -n "$chosen_ep" ] && {
-        warp-cli tunnel endpoint set "$chosen_ep" 2>/dev/null || \
-            warp-cli set-custom-endpoint "$chosen_ep" 2>/dev/null
+        warp-cli tunnel endpoint set "$chosen_ep" 2>/dev/null ||             warp-cli set-custom-endpoint "$chosen_ep" 2>/dev/null
     }
 
-    # Переподключаем
+    # Переподключаем с ожиданием
+    echo -e "  ${CYAN}↻ Переподключаю...${NC}"
     warp-cli disconnect 2>/dev/null
-    sleep 1
+    sleep 2
     warp-cli connect 2>/dev/null
-    sleep 4
 
-    local new_stats; new_stats=$(warp-cli tunnel stats 2>/dev/null)
-    local new_colo; new_colo=$(echo "$new_stats" | grep 'Colo:' | awk '{print $2}')
-    local new_ip; new_ip=$(_3xui_warp_ip)
+    # Ждём подключения до 15 сек
+    local new_colo="" new_ip=""
+    for _w in 1 2 3 4 5; do
+        sleep 3
+        local st; st=$(warp-cli status 2>/dev/null)
+        if echo "$st" | grep -q "Connected"; then
+            local new_stats; new_stats=$(warp-cli tunnel stats 2>/dev/null)
+            new_colo=$(echo "$new_stats" | grep 'Colo:' | awk '{print $2}' | cut -d'(' -f1 | tr -d ' ')
+            new_ip=$(_3xui_warp_ip)
+            break
+        fi
+        [ "$_w" -eq 3 ] && warp-cli connect 2>/dev/null
+    done
+
     echo -e "  ${GREEN}✓ Готово!${NC}"
-    echo -e "  ${WHITE}Новый датацентр:${NC} ${GREEN}${new_colo:-?}${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
-    log_action "WARP region: ${chosen_colo:-авто} → ${new_colo} (${new_ip})"
+    if [ -n "$new_colo" ]; then
+        echo -e "  ${WHITE}Датацентр:${NC} ${GREEN}${new_colo}${NC}  IP: ${GREEN}${new_ip:-?}${NC}"
+        [ "$new_colo" != "${cur_colo}" ] &&             echo -e "  ${CYAN}(было: ${cur_colo} → стало: ${new_colo})${NC}" ||             echo -e "  ${YELLOW}⚠ Датацентр не изменился — Cloudflare выбрал ближайший${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ Подключение не установлено — попробуйте позже${NC}"
+        warp-cli status 2>/dev/null | head -2 | while read -r l; do echo "    $l"; done
+    fi
+    log_action "WARP region: ${chosen_colo:-авто} → ${new_colo:-?} (${new_ip:-?})"
     read -p "  Enter..." < /dev/tty
 }
 
