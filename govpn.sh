@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.88"
+VERSION="5.89"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1164,7 +1164,7 @@ PYEOF
 
         echo -e "  ${WHITE}── Подписка ──────────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  QR-код подписки"
-        echo -e "  ${CYAN}[r]${NC}  QR roscomvpn (настройка маршрутизации для Happ/INCY)"
+        echo -e "  ${CYAN}[r]${NC}  QR настройки Happ/INCY (roscomvpn маршрутизация)"
         echo -e "  ${WHITE}── Ограничения ───────────────────────${NC}"
         echo -e "  ${YELLOW}[2]${NC}  Лимит ГБ          ${CYAN}(${lim_gb})${NC}"
         echo -e "  ${YELLOW}[3]${NC}  Срок действия     ${CYAN}(${lim_exp})${NC}"
@@ -2781,9 +2781,18 @@ _3xui_warp_instruction() {
          }]
        }
      }'
-    echo -e "  ${CYAN}3.${NC} Routing → Добавить правило:"
-    echo -e '     { "outboundTag": "WARP", "domain": ["geosite:geolocation-!cn"] }'
+    echo -e "  ${CYAN}3.${NC} Routing → Добавить правило (заблокированные сайты → WARP):"
+    echo -e '     { "outboundTag": "WARP", "domain": ["geosite:category-ads-all"], "outboundTag": "block" }'
+    echo -e ""
+    echo -e "     ${WHITE}Для России (блокировки РКН через WARP):${NC}"
+    echo -e '     { "outboundTag": "WARP", "domain": ["youtube.com","instagram.com","twitter.com","facebook.com","tiktok.com"] }'
+    echo -e ""
+    echo -e "     ${WHITE}Или через roscomvpn geosite (рекомендуется):${NC}"
+    echo -e '     { "outboundTag": "WARP", "domain": ["geosite:category-ru-blocked"] }'
     echo -e "  ${CYAN}4.${NC} Сохранить → Перезапустить Xray\n"
+
+    echo -e "  ${YELLOW}💡 Совет:${NC} Установите roscomvpn geoip/geosite (Система → Установка → [g])"
+    echo -e "     Тогда работает правило ${CYAN}geosite:category-ru${NC} для прямых РФ сайтов\n"
 
     echo -e "${MAGENTA}━━ Способ 2: Только для конкретного inbound ━━${NC}"
     echo -e "${WHITE}В настройках нужного inbound:${NC}"
