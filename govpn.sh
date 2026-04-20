@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.82"
+VERSION="5.84"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2011,30 +2011,40 @@ declare -A WARP_REGIONS=(
 WARP_REGION_ORDER=("Авто (ближайший)")
 
 _awg_ping_endpoint() {
-    local host="${1%%:*}"
-    # ICMP ping - самый надёжный метод
+    local endpoint="$1"
+    local host="${endpoint%%:*}"
+    local port="${endpoint##*:}"
+    [ "$port" = "$host" ] && port=2408
+    # UDP connect — проверяем реальную маршрутизацию до WARP порта
     local ms
-    ms=$(ping -c 2 -W 2 -q "$host" 2>/dev/null |         awk '/^rtt/{split($4,a,"/"); printf "%d", a[2]}')
-    if [ -n "$ms" ] && [ "$ms" -gt 0 ] 2>/dev/null; then
-        echo "$ms"
-    else
-        # Fallback: TCP на порт 80 или 443
-        ms=$(python3 -c "
+    ms=$(python3 -c "
 import socket, time
-for port in [80, 443]:
+host, port = '$host', int('$port')
+best = 9999
+for _ in range(2):
     try:
         t = time.time()
-        s = socket.create_connection(('$host', port), timeout=2)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.0)
+        s.connect((host, port))
+        elapsed = int((time.time()-t)*1000)
+        if elapsed < best: best = elapsed
         s.close()
-        print(int((time.time()-t)*1000))
-        break
     except: pass
-else:
-    print(9999)
+# Fallback ICMP
+if best == 9999:
+    import subprocess
+    r = subprocess.run(['ping','-c','1','-W','1','-q',host],
+        capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        if 'avg' in line or 'rtt' in line:
+            try: best = int(float(line.split('/')[4])); break
+            except: pass
+print(best)
 " 2>/dev/null || echo 9999)
-        echo "$ms"
-    fi
+    echo "$ms"
 }
+
 
 _awg_select_region() {
     # Показываем регионы с пингом и даём выбрать
@@ -2483,93 +2493,35 @@ _awg_warp_status() {
 
 # Cloudflare WARP эндпоинты по регионам (Colo коды)
 # Диапазоны: 162.159.192.0/22 и 188.114.96.0/22
+# Cloudflare WARP эндпоинты по регионам
+# IPv4: прямые датацентры Cloudflare
+# NAT64: меняет страну определения через IPv6 туннель
+# Источник NAT64: github.com/bia-pain-bache/BPB-Worker-Panel/blob/main/docs/NAT64Prefixes.md
 declare -A WARP_COLO_ENDPOINTS=(
-    ["FRA — Франкфурт (DE)"]="162.159.198.2:2408"
-    ["AMS — Амстердам (NL)"]="162.159.198.1:2408"
-    ["LHR — Лондон (UK)"]="188.114.96.1:2408"
-    ["CDG — Париж (FR)"]="188.114.97.1:2408"
-    ["MIA — Майами (US)"]="162.159.192.1:2408"
-    ["LAX — Лос-Анджелес (US)"]="162.159.193.1:2408"
-    ["EWR — Нью-Йорк (US)"]="162.159.195.1:2408"
-    ["SJC — Сан-Хосе (US)"]="162.159.192.2:2408"
-    ["SIN — Сингапур"]="162.159.194.1:2408"
-    ["NRT — Токио (JP)"]="162.159.196.1:2408"
-    ["SYD — Сидней (AU)"]="162.159.197.1:2408"
+    ["FRA — Франкфурт (DE)  [IPv4]"]="162.159.198.2:2408"
+    ["AMS — Амстердам (NL)  [IPv4]"]="162.159.198.1:2408"
+    ["LHR — Лондон (UK)     [IPv4]"]="188.114.96.1:2408"
+    ["CDG — Париж (FR)      [IPv4]"]="188.114.97.1:2408"
+    ["LAX — США West        [IPv4]"]="162.159.193.1:2408"
+    ["EWR — США East        [IPv4]"]="162.159.195.1:2408"
+    ["SIN — Сингапур        [IPv4]"]="162.159.194.1:2408"
+    ["NRT — Токио (JP)      [IPv4]"]="162.159.196.1:2408"
+    ["NL — Нидерланды       [NAT64]"]="[2a02:898:146:64::a29f:c702]:2408"
+    ["US West               [NAT64]"]="[2602:fc59:b0:64::a29f:c702]:2408"
+    ["US East               [NAT64]"]="[2602:fc59:11:64::a29f:c702]:2408"
 )
-# ── Cloudflare IP Scanner ────────────────────────────────────
-_cf_scanner_install() {
-    local bin="/usr/local/bin/cfscanner"
-    [ -x "$bin" ] && return 0
-
-    echo -e "  ${CYAN}Скачиваю Cloudflare Scanner...${NC}"
-    local arch; arch=$(uname -m)
-    local cf_arch="amd64"
-    [ "$arch" = "aarch64" ] && cf_arch="arm64"
-
-    # Bia-pain-bache fork с поддержкой страны
-    local url="https://github.com/bia-pain-bache/Cloudflare-Clean-IP-Scanner/releases/latest/download/cfscanner-linux-${cf_arch}"
-    curl -fsSL --connect-timeout 10 "$url" -o "$bin" 2>/dev/null && \
-        chmod +x "$bin" && return 0
-
-    # Fallback на оригинальный
-    url="https://github.com/Ptechgithub/CloudflareScanner/releases/latest/download/CloudflareScanner_linux_${cf_arch}.zip"
-    local tmp_dir; tmp_dir=$(mktemp -d)
-    curl -fsSL --connect-timeout 10 "$url" -o "${tmp_dir}/cf.zip" 2>/dev/null && \
-        unzip -q "${tmp_dir}/cf.zip" -d "$tmp_dir" 2>/dev/null && \
-        mv "${tmp_dir}/CloudflareScanner" "$bin" 2>/dev/null && \
-        chmod +x "$bin" && rm -rf "$tmp_dir" && return 0
-
-    rm -rf "$tmp_dir"
-    return 1
-}
-
-_cf_scanner_run() {
-    # Запускаем сканер и возвращаем лучший IP
-    local bin="/usr/local/bin/cfscanner"
-    local result_file="/tmp/cf_result.csv"
-
-    echo -e "  ${CYAN}Сканирую IP диапазоны Cloudflare...${NC}"
-    echo -e "  ${WHITE}(тест ~100 IP, занимает 30-60 секунд)${NC}\n"
-
-    # Запускаем с таймаутом
-    timeout 90 "$bin" \
-        -n 100 \
-        -t 4 \
-        -o "$result_file" \
-        -tp 443 \
-        2>/dev/null
-
-    if [ ! -f "$result_file" ] || [ ! -s "$result_file" ]; then
-        echo -e "  ${RED}✗ Сканирование не дало результатов${NC}"
-        return 1
-    fi
-
-    # Показываем топ-5
-    echo -e "\n  ${GREEN}Топ результаты:${NC}\n"
-    echo -e "  ${WHITE}$(printf '%-18s %-8s %-8s %s' 'IP' 'Задержка' 'Потери' 'Скорость')${NC}"
-    echo -e "  ${CYAN}$(printf '%-18s %-8s %-8s %s' '─────────────────' '────────' '───────' '────────')${NC}"
-    head -6 "$result_file" | tail -5 | while IFS=, read -r ip latency loss speed _rest; do
-        printf "  ${GREEN}%-18s${NC} %-8s %-8s %s\n" \
-            "$ip" "${latency}ms" "${loss}%" "${speed:-?}MB/s"
-    done
-
-    # Возвращаем лучший IP
-    local best_ip; best_ip=$(head -2 "$result_file" | tail -1 | cut -d',' -f1)
-    echo "$best_ip"
-}
-
 WARP_COLO_ORDER=(
-    "FRA — Франкфурт (DE)"
-    "AMS — Амстердам (NL)"
-    "LHR — Лондон (UK)"
-    "CDG — Париж (FR)"
-    "MIA — Майами (US)"
-    "LAX — Лос-Анджелес (US)"
-    "EWR — Нью-Йорк (US)"
-    "SJC — Сан-Хосе (US)"
-    "SIN — Сингапур"
-    "NRT — Токио (JP)"
-    "SYD — Сидней (AU)"
+    "FRA — Франкфурт (DE)  [IPv4]"
+    "AMS — Амстердам (NL)  [IPv4]"
+    "LHR — Лондон (UK)     [IPv4]"
+    "CDG — Париж (FR)      [IPv4]"
+    "LAX — США West        [IPv4]"
+    "EWR — США East        [IPv4]"
+    "SIN — Сингапур        [IPv4]"
+    "NRT — Токио (JP)      [IPv4]"
+    "NL — Нидерланды       [NAT64]"
+    "US West               [NAT64]"
+    "US East               [NAT64]"
 )
 
 _3xui_warp_change_region() {
@@ -2610,9 +2562,10 @@ _3xui_warp_change_region() {
 
     echo ""
     echo -e "  ${YELLOW}[$i]${NC}  Авто (сбросить)"
-    echo -e "  ${YELLOW}[$i]${NC}  Авто (сбросить)"
     echo -e "  ${CYAN}[s]${NC}  Найти лучший IP (Cloudflare Scanner)"
+    echo -e "  ${CYAN}[n]${NC}  Конвертировать IPv4 → NAT64 (ввести свой IP)"
     echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo -e "  ${WHITE}NAT64 [NAT64] меняет страну определения, IPv4 меняет датацентр${NC}"
     echo ""
     read -p "  Выбор: " reg_ch < /dev/tty
     [ "$reg_ch" = "0" ] || [ -z "$reg_ch" ] && return
@@ -2638,6 +2591,35 @@ _3xui_warp_change_region() {
             echo -e "  ${RED}✗ Не удалось установить cfscanner${NC}"
             read -p "  Enter..." < /dev/tty; return
         fi
+    elif [[ "$reg_ch" =~ ^[nN]$ ]]; then
+        # Конвертация своего IPv4 в NAT64
+        echo -e "\n  ${WHITE}Введите IPv4 WARP эндпоинта (например 162.159.199.2):${NC}"
+        read -r custom_ipv4 < /dev/tty
+        echo -e "  ${WHITE}Выберите NAT64 префикс:${NC}"
+        echo -e "  [1] 2a02:898:146:64::  Нидерланды"
+        echo -e "  [2] 2602:fc59:b0:64::  США (West)"
+        echo -e "  [3] 2602:fc59:11:64::  США (East)"
+        read -r nat64_ch < /dev/tty
+        local nat64_prefix=""
+        case "$nat64_ch" in
+            1) nat64_prefix="2a02:898:146:64::" ;;
+            2) nat64_prefix="2602:fc59:b0:64::" ;;
+            3) nat64_prefix="2602:fc59:11:64::" ;;
+            *) echo -e "  ${RED}✗ Неверный выбор${NC}"; read -p "  Enter..." < /dev/tty; return ;;
+        esac
+        if [[ "$custom_ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            local nat64_ep
+            nat64_ep=$(python3 -c "
+parts = list(map(int, '${custom_ipv4}'.split('.')))
+hex_ip = '{:02x}{:02x}:{:02x}{:02x}'.format(*parts)
+print('[${nat64_prefix}' + hex_ip + ']:2408')
+" 2>/dev/null)
+            chosen_ep="$nat64_ep"
+            chosen_colo="NAT64 custom: ${custom_ipv4}"
+            echo -e "  ${GREEN}✓ IPv6 эндпоинт: ${nat64_ep}${NC}"
+        else
+            echo -e "  ${RED}✗ Неверный IPv4${NC}"; read -p "  Enter..." < /dev/tty; return
+        fi
     elif [[ "$reg_ch" =~ ^[0-9]+$ ]] && (( reg_ch >= 1 && reg_ch <= ${#WARP_COLO_ORDER[@]} )); then
         chosen_colo="${WARP_COLO_ORDER[$((reg_ch-1))]}"
         chosen_ep="${WARP_COLO_ENDPOINTS[$chosen_colo]}"
@@ -2654,6 +2636,7 @@ _3xui_warp_change_region() {
 
     # Переподключаем с ожиданием
     echo -e "  ${CYAN}↻ Переподключаю...${NC}"
+    echo -e "  ${WHITE}Примечание: не все датацентры доступны — Cloudflare выберет ближайший рабочий${NC}"
     warp-cli disconnect 2>/dev/null
     sleep 2
     warp-cli connect 2>/dev/null
