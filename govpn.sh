@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.00"
+VERSION="6.01"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1845,6 +1845,152 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
 
     log_action "3XUI WARP SETUP: port=${WARP_SOCKS_PORT}, ip=${wip}"
     return 0
+}
+
+_3xui_setup_ru_outbound() {
+    # Настройка РФ сервера как outbound для российских доменов
+    local db="/etc/x-ui/x-ui.db"
+    [ -f "$db" ] || { echo -e "  ${RED}✗ БД не найдена${NC}"; return 1; }
+
+    clear
+    echo -e "\n${CYAN}━━━ РФ сервер как outbound ━━━${NC}\n"
+    echo -e "  ${WHITE}Это позволяет направить РФ/РБ трафик через РФ IP.${NC}"
+    echo -e "  ${WHITE}Сервисы будут видеть российский IP — VPN не детектируется.${NC}\n"
+
+    # Проверяем есть ли уже ru_server outbound
+    local has_ru
+    has_ru=$(sqlite3 "$db" "SELECT value FROM settings WHERE key='xrayTemplateConfig';" 2>/dev/null |         python3 -c "
+import json,sys
+try:
+    cfg=json.load(sys.stdin)
+    tags=[o.get('tag','') for o in cfg.get('outbounds',[])]
+    print('yes' if 'ru_server' in tags else 'no')
+except: print('no')
+" 2>/dev/null || echo "no")
+
+    if [ "$has_ru" = "yes" ]; then
+        echo -e "  ${GREEN}✓ РФ outbound уже настроен${NC}"
+        echo ""
+        echo -e "  ${YELLOW}[d]${NC}  Удалить РФ outbound"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        read -r ch < /dev/tty
+        [ "$ch" = "d" ] || [ "$ch" = "D" ] && _3xui_remove_ru_outbound
+        return
+    fi
+
+    # Запрашиваем параметры РФ сервера
+    echo -e "  ${WHITE}Введите параметры РФ сервера:${NC}\n"
+    echo -ne "  IP или домен РФ сервера: "
+    read -r ru_host < /dev/tty
+    [ -z "$ru_host" ] && return
+
+    echo -ne "  Порт SOCKS5 (или Enter = 1080): "
+    read -r ru_port < /dev/tty
+    ru_port="${ru_port:-1080}"
+
+    echo -ne "  Логин (Enter = пропустить): "
+    read -r ru_user < /dev/tty
+    echo -ne "  Пароль (Enter = пропустить): "
+    read -r ru_pass < /dev/tty
+
+    echo ""
+    echo -ne "  ${YELLOW}Направить через РФ сервер:${NC}\n"
+    echo -e "  [1] РФ/РБ сайты (geosite:category-ru) + свой список direct"
+    echo -e "  [2] Только свой список direct"
+    echo -e "  [3] Без правил (только добавить outbound)"
+    read -r ru_mode < /dev/tty
+
+    # Добавляем outbound и правила через Python
+    python3 - << PYEOF2
+import json, subprocess as sp, sys
+
+db = '$db'
+ru_host = '$ru_host'
+ru_port = int('$ru_port')
+ru_user = '$ru_user'
+ru_pass = '$ru_pass'
+ru_mode = '$ru_mode'
+
+r = sp.run(['sqlite3', db, "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
+    capture_output=True, text=True)
+tmpl_str = r.stdout.strip()
+if not tmpl_str: sys.exit(1)
+cfg = json.loads(tmpl_str)
+
+# Создаём outbound
+ru_outbound = {
+    "tag": "ru_server",
+    "protocol": "socks",
+    "settings": {
+        "servers": [{
+            "address": ru_host,
+            "port": ru_port,
+            "users": [{"user": ru_user, "pass": ru_pass}] if ru_user else []
+        }]
+    }
+}
+# Удаляем старый если есть
+cfg['outbounds'] = [o for o in cfg.get('outbounds',[]) if o.get('tag') != 'ru_server']
+cfg['outbounds'].append(ru_outbound)
+
+# Добавляем правила
+if ru_mode in ('1', '2'):
+    routing = cfg.setdefault('routing', {})
+    rules = routing.setdefault('rules', [])
+    # Удаляем старые ru_server правила
+    rules = [r for r in rules if r.get('outboundTag') != 'ru_server']
+    new_rules = []
+    if ru_mode == '1':
+        new_rules.append({"type":"field","domain":["geosite:category-ru"],"outboundTag":"ru_server","_comment":"govpn: РФ через РФ сервер"})
+    # Свой список direct → ru_server
+    import os
+    custom_file = '/etc/govpn/custom_domains.txt'
+    if os.path.exists(custom_file):
+        direct_domains = []
+        with open(custom_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'): continue
+                parts = line.split()
+                if len(parts) > 1 and parts[1] == 'direct':
+                    direct_domains.append(parts[0])
+        if direct_domains:
+            new_rules.append({"type":"field","domain":direct_domains,"outboundTag":"ru_server","_comment":"govpn: custom list через РФ"})
+    rules = new_rules + rules
+    routing['rules'] = rules
+    cfg['routing'] = routing
+
+new_tmpl = json.dumps(cfg, ensure_ascii=False, indent=2).replace("'","''")
+r2 = sp.run(['sqlite3', db, f"UPDATE settings SET value='{new_tmpl}' WHERE key='xrayTemplateConfig';"],
+    capture_output=True, text=True)
+if r2.returncode == 0:
+    print(f"  OK: outbound ru_server добавлен ({ru_host}:{ru_port})")
+else:
+    print(f"  ERR: {r2.stderr}"); sys.exit(1)
+PYEOF2
+    [ $? -eq 0 ] && systemctl restart x-ui > /dev/null 2>&1 && sleep 2 &&         echo -e "  ${GREEN}✓ Настроено, xray перезапущен${NC}" ||         echo -e "  ${RED}✗ Ошибка${NC}"
+    read -p "  Enter..." < /dev/tty
+}
+
+_3xui_remove_ru_outbound() {
+    local db="/etc/x-ui/x-ui.db"
+    python3 - << PYEOF3
+import json, subprocess as sp, sys
+db = '$db'
+r = sp.run(['sqlite3', db, "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
+    capture_output=True, text=True)
+cfg = json.loads(r.stdout.strip())
+cfg['outbounds'] = [o for o in cfg.get('outbounds',[]) if o.get('tag') != 'ru_server']
+rules = cfg.get('routing',{}).get('rules',[])
+cfg['routing']['rules'] = [r for r in rules if r.get('outboundTag') != 'ru_server']
+new_tmpl = json.dumps(cfg, ensure_ascii=False, indent=2).replace("'","''")
+r2 = sp.run(['sqlite3', db, f"UPDATE settings SET value='{new_tmpl}' WHERE key='xrayTemplateConfig';"],
+    capture_output=True, text=True)
+print("  OK: ru_server удалён" if r2.returncode == 0 else f"  ERR: {r2.stderr}")
+PYEOF3
+    systemctl restart x-ui > /dev/null 2>&1
+    echo -e "  ${GREEN}✓ РФ outbound удалён${NC}"
+    read -p "  Enter..." < /dev/tty
 }
 
 _3xui_add_geo_routing() {
@@ -4790,34 +4936,30 @@ ${CYAN}Восстановление из бэкапа...${NC}"
 _3xui_qr_happ_urls() {
     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
     clear
-    echo -e "\n${CYAN}━━━ QR URL для Happ / v2rayTun ━━━${NC}\n"
-    echo -e "  ${WHITE}Замени URL в приложении на актуальные:\n${NC}"
-    echo -e "  ${WHITE}1. Гео-айпи (geoip.dat):${NC}"
-    echo "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip/release/geoip.dat" | qrencode -t ANSIUTF8 2>/dev/null
-    echo -e "  ${CYAN}https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip/release/geoip.dat${NC}\n"
-    echo -e "  ${WHITE}2. Гео-сайтов (geosite.dat):${NC}"
-    echo "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite/release/geosite.dat" | qrencode -t ANSIUTF8 2>/dev/null
-    echo -e "  ${CYAN}https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite/release/geosite.dat${NC}\n"
-    echo -e "  ${YELLOW}В Happ:${NC} Правила маршрутизации → Гео файлы → нажми ✏️ → вставь URL"
-    echo ""
+    echo -e "\n${CYAN}━━━ QR для обновления geofiles в Happ ━━━${NC}\n"
+    echo -e "  ${WHITE}Отсканируй — откроется Happ с нужными URL:${NC}\n"
+    # Deeplink roscomvpn routing для Happ
+    local deeplink="happ://update-geofiles?geoip=https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat&geosite=https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
+    echo "$deeplink" | qrencode -t ANSIUTF8 2>/dev/null
+    echo -e "\n  ${CYAN}geoip:   github.com/hydraponique/roscomvpn-geoip${NC}"
+    echo -e "  ${CYAN}geosite: github.com/hydraponique/roscomvpn-geosite${NC}\n"
+    echo -e "  ${WHITE}Если deeplink не открывается — скопируй URL вручную${NC}"
     read -p "  Enter..." < /dev/tty
 }
 
+
 _3xui_export_bypass_list() {
-    # Экспорт списка доменов для bypass в Happ/v2rayTun
+    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
     local custom_file="/etc/govpn/custom_domains.txt"
-    local export_file="/tmp/govpn_bypass_export.txt"
-
     clear
-    echo -e "\n${CYAN}━━━ Экспорт bypass списка для Happ / v2rayTun ━━━${NC}\n"
+    echo -e "\n${CYAN}━━━ QR bypass списка для Happ / v2rayTun ━━━${NC}\n"
 
-    # Собираем домены direct из custom списка
+    # Собираем домены с direct
     local -a direct_domains=()
     if [ -f "$custom_file" ]; then
         while IFS= read -r line; do
-            line="${line%%#*}"  # убираем комментарии
-            line="${line// /}"  # убираем пробелы слева
-            [ -z "$line" ] && continue
+            line="${line%%#*}"
+            [[ "$line" =~ ^[[:space:]]*$ ]] && continue
             local parts=($line)
             local domain="${parts[0]}"
             local dir="${parts[1]:-proxy}"
@@ -4826,57 +4968,31 @@ _3xui_export_bypass_list() {
     fi
 
     if [ ${#direct_domains[@]} -eq 0 ]; then
-        echo -e "  ${YELLOW}В custom_domains.txt нет доменов с направлением 'direct'${NC}"
-        echo -e "  ${WHITE}Добавьте домены в формате:${NC}"
-        echo -e "  ${CYAN}2ip.ru direct${NC}"
-        echo -e "  ${CYAN}gosuslugi.ru direct${NC}"
-        read -p "  Enter..." < /dev/tty
-        return
+        echo -e "  ${YELLOW}Нет доменов с 'direct' в списке${NC}"
+        echo -e "  ${WHITE}Добавьте в [4]:${NC}  2ip.ru direct"
+        read -p "  Enter..." < /dev/tty; return
     fi
 
-    # Создаём файл экспорта
-    {
-        echo "# GoVPN bypass list — домены без VPN"
-        echo "# Создан: $(date '+%Y-%m-%d %H:%M')"
-        echo "# Для Happ: Правила → Прокси → исключения"
-        echo "# Для v2rayTun: bypass domains"
-        echo ""
-        for d in "${direct_domains[@]}"; do
-            echo "$d"
-        done
-    } > "$export_file"
-
-    echo -e "  ${GREEN}✓ Экспортировано доменов: ${#direct_domains[@]}${NC}\n"
+    # Показываем список (без слова direct)
+    echo -e "  ${WHITE}Домены для bypass (без VPN):${NC}\n"
     for d in "${direct_domains[@]}"; do
-        echo -e "  ${WHITE}${d}${NC}"
+        echo -e "  ${GREEN}•${NC} ${d}"
     done
 
     echo ""
-    echo -e "  ${WHITE}Для импорта в Happ/v2rayTun — отсканируй QR:${NC}"
+    # QR с deeplink для Happ
+    local domains_csv; domains_csv=$(IFS=,; echo "${direct_domains[*]}")
+    local deeplink="happ://bypass?domains=${domains_csv}"
+    echo -e "  ${WHITE}QR → открыть Happ и добавить bypass:${NC}\n"
+    echo "$deeplink" | qrencode -t ANSIUTF8 2>/dev/null
 
-    # Генерируем содержимое для QR
-    if command -v qrencode &>/dev/null; then
-        local content_str
-        content_str=$(printf '%s\n' "${direct_domains[@]}")
-        # QR слишком большой если доменов много — показываем URL файла
-        if [ ${#direct_domains[@]} -le 10 ]; then
-            echo "$content_str" | qrencode -t ANSIUTF8 2>/dev/null
-        else
-            echo -e "  ${YELLOW}Слишком много доменов для QR (${#direct_domains[@]}) — используй файл${NC}"
-        fi
-    fi
-
-    echo ""
-    echo -e "  ${WHITE}Файл:${NC} ${CYAN}${export_file}${NC}"
-    echo -e "  ${WHITE}Команда для копирования:${NC}"
-    echo -e "  ${CYAN}cat ${export_file}${NC}"
-    echo ""
-    echo -e "  ${YELLOW}Как использовать в Happ:${NC}"
-    echo -e "  Настройки → Правила маршрутизации → Домены для обхода"
-    echo -e "  Добавь каждый домен в список исключений приложения"
-    echo ""
+    # Сохраняем в файл
+    local export_file="/tmp/govpn_bypass.txt"
+    printf '%s\n' "${direct_domains[@]}" > "$export_file"
+    echo -e "\n  ${WHITE}Файл:${NC} ${CYAN}${export_file}${NC}"
     read -p "  Enter..." < /dev/tty
 }
+
 
 _3xui_geo_menu() {
     local xray_dir="/usr/local/x-ui/bin"
@@ -4917,20 +5033,22 @@ _3xui_geo_menu() {
         echo -e "  ${WHITE}── Файлы ─────────────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  Обновить файлы (roscomvpn + авто routing)"
         echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (ежедневно)"
-        if [ "$geo_ok" -eq 1 ]; then
-            echo -e "  ${YELLOW}[7]${NC}  Сохранить бэкап текущих файлов"
-        fi
-        if [ -f "/etc/govpn/geofiles_backup/geosite.dat" ]; then
-            echo -e "  ${YELLOW}[8]${NC}  Восстановить из бэкапа"
-        fi
         echo -e "  ${WHITE}── Routing ───────────────────────────${NC}"
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${GREEN}[3]${NC}  Применить правила routing вручную"
         fi
         echo -e "  ${CYAN}[4]${NC}  Свой список доменов (direct/proxy)"
-        echo -e "  ${WHITE}── Клиенты ───────────────────────────${NC}"
-        echo -e "  ${CYAN}[5]${NC}  QR URL для Happ"
-        echo -e "  ${CYAN}[6]${NC}  Экспорт bypass списка для Happ/v2rayTun"
+        echo -e "  ${CYAN}[r]${NC}  РФ сервер как outbound (category-ru + свой список)"
+        echo -e "  ${WHITE}── Happ / v2rayTun ───────────────────${NC}"
+        echo -e "  ${CYAN}[5]${NC}  QR roscomvpn URL → открыть Happ"
+        echo -e "  ${CYAN}[6]${NC}  QR bypass список → открыть Happ"
+        echo -e "  ${WHITE}── Бэкап ─────────────────────────────${NC}"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${YELLOW}[7]${NC}  Сохранить бэкап"
+        fi
+        if [ -f "/etc/govpn/geofiles_backup/geosite.dat" ]; then
+            echo -e "  ${YELLOW}[8]${NC}  Восстановить из бэкапа"
+        fi
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${WHITE}── Удаление ──────────────────────────${NC}"
             echo -e "  ${RED}[9]${NC}  Удалить (вернуть стандартные v2fly файлы)"
@@ -4946,6 +5064,7 @@ _3xui_geo_menu() {
                 _3xui_setup_geo_autoupdate
                 echo -e "  ${GREEN}✓ Автообновление настроено (/etc/cron.daily/govpn-geo-update)${NC}"
                 read -p "  Enter..." < /dev/tty ;;
+            [rR]) _3xui_setup_ru_outbound ;;
             3)
                 if [ "$geo_ok" -eq 1 ]; then
                     echo ""
@@ -5038,32 +5157,31 @@ _3xui_update_geofiles() {
         echo -e "${RED}✗${NC}"
     fi
 
-    # geosite.dat
+
+    # geosite.dat — с проверкой что файл бинарный (>500KB)
     echo -ne "  ${CYAN}→ geosite.dat...${NC} "
-    if curl -fsSL --max-time 30 \
-            "${CDN}/roscomvpn-geosite/release/geosite.dat" \
-            -o "${xray_dir}/geosite.dat" 2>/dev/null && \
-       [ -s "${xray_dir}/geosite.dat" ]; then
-        local sz; sz=$(stat -c%s "${xray_dir}/geosite.dat" 2>/dev/null || echo 0)
-        if [ "$sz" -gt 2000000 ]; then
-            echo -e "${GREEN}✓${NC} (${sz} байт)"
-            (( ok++ ))
-        else
-            echo -e "${YELLOW}⚠ файл мал (${sz}B) — пробую GitHub${NC}"
-            curl -fsSL --max-time 30 \
-                "${GH}/roscomvpn-geosite/releases/latest/download/geosite.dat" \
-                -o "${xray_dir}/geosite.dat" 2>/dev/null && \
-            [ -s "${xray_dir}/geosite.dat" ] && (( ok++ )) || true
+    local geo_tmp="${xray_dir}/geosite.dat.tmp"
+    local geo_ok_site=0
+    for geo_url in \
+        "${GH}/roscomvpn-geosite/releases/latest/download/geosite.dat" \
+        "${CDN}/roscomvpn-geosite/release/geosite.dat" \
+        "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat"; do
+        curl -fsSL --max-time 45 "$geo_url" -o "$geo_tmp" 2>/dev/null || continue
+        local sz; sz=$(stat -c%s "$geo_tmp" 2>/dev/null || echo 0)
+        if [ "$sz" -gt 500000 ]; then
+            mv "$geo_tmp" "${xray_dir}/geosite.dat"
+            geo_ok_site=1
+            if [ "$sz" -gt 2000000 ]; then
+                echo -e "${GREEN}✓${NC} (roscomvpn ${sz}B)"
+            else
+                echo -e "${YELLOW}✓${NC} (базовый ${sz}B)"
+            fi
+            break
         fi
-    elif curl -fsSL --max-time 30 \
-            "${GH}/roscomvpn-geosite/releases/latest/download/geosite.dat" \
-            -o "${xray_dir}/geosite.dat" 2>/dev/null && \
-       [ -s "${xray_dir}/geosite.dat" ]; then
-        echo -e "${GREEN}✓${NC} (GH)"
-        (( ok++ ))
-    else
-        echo -e "${RED}✗${NC}"
-    fi
+        rm -f "$geo_tmp"
+    done
+    [ "$geo_ok_site" -eq 1 ] && (( ok++ )) || echo -e "${RED}✗${NC}"
+
 
     if [ "$ok" -eq 2 ]; then
         echo -e "\n  ${GREEN}✅ GeoIP и GeoSite обновлены${NC}"
