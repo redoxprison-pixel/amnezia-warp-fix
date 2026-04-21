@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.93"
+VERSION="5.94"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1870,26 +1870,53 @@ routing = cfg.setdefault('routing', {})
 rules = routing.setdefault('rules', [])
 
 # Теги которые нас интересуют
-NEW_RULES = [
-    {
-        "type": "field",
-        "domain": ["geosite:category-ads-all"],
-        "outboundTag": "blocked",
-        "_comment": "roscomvpn: реклама"
-    },
-    {
+# Проверяем что roscomvpn geosite установлен
+import os, subprocess as sp
+xray_dir = "/usr/local/x-ui/bin"
+geosite_path = f"{xray_dir}/geosite.dat"
+
+# Проверяем наличие нужных категорий в geosite.dat
+has_ru = False
+has_ads = False
+if os.path.exists(geosite_path):
+    # Проверяем через xray если доступен
+    r = sp.run([f"{xray_dir}/xray", "run", "-test"], capture_output=True, text=True, timeout=5)
+    # Грубая проверка по размеру - roscomvpn файл > 3MB, стандартный < 2MB
+    size = os.path.getsize(geosite_path)
+    has_ru = size > 2_000_000  # roscomvpn файл больше стандартного
+    # category-ads-all есть только в roscomvpn файле
+
+NEW_RULES = []
+if has_ru:
+    NEW_RULES.append({
         "type": "field",
         "domain": ["geosite:category-ru"],
         "outboundTag": "direct",
         "_comment": "roscomvpn: РФ/РБ напрямую"
-    },
-    {
+    })
+    NEW_RULES.append({
         "type": "field",
         "domain": ["geosite:category-ru-blocked"],
         "outboundTag": "proxy",
         "_comment": "roscomvpn: заблокированные через прокси"
-    },
-]
+    })
+
+# Свой список доменов
+custom_file = "/etc/govpn/custom_domains.txt"
+if os.path.exists(custom_file):
+    with open(custom_file) as f:
+        custom = [d.strip() for d in f if d.strip() and not d.startswith("#")]
+    if custom:
+        NEW_RULES.append({
+            "type": "field",
+            "domain": custom,
+            "outboundTag": "proxy",
+            "_comment": "roscomvpn: пользовательский список"
+        })
+
+if not NEW_RULES:
+    print("  WARN: roscomvpn geosite не установлен — сначала обновите файлы")
+    sys.exit(0)
 
 # Удаляем старые roscomvpn правила если есть
 rules = [r for r in rules if '_comment' not in r or 'roscomvpn' not in r.get('_comment','')]
@@ -2877,8 +2904,8 @@ _3xui_warp_instruction() {
        }
      }'
     echo -e "  ${CYAN}3.${NC} Routing → Добавить правило (заблокированные сайты → WARP):"
-    echo -e '     { "outboundTag": "WARP", "domain": ["geosite:category-ads-all"], "outboundTag": "block" }'
     echo -e ""
+
     echo -e "     ${WHITE}Для России (блокировки РКН через WARP):${NC}"
     echo -e '     { "outboundTag": "WARP", "domain": ["youtube.com","instagram.com","twitter.com","facebook.com","tiktok.com"] }'
     echo -e ""
@@ -4706,7 +4733,9 @@ _3xui_geo_menu() {
         echo -e "  Настройки → Xray конфигурация → Routing → добавить правила:"
         echo -e "  ${CYAN}РФ напрямую:${NC}      geosite:category-ru        → direct"
         echo -e "  ${CYAN}Заблокированные:${NC}  geosite:category-ru-blocked → proxy/WARP"
-        echo -e "  ${CYAN}Реклама:${NC}          geosite:category-ads-all    → block"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${CYAN}Реклама:${NC}          geosite:category-ads-all    → block ${YELLOW}(только roscomvpn)${NC}"
+        fi
         echo ""
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${WHITE}Актуальные URL для Happ (если ошибка загрузки):${NC}"
@@ -4717,9 +4746,12 @@ _3xui_geo_menu() {
         echo -e "  ${YELLOW}[1]${NC}  Обновить файлы на сервере"
         echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (ежедневно)"
         if [ "$geo_ok" -eq 1 ]; then
-            echo -e "  ${GREEN}[4]${NC}  Добавить правила routing в 3X-UI (авто)"
-            echo -e "  ${CYAN}[q]${NC}  QR URL для Happ (исправить ошибку загрузки)"
-            echo -e "  ${RED}[3]${NC}  Удалить (вернуть стандартные v2fly файлы)"
+            echo -e "  ${GREEN}[3]${NC}  Добавить правила routing в 3X-UI (авто)"
+        fi
+        echo -e "  ${CYAN}[4]${NC}  Свой список доменов (/etc/govpn/custom_domains.txt)"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${CYAN}[5]${NC}  QR URL для Happ (исправить ошибку загрузки)"
+            echo -e "  ${RED}[6]${NC}  Удалить (вернуть стандартные v2fly файлы)"
         fi
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -4732,13 +4764,32 @@ _3xui_geo_menu() {
                 _3xui_setup_geo_autoupdate
                 echo -e "  ${GREEN}✓ Автообновление настроено (/etc/cron.daily/govpn-geo-update)${NC}"
                 read -p "  Enter..." < /dev/tty ;;
-            4)
+            3)
                 if [ "$geo_ok" -eq 1 ]; then
                     echo ""
                     _3xui_add_geo_routing
                     read -p "  Enter..." < /dev/tty
                 fi ;;
-            [qQ])
+            4)
+                # Свой список доменов
+                mkdir -p /etc/govpn
+                local cfile="/etc/govpn/custom_domains.txt"
+                [ ! -f "$cfile" ] && cat > "$cfile" << 'CEOF'
+# Свой список доменов для маршрутизации через proxy/WARP
+# Один домен на строку, # — комментарий
+# Пример:
+# rutracker.org
+# kinozal.tv
+CEOF
+                nano "$cfile" 2>/dev/null || vi "$cfile" 2>/dev/null || {
+                    echo -e "  ${YELLOW}Файл: ${cfile}${NC}"
+                    cat "$cfile"
+                    echo -e "
+  ${WHITE}Редактор не найден. Отредактируй вручную:${NC}"
+                    echo -e "  nano ${cfile}"
+                    read -p "  Enter..." < /dev/tty
+                } ;;
+            5)
                 if [ "$geo_ok" -eq 1 ]; then
                     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
                     clear
@@ -4749,13 +4800,13 @@ ${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
                     echo -e "  Замени URL на актуальные:
 "
                     echo -e "  ${WHITE}1. Файл Гео-айпи (geoip.dat):${NC}"
-                    echo "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat" | qrencode -t ANSIUTF8 2>/dev/null
+                    echo "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" | qrencode -t ANSIUTF8 2>/dev/null
                     echo -e "  ${WHITE}2. Файл Гео-сайтов (geosite.dat):${NC}"
                     echo "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" | qrencode -t ANSIUTF8 2>/dev/null
                     echo ""
                     read -p "  Enter..." < /dev/tty
                 fi ;;
-            3)
+            6)
                 if [ "$geo_ok" -eq 1 ]; then
                     echo -ne "\n  ${RED}Удалить roscomvpn файлы и восстановить стандартные? (y/n): ${NC}"
                     read -r c < /dev/tty
@@ -4763,7 +4814,7 @@ ${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
                         # Скачиваем стандартные файлы Cloudflare/v2fly
                         echo -e "  ${CYAN}Восстанавливаю стандартные файлы...${NC}"
                         curl -fsSL --max-time 30 \
-                            "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" \
+                            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" \
                             -o "${xray_dir}/geoip.dat" 2>/dev/null && \
                             echo -e "  ${GREEN}✓ geoip.dat${NC}" || echo -e "  ${RED}✗ geoip.dat${NC}"
                         curl -fsSL --max-time 30 \
@@ -4799,7 +4850,7 @@ _3xui_update_geofiles() {
 
     echo -ne "  ${CYAN}→ geoip.dat...${NC} "
     # GitHub Releases как основной источник, jsDelivr как fallback
-    local GH_GEOIP="https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat"
+    local GH_GEOIP="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
     local GH_GEOSITE="https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
 
     if curl -fsSL --max-time 30 "${GH_GEOIP}"         -o "${xray_dir}/geoip.dat" 2>/dev/null ||        curl -fsSL --max-time 30         "${CDN}/roscomvpn-geoip/release/geoip.dat"         -o "${xray_dir}/geoip.dat" 2>/dev/null; then
@@ -4840,7 +4891,7 @@ _3xui_setup_geo_autoupdate() {
     cat > /etc/cron.daily/govpn-geo-update << CRONEOF
 #!/bin/bash
 # Автообновление roscomvpn geoip/geosite
-curl -fsSL --max-time 60 "https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geoip/release/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null
+curl -fsSL --max-time 60 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geoip/release/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null
 curl -fsSL --max-time 60 "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geosite/release/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null
 systemctl restart x-ui > /dev/null 2>&1
 CRONEOF
