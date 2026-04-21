@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.96"
+VERSION="5.97"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1898,16 +1898,39 @@ if has_ru:
     })
 
 # Свой список доменов
+# Формат файла:
+#   domain.com          — через proxy (default)
+#   domain.com proxy    — через proxy явно
+#   domain.com direct   — напрямую без VPN
 custom_file = "/etc/govpn/custom_domains.txt"
 if os.path.exists(custom_file):
+    custom_proxy = []
+    custom_direct = []
     with open(custom_file) as f:
-        custom = [d.strip() for d in f if d.strip() and not d.startswith("#")]
-    if custom:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            domain = parts[0]
+            direction = parts[1].lower() if len(parts) > 1 else "proxy"
+            if direction == "direct":
+                custom_direct.append(domain)
+            else:
+                custom_proxy.append(domain)
+    if custom_direct:
+        NEW_RULES.insert(0, {
+            "type": "field",
+            "domain": custom_direct,
+            "outboundTag": "direct",
+            "_comment": "govpn: пользовательский список (direct)"
+        })
+    if custom_proxy:
         NEW_RULES.append({
             "type": "field",
-            "domain": custom,
+            "domain": custom_proxy,
             "outboundTag": "proxy",
-            "_comment": "roscomvpn: пользовательский список"
+            "_comment": "govpn: пользовательский список (proxy)"
         })
 
 if not NEW_RULES:
@@ -4840,11 +4863,17 @@ _3xui_geo_menu() {
                 mkdir -p /etc/govpn
                 local cfile="/etc/govpn/custom_domains.txt"
                 [ ! -f "$cfile" ] && cat > "$cfile" << 'CEOF'
-# Свой список доменов для маршрутизации через proxy/WARP
-# Один домен на строку, # — комментарий
-# Пример:
-# rutracker.org
-# kinozal.tv
+# Свой список доменов для маршрутизации
+# Формат: домен [направление]
+#   домен           — через proxy/WARP (по умолчанию)
+#   домен proxy     — явно через proxy/WARP
+#   домен direct    — напрямую без VPN
+#
+# Примеры:
+# rutracker.org           <- через VPN
+# kinozal.tv proxy        <- через VPN (явно)
+# 2ip.ru direct           <- напрямую
+# gosuslugi.ru direct     <- напрямую
 CEOF
                 nano "$cfile" 2>/dev/null || vi "$cfile" 2>/dev/null || {
                     echo -e "  ${YELLOW}Файл: ${cfile}${NC}"
@@ -4942,6 +4971,26 @@ _3xui_update_geofiles() {
         systemctl restart x-ui > /dev/null 2>&1
         echo -e "  ${CYAN}↻ xray перезапущен${NC}"
         log_action "3XUI: обновлены geoip/geosite (roscomvpn)"
+
+        # Автоматически применяем правила routing если ещё не добавлены
+        local db="/etc/x-ui/x-ui.db"
+        if [ -f "$db" ]; then
+            local has_rules
+            has_rules=$(sqlite3 "$db"                 "SELECT value FROM settings WHERE key='xrayTemplateConfig';" 2>/dev/null |                 python3 -c "
+import json,sys
+try:
+    cfg=json.load(sys.stdin)
+    rules=cfg.get('routing',{}).get('rules',[])
+    print(sum(1 for r in rules if 'roscomvpn' in r.get('_comment','')))
+except: print(0)
+" 2>/dev/null || echo 0)
+            if [ "${has_rules:-0}" -eq 0 ]; then
+                echo -e "  ${CYAN}Применяю правила routing автоматически...${NC}"
+                _3xui_add_geo_routing
+            else
+                echo -e "  ${GREEN}✓ Правила routing уже настроены${NC}"
+            fi
+        fi
     else
         echo -e "\n  ${YELLOW}⚠ Обновление частичное — проверьте интернет${NC}"
     fi
