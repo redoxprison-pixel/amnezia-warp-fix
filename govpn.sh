@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.97"
+VERSION="5.98"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1848,17 +1848,36 @@ https://pkg.cloudflareclient.com/ ${codename} main" \
 }
 
 _3xui_add_geo_routing() {
-    # Добавляет правила geosite в xrayTemplateConfig
     local db="/etc/x-ui/x-ui.db"
     command -v sqlite3 &>/dev/null || apt-get install -y sqlite3 > /dev/null 2>&1
-    [ -f "$db" ] || { echo -e "  ${RED}✗ БД не найдена${NC}"; return 1; }
+    [ -f "$db" ] || { echo -e "  ${RED}✗ БД не найдена: ${db}${NC}"; return 1; }
+
+    # Ищем geosite.dat
+    local xray_dir="/usr/local/x-ui/bin"
+    [ ! -f "${xray_dir}/geosite.dat" ] && \
+        xray_dir=$(find /usr/local -name "geosite.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "/usr/local/x-ui/bin")
+    echo -e "  ${WHITE}Путь: ${xray_dir}${NC}"
+
+    # Проверка размера - roscomvpn > 2MB
+    local fsize=0
+    [ -f "${xray_dir}/geosite.dat" ] && fsize=$(stat -c%s "${xray_dir}/geosite.dat" 2>/dev/null || echo 0)
+    if [ "$fsize" -lt 2000000 ]; then
+        echo -e "  ${YELLOW}⚠ geosite.dat стандартный (${fsize}B < 2MB) — сначала обновите [1]${NC}"
+        echo -ne "  Добавить правила всё равно? (y/n): "
+        read -r c < /dev/tty
+        [ "$c" != "y" ] && return 1
+    fi
 
     python3 - << 'PYEOF'
-import json, subprocess, sys
+import json, subprocess as sp, sys, os
 
 db = '/etc/x-ui/x-ui.db'
-r = subprocess.run(['sqlite3', db,
-    "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
+xray_dir = '/usr/local/x-ui/bin'
+for d in ['/usr/local/x-ui/bin']:
+    if os.path.exists(f'{d}/geosite.dat'):
+        xray_dir = d; break
+
+r = sp.run(['sqlite3', db, "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
     capture_output=True, text=True)
 tmpl_str = r.stdout.strip()
 if not tmpl_str:
@@ -1869,18 +1888,20 @@ cfg = json.loads(tmpl_str)
 routing = cfg.setdefault('routing', {})
 rules = routing.setdefault('rules', [])
 
-# Теги которые нас интересуют
-# Проверяем что roscomvpn geosite установлен
-import os, subprocess as sp
-xray_dir = "/usr/local/x-ui/bin"
-geosite_path = f"{xray_dir}/geosite.dat"
+# Определяем реальный outbound для proxy
+outbounds = cfg.get('outbounds', [])
+proxy_tag = 'direct'
+for o in outbounds:
+    if o.get('tag','').upper() in ['WARP']:
+        proxy_tag = o.get('tag')
+        break
+    if o.get('tag','').lower() in ['proxy', 'socks']:
+        proxy_tag = o.get('tag')
+print(f"  Outbound: {proxy_tag}")
 
-# Проверяем наличие нужных категорий в geosite.dat
-has_ru = False
-if os.path.exists(geosite_path):
-    # Roscomvpn geosite > 3MB, стандартный v2fly < 2MB
-    size = os.path.getsize(geosite_path)
-    has_ru = size > 2_000_000
+# Roscomvpn правила
+geosite_size = os.path.getsize(f'{xray_dir}/geosite.dat') if os.path.exists(f'{xray_dir}/geosite.dat') else 0
+has_ru = geosite_size > 2_000_000
 
 NEW_RULES = []
 if has_ru:
@@ -1893,59 +1914,39 @@ if has_ru:
     NEW_RULES.append({
         "type": "field",
         "domain": ["geosite:category-ru-blocked"],
-        "outboundTag": "proxy",
-        "_comment": "roscomvpn: заблокированные через прокси"
+        "outboundTag": proxy_tag,
+        "_comment": f"roscomvpn: заблокированные через {proxy_tag}"
     })
 
 # Свой список доменов
-# Формат файла:
-#   domain.com          — через proxy (default)
-#   domain.com proxy    — через proxy явно
-#   domain.com direct   — напрямую без VPN
 custom_file = "/etc/govpn/custom_domains.txt"
 if os.path.exists(custom_file):
-    custom_proxy = []
-    custom_direct = []
+    custom_proxy, custom_direct = [], []
     with open(custom_file) as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+            if not line or line.startswith("#"): continue
             parts = line.split()
             domain = parts[0]
             direction = parts[1].lower() if len(parts) > 1 else "proxy"
-            if direction == "direct":
-                custom_direct.append(domain)
-            else:
-                custom_proxy.append(domain)
+            (custom_direct if direction == "direct" else custom_proxy).append(domain)
     if custom_direct:
-        NEW_RULES.insert(0, {
-            "type": "field",
-            "domain": custom_direct,
-            "outboundTag": "direct",
-            "_comment": "govpn: пользовательский список (direct)"
-        })
+        NEW_RULES.insert(0, {"type":"field","domain":custom_direct,"outboundTag":"direct","_comment":"govpn: custom direct"})
     if custom_proxy:
-        NEW_RULES.append({
-            "type": "field",
-            "domain": custom_proxy,
-            "outboundTag": "proxy",
-            "_comment": "govpn: пользовательский список (proxy)"
-        })
+        NEW_RULES.append({"type":"field","domain":custom_proxy,"outboundTag":proxy_tag,"_comment":f"govpn: custom {proxy_tag}"})
 
 if not NEW_RULES:
-    print("  WARN: roscomvpn geosite не установлен — сначала обновите файлы")
+    print("  WARN: нечего добавлять")
     sys.exit(0)
 
-# Удаляем старые roscomvpn правила если есть
-rules = [r for r in rules if '_comment' not in r or 'roscomvpn' not in r.get('_comment','')]
+# Удаляем старые govpn/roscomvpn правила
+rules = [r for r in rules if not any(k in r.get('_comment','') for k in ['roscomvpn','govpn'])]
 
-# Вставляем перед последними правилами (api, blocked)
+# Вставляем в начало (до системных правил api/blocked)
 insert_pos = 0
 for i, rule in enumerate(rules):
-    if rule.get('outboundTag') in ('api', 'blocked') and not rule.get('domain'):
-        insert_pos = i
-        break
+    if rule.get('outboundTag') in ('api',) and not rule.get('domain'):
+        insert_pos = i; break
     insert_pos = i + 1
 
 for i, rule in enumerate(NEW_RULES):
@@ -1953,26 +1954,23 @@ for i, rule in enumerate(NEW_RULES):
 
 routing['rules'] = rules
 cfg['routing'] = routing
-
 new_tmpl = json.dumps(cfg, ensure_ascii=False, indent=2).replace("'", "''")
-r2 = subprocess.run(['sqlite3', db,
-    f"UPDATE settings SET value='{new_tmpl}' WHERE key='xrayTemplateConfig';"],
+r2 = sp.run(['sqlite3', db, f"UPDATE settings SET value='{new_tmpl}' WHERE key='xrayTemplateConfig';"],
     capture_output=True, text=True)
 if r2.returncode == 0:
-    print("  OK: правила добавлены")
+    print(f"  OK: добавлено {len(NEW_RULES)} правил")
 else:
-    print(f"  ERR: {r2.stderr}")
-    sys.exit(1)
+    print(f"  ERR: {r2.stderr}"); sys.exit(1)
 PYEOF
     local ret=$?
     if [ "$ret" -eq 0 ]; then
-        systemctl restart x-ui > /dev/null 2>&1
-        sleep 2
-        echo -e "  ${GREEN}✓ Правила маршрутизации добавлены, xray перезапущен${NC}"
-        echo -e "  ${CYAN}Проверь в 3X-UI → Настройки → Xray → Routing${NC}"
+        systemctl restart x-ui > /dev/null 2>&1; sleep 2
+        echo -e "  ${GREEN}✓ Правила добавлены, xray перезапущен${NC}"
+        echo -e "  ${CYAN}Проверь: 3X-UI → Настройки → Xray → Routing${NC}"
     fi
     return $ret
 }
+
 
 _3xui_patch_db() {
     local db="/etc/x-ui/x-ui.db"
@@ -4866,7 +4864,7 @@ _3xui_geo_menu() {
 # Свой список доменов для маршрутизации
 # Формат: домен [направление]
 #   домен           — через proxy/WARP (по умолчанию)
-#   домен proxy     — явно через proxy/WARP
+#   домен proxy     — явно через WARP
 #   домен direct    — напрямую без VPN
 #
 # Примеры:
