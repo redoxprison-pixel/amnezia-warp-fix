@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.07"
+VERSION="6.08"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6112,96 +6112,98 @@ _3xui_selfsteal_wizard() {
     clear
     echo -e "\n${CYAN}━━━ Мастер Self-Steal (авто) ━━━${NC}\n"
 
-    # Находим параметры
     local domain; domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
     local nginx_port; nginx_port=$(ss -tlnp 2>/dev/null | grep nginx | \
-        grep -v ':443 \|:80 ' | grep -oP '\d+\.\d+\.\d+\.\d+:\K[0-9]+|::\K[0-9]+' | \
-        sort -n | head -1)
+        grep -vE ':443 |:80 ' | grep -oP '[\d.]+:\K[0-9]+' | sort -n | head -1)
     nginx_port="${nginx_port:-7443}"
 
     if [ -z "$domain" ]; then
-        echo -e "  ${RED}✗ Домен не найден. Сначала настройте SSL через Домен и SSL${NC}"
+        echo -e "  ${RED}✗ Домен не найден${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
     echo -e "  ${WHITE}Домен:${NC}      ${CYAN}${domain}${NC}"
-    echo -e "  ${WHITE}Nginx:${NC}      ${CYAN}127.0.0.1:${nginx_port}${NC}"
-    echo -e "  ${WHITE}Self-Steal:${NC} ${CYAN}${domain} → 127.0.0.1:${nginx_port}${NC}\n"
+    echo -e "  ${WHITE}Nginx:${NC}      ${CYAN}127.0.0.1:${nginx_port}${NC}\n"
 
-    # Получаем список inbounds для исправления
-    echo -e "  ${WHITE}Inbounds для перевода на Self-Steal:${NC}"
     local db="/etc/x-ui/x-ui.db"
-    local inbounds_json
-    inbounds_json=$(sqlite3 "$db" "SELECT id, remark, stream_settings FROM inbounds \
-        WHERE stream_settings LIKE '%reality%';" 2>/dev/null)
 
-    if [ -z "$inbounds_json" ]; then
-        echo -e "  ${YELLOW}Reality inbounds не найдены${NC}"
-        read -p "  Enter..." < /dev/tty; return
-    fi
-
-    local changed=0
-    while IFS='|' read -r ib_id ib_remark ib_stream; do
-        [ -z "$ib_id" ] && continue
-        local cur_target; cur_target=$(echo "$ib_stream" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    r=d.get('realitySettings',{})
-    print(r.get('dest',r.get('target','')))
-except: print('')
-" 2>/dev/null)
-        echo -e "  ${CYAN}#${ib_id}${NC} ${ib_remark} → target: ${cur_target}"
-        if [[ "$cur_target" != *"127.0.0.1"* ]]; then
-            echo -e "      ${YELLOW}⚠ Не Self-Steal — нужно исправить${NC}"
-        else
-            echo -e "      ${GREEN}✓ Self-Steal${NC}"
-        fi
-    done <<< "$inbounds_json"
+    # Показываем inbounds через Python (безопасный парсинг JSON)
+    python3 /tmp/ss_check.py "$db" "$domain" "$nginx_port" check 2>/dev/null || \
+    python3 - "$db" "$domain" "$nginx_port" check << 'SSPY'
+import json, subprocess, sys
+db, domain, nginx_port, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+r = subprocess.run(['sqlite3', db,
+    "SELECT id||'|||'||remark||'|||'||stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%';"],
+    capture_output=True, text=True)
+for line in r.stdout.strip().split('\n'):
+    if '|||' not in line: continue
+    parts = line.split('|||', 2)
+    if len(parts) < 3: continue
+    ib_id, remark, stream = parts
+    try:
+        ss = json.loads(stream)
+        rs = ss.get('realitySettings', {})
+        cur = rs.get('dest', rs.get('target', '?'))
+        ok = '127.0.0.1' in str(cur)
+        print(f"  #{ib_id} {remark}")
+        print(f"      target: {cur}  {'✓ Self-Steal' if ok else '⚠ нужно исправить'}")
+    except: print(f"  #{ib_id} {remark} — ошибка парсинга")
+SSPY
 
     echo ""
-    echo -ne "  ${YELLOW}Исправить все Reality inbounds на Self-Steal? (y/n):${NC} "
+    echo -ne "  ${YELLOW}Применить Self-Steal ко всем Reality inbounds? (y/n):${NC} "
     read -r confirm < /dev/tty
     [ "$confirm" != "y" ] && return
 
-    # Применяем исправления
-    while IFS='|' read -r ib_id ib_remark ib_stream; do
-        [ -z "$ib_id" ] && continue
-        local new_stream
-        new_stream=$(echo "$ib_stream" | python3 - << PYEOF
-import json, sys
-ss = json.load(sys.stdin)
-rs = ss.get('realitySettings', {})
-# Меняем target/dest на Self-Steal
-rs['dest'] = '127.0.0.1:${nginx_port}'
-rs['target'] = '127.0.0.1:${nginx_port}'
-rs['serverNames'] = ['${domain}']
-ss['realitySettings'] = rs
-print(json.dumps(ss, ensure_ascii=False))
-PYEOF
+    # Применяем
+    local changed
+    changed=$(python3 - "$db" "$domain" "$nginx_port" apply << 'SSPY2'
+import json, subprocess, sys
+db, domain, nginx_port, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+r = subprocess.run(['sqlite3', db,
+    "SELECT id||'|||'||remark||'|||'||stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%';"],
+    capture_output=True, text=True)
+changed = 0
+for line in r.stdout.strip().split('\n'):
+    if '|||' not in line: continue
+    parts = line.split('|||', 2)
+    if len(parts) < 3: continue
+    ib_id, remark, stream = parts
+    try:
+        ss = json.loads(stream)
+        rs = ss.get('realitySettings', {})
+        rs['dest'] = f'127.0.0.1:{nginx_port}'
+        rs['target'] = f'127.0.0.1:{nginx_port}'
+        rs['serverNames'] = [domain]
+        ss['realitySettings'] = rs
+        new_ss = json.dumps(ss, ensure_ascii=False).replace("'", "''")
+        r2 = subprocess.run(['sqlite3', db,
+            f"UPDATE inbounds SET stream_settings='{new_ss}' WHERE id={ib_id};"],
+            capture_output=True, text=True)
+        if r2.returncode == 0:
+            print(f"  ✓ #{ib_id} {remark}")
+            changed += 1
+        else:
+            print(f"  ✗ #{ib_id}: {r2.stderr.strip()}")
+    except Exception as e:
+        print(f"  ✗ #{ib_id}: {e}")
+print(f"CHANGED:{changed}")
+SSPY2
 )
-        if [ -n "$new_stream" ]; then
-            local escaped; escaped=$(echo "$new_stream" | sed "s/'/''/g")
-            sqlite3 "$db" "UPDATE inbounds SET stream_settings='${escaped}' WHERE id=${ib_id};" 2>/dev/null
-            echo -e "  ${GREEN}✓ #${ib_id} ${ib_remark} → Self-Steal${NC}"
-            (( changed++ ))
-        fi
-    done <<< "$inbounds_json"
-
-    if [ "$changed" -gt 0 ]; then
-        systemctl restart x-ui > /dev/null 2>&1
-        sleep 2
-        echo -e "\n  ${GREEN}✓ Применено: ${changed} inbound(s), xray перезапущен${NC}"
-        echo -e "  ${WHITE}Проверь: https://${domain} должен открыть Nginx сайт${NC}"
-
-        # Предлагаем установить заглушку CinemaLab
+    echo "$changed" | grep -v '^CHANGED:'
+    local cnt; cnt=$(echo "$changed" | grep '^CHANGED:' | cut -d: -f2)
+    if [ "${cnt:-0}" -gt 0 ]; then
+        systemctl restart x-ui > /dev/null 2>&1; sleep 2
+        echo -e "\n  ${GREEN}✓ Применено: ${cnt} inbound(s), xray перезапущен${NC}"
+        echo -e "  ${WHITE}Проверь: https://${domain}${NC}"
         echo ""
-        echo -ne "  ${YELLOW}Установить красивую заглушку для сайта? (y/n):${NC} "
-        read -r install_stub < /dev/tty
-        [ "$install_stub" = "y" ] && _3xui_install_stub_site
+        echo -ne "  ${YELLOW}Установить заглушку CinemaLab? (y/n):${NC} "
+        read -r inst < /dev/tty
+        [ "$inst" = "y" ] && _3xui_install_stub_site
     fi
     read -p "  Enter..." < /dev/tty
 }
+
 
 _3xui_install_stub_site() {
     local webroot="/var/www/html"
