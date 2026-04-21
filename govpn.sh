@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.04"
+VERSION="6.05"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1315,9 +1315,12 @@ except: print(0)
                     ren_res=$(MODE=rename IB_ID="$_ib_id" OLD_EMAIL="$old_em" \
                         NEW_EMAIL="$new_em" python3 /tmp/xui_db_write.py 2>/dev/null)
                     rm -f "$_nef"
-                    [ "$ren_res" = "ok" ] && (( ren_ok++ )) || \
+                    if [ "$ren_res" = "ok" ]; then
+                        (( ren_ok++ ))
+                        echo -e "  ${GREEN}✓ id=${_ib_id}: ok${NC}"
+                    else
                         echo -e "  ${RED}✗ id=${_ib_id}: ${ren_res#err:}${NC}"
-                        echo -e "  ${RED}✗ id=${_ib_id}: ошибка${NC}"
+                    fi
                 done
 
                 if [ "$ren_ok" -gt 0 ]; then
@@ -1998,12 +2001,16 @@ if has_ru:
         "outboundTag": "direct",
         "_comment": "roscomvpn: РФ/РБ напрямую"
     })
-    NEW_RULES.append({
-        "type": "field",
-        "domain": ["geosite:category-ru-blocked"],
-        "outboundTag": proxy_tag,
-        "_comment": f"roscomvpn: заблокированные через {proxy_tag}"
-    })
+    # category-ru-blocked только если файл runetfreedom (>10MB)
+    import os
+    geo_size = os.path.getsize(geosite_path) if os.path.exists(geosite_path) else 0
+    if geo_size > 10_000_000:
+        NEW_RULES.append({
+            "type": "field",
+            "domain": ["geosite:category-ru-blocked"],
+            "outboundTag": proxy_tag,
+            "_comment": f"roscomvpn: заблокированные через {proxy_tag}"
+        })
 
 # Свой список доменов
 custom_file = "/etc/govpn/custom_domains.txt"
