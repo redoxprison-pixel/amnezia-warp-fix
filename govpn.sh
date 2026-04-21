@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.01"
+VERSION="6.02"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2004,14 +2004,14 @@ _3xui_add_geo_routing() {
         xray_dir=$(find /usr/local -name "geosite.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "/usr/local/x-ui/bin")
     echo -e "  ${WHITE}Путь: ${xray_dir}${NC}"
 
-    # Проверка размера - roscomvpn > 2MB
+    # Проверка размера - roscomvpn > 2MB, стандартный < 500KB
     local fsize=0
     [ -f "${xray_dir}/geosite.dat" ] && fsize=$(stat -c%s "${xray_dir}/geosite.dat" 2>/dev/null || echo 0)
     if [ "$fsize" -lt 2000000 ]; then
-        echo -e "  ${YELLOW}⚠ geosite.dat стандартный (${fsize}B < 2MB) — сначала обновите [1]${NC}"
-        echo -ne "  Добавить правила всё равно? (y/n): "
-        read -r c < /dev/tty
-        [ "$c" != "y" ] && return 1
+        echo -e "  ${RED}✗ geosite.dat не является roscomvpn файлом (${fsize}B < 2MB)${NC}"
+        echo -e "  ${YELLOW}Сначала обновите файлы — пункт [1]${NC}"
+        echo -e "  ${WHITE}Правила с geosite:category-ru-blocked НЕ добавлены${NC}"
+        return 1
     fi
 
     python3 - << 'PYEOF'
@@ -5189,8 +5189,15 @@ _3xui_update_geofiles() {
         log_action "3XUI: обновлены geoip/geosite (roscomvpn)"
 
         # Применяем правила routing ДО перезапуска xray
-        echo -e "  ${CYAN}Применяю правила routing...${NC}"
-        _3xui_add_geo_routing
+        # Проверяем что файл действительно roscomvpn (>2MB)
+        local geo_sz; geo_sz=$(stat -c%s "${xray_dir}/geosite.dat" 2>/dev/null || echo 0)
+        if [ "$geo_sz" -gt 2000000 ]; then
+            echo -e "  ${CYAN}Применяю правила routing...${NC}"
+            _3xui_add_geo_routing
+        else
+            echo -e "  ${YELLOW}⚠ geosite.dat (${geo_sz}B) — правила routing НЕ добавлены${NC}"
+            echo -e "  ${WHITE}Файл не содержит category-ru-blocked — повторите обновление${NC}"
+        fi
 
         sleep 1
         systemctl restart x-ui > /dev/null 2>&1
