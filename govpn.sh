@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.94"
+VERSION="5.96"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1877,14 +1877,10 @@ geosite_path = f"{xray_dir}/geosite.dat"
 
 # Проверяем наличие нужных категорий в geosite.dat
 has_ru = False
-has_ads = False
 if os.path.exists(geosite_path):
-    # Проверяем через xray если доступен
-    r = sp.run([f"{xray_dir}/xray", "run", "-test"], capture_output=True, text=True, timeout=5)
-    # Грубая проверка по размеру - roscomvpn файл > 3MB, стандартный < 2MB
+    # Roscomvpn geosite > 3MB, стандартный v2fly < 2MB
     size = os.path.getsize(geosite_path)
-    has_ru = size > 2_000_000  # roscomvpn файл больше стандартного
-    # category-ads-all есть только в roscomvpn файле
+    has_ru = size > 2_000_000
 
 NEW_RULES = []
 if has_ru:
@@ -4707,6 +4703,69 @@ EOF
 
 # Установка 3X-UI
 # Установка/обновление roscomvpn geoip+geosite для 3X-UI
+_3xui_backup_geofiles() {
+    # Создаёт локальный бэкап geofiles и проверяет их работоспособность
+    local xray_dir="/usr/local/x-ui/bin"
+    local backup_dir="/etc/govpn/geofiles_backup"
+    mkdir -p "$backup_dir"
+
+    echo -e "
+${CYAN}━━━ Бэкап GeoFiles ━━━${NC}
+"
+
+    # Тестируем текущие файлы через xray если доступен
+    local xray_bin; xray_bin=$(find /usr/local/x-ui -name "xray" -type f 2>/dev/null | head -1)
+    local files_ok=0
+    if [ -n "$xray_bin" ] && [ -f "${xray_dir}/geosite.dat" ] && [ -f "${xray_dir}/geoip.dat" ]; then
+        # Создаём минимальный тест-конфиг
+        local test_cfg; test_cfg=$(mktemp /tmp/xray_test_XXXX.json)
+        cat > "$test_cfg" << 'TCFG'
+{"routing":{"rules":[{"type":"field","domain":["geosite:category-ru"],"outboundTag":"direct"}]},"outbounds":[{"tag":"direct","protocol":"freedom"}]}
+TCFG
+        if timeout 5 "$xray_bin" -test -c "$test_cfg" > /dev/null 2>&1; then
+            files_ok=1
+            echo -e "  ${GREEN}✓ Текущие файлы протестированы — работают${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ Тест файлов не прошёл (возможно стандартные v2fly)${NC}"
+        fi
+        rm -f "$test_cfg"
+    fi
+
+    if [ -f "${xray_dir}/geosite.dat" ] && [ -f "${xray_dir}/geoip.dat" ]; then
+        cp "${xray_dir}/geosite.dat" "${backup_dir}/geosite.dat"
+        cp "${xray_dir}/geoip.dat"   "${backup_dir}/geoip.dat"
+        echo "$(date '+%Y-%m-%d %H:%M') files_ok=${files_ok}" > "${backup_dir}/meta.txt"
+        echo -e "  ${GREEN}✓ Бэкап сохранён: ${backup_dir}${NC}"
+    else
+        echo -e "  ${RED}✗ Файлы не найдены${NC}"
+        read -p "  Enter..." < /dev/tty; return 1
+    fi
+    read -p "  Enter..." < /dev/tty
+}
+
+_3xui_restore_geofiles() {
+    local xray_dir="/usr/local/x-ui/bin"
+    local backup_dir="/etc/govpn/geofiles_backup"
+
+    echo -e "
+${CYAN}Восстановление из бэкапа...${NC}"
+    if [ ! -f "${backup_dir}/geosite.dat" ] || [ ! -f "${backup_dir}/geoip.dat" ]; then
+        echo -e "  ${RED}✗ Бэкап не найден${NC}"
+        read -p "  Enter..." < /dev/tty; return 1
+    fi
+    local meta; meta=$(cat "${backup_dir}/meta.txt" 2>/dev/null || echo "?")
+    echo -e "  ${WHITE}Бэкап:${NC} ${CYAN}${meta}${NC}"
+    echo -ne "  Восстановить? (y/n): "
+    read -r c < /dev/tty
+    [ "$c" != "y" ] && return
+
+    cp "${backup_dir}/geosite.dat" "${xray_dir}/geosite.dat"
+    cp "${backup_dir}/geoip.dat"   "${xray_dir}/geoip.dat"
+    systemctl restart x-ui > /dev/null 2>&1
+    echo -e "  ${GREEN}✓ Восстановлено и xray перезапущен${NC}"
+    read -p "  Enter..." < /dev/tty
+}
+
 _3xui_geo_menu() {
     local xray_dir="/usr/local/x-ui/bin"
     [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
@@ -4743,12 +4802,18 @@ _3xui_geo_menu() {
             echo -e "  ${CYAN}github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat${NC}"
             echo ""
         fi
-        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы на сервере"
+        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы (roscomvpn)"
         echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (ежедневно)"
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${GREEN}[3]${NC}  Добавить правила routing в 3X-UI (авто)"
         fi
-        echo -e "  ${CYAN}[4]${NC}  Свой список доменов (/etc/govpn/custom_domains.txt)"
+        echo -e "  ${CYAN}[4]${NC}  Свой список доменов"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${YELLOW}[7]${NC}  Сохранить бэкап текущих файлов"
+        fi
+        if [ -f "/etc/govpn/geofiles_backup/geosite.dat" ]; then
+            echo -e "  ${YELLOW}[8]${NC}  Восстановить из бэкапа"
+        fi
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${CYAN}[5]${NC}  QR URL для Happ (исправить ошибку загрузки)"
             echo -e "  ${RED}[6]${NC}  Удалить (вернуть стандартные v2fly файлы)"
@@ -4806,6 +4871,8 @@ ${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
                     echo ""
                     read -p "  Enter..." < /dev/tty
                 fi ;;
+            7) [ "$geo_ok" -eq 1 ] && _3xui_backup_geofiles ;;
+            8) [ -f "/etc/govpn/geofiles_backup/geosite.dat" ] && _3xui_restore_geofiles ;;
             6)
                 if [ "$geo_ok" -eq 1 ]; then
                     echo -ne "\n  ${RED}Удалить roscomvpn файлы и восстановить стандартные? (y/n): ${NC}"
