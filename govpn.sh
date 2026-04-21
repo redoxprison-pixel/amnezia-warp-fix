@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.99"
+VERSION="6.00"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1702,7 +1702,7 @@ for ib in d.get('obj',[]):
         echo -e "  ${WHITE}── Клиенты ──────────────────────────${NC}"
         echo -e "  ${GREEN}[a]${NC}  Все клиенты"
         echo -e "  ${CYAN}[d]${NC}  Отключённые клиенты"
-        echo -e "  ${WHITE}── Маршрутизация ─────────────────────${NC}"
+        echo -e "  ${WHITE}── Routing ───────────────────────────${NC}"
         echo -e "  ${CYAN}[r]${NC}  QR настройки Happ/INCY (roscomvpn)"
         echo -e "  ${WHITE}── Настройки ────────────────────────${NC}"
         echo -e "  ${YELLOW}[i]${NC}  Вкл/выкл протоколов"
@@ -4787,6 +4787,22 @@ ${CYAN}Восстановление из бэкапа...${NC}"
     read -p "  Enter..." < /dev/tty
 }
 
+_3xui_qr_happ_urls() {
+    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
+    clear
+    echo -e "\n${CYAN}━━━ QR URL для Happ / v2rayTun ━━━${NC}\n"
+    echo -e "  ${WHITE}Замени URL в приложении на актуальные:\n${NC}"
+    echo -e "  ${WHITE}1. Гео-айпи (geoip.dat):${NC}"
+    echo "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip/release/geoip.dat" | qrencode -t ANSIUTF8 2>/dev/null
+    echo -e "  ${CYAN}https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip/release/geoip.dat${NC}\n"
+    echo -e "  ${WHITE}2. Гео-сайтов (geosite.dat):${NC}"
+    echo "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite/release/geosite.dat" | qrencode -t ANSIUTF8 2>/dev/null
+    echo -e "  ${CYAN}https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite/release/geosite.dat${NC}\n"
+    echo -e "  ${YELLOW}В Happ:${NC} Правила маршрутизации → Гео файлы → нажми ✏️ → вставь URL"
+    echo ""
+    read -p "  Enter..." < /dev/tty
+}
+
 _3xui_export_bypass_list() {
     # Экспорт списка доменов для bypass в Happ/v2rayTun
     local custom_file="/etc/govpn/custom_domains.txt"
@@ -4898,22 +4914,26 @@ _3xui_geo_menu() {
             echo -e "  ${CYAN}github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat${NC}"
             echo ""
         fi
-        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы (roscomvpn)"
+        echo -e "  ${WHITE}── Файлы ─────────────────────────────${NC}"
+        echo -e "  ${YELLOW}[1]${NC}  Обновить файлы (roscomvpn + авто routing)"
         echo -e "  ${YELLOW}[2]${NC}  Настроить автообновление (ежедневно)"
-        if [ "$geo_ok" -eq 1 ]; then
-            echo -e "  ${GREEN}[3]${NC}  Добавить правила routing в 3X-UI (авто)"
-        fi
-        echo -e "  ${CYAN}[4]${NC}  Свой список доменов (direct/proxy)"
-        echo -e "  ${CYAN}[9]${NC}  Экспорт bypass списка для Happ/v2rayTun"
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${YELLOW}[7]${NC}  Сохранить бэкап текущих файлов"
         fi
         if [ -f "/etc/govpn/geofiles_backup/geosite.dat" ]; then
             echo -e "  ${YELLOW}[8]${NC}  Восстановить из бэкапа"
         fi
+        echo -e "  ${WHITE}── Routing ───────────────────────────${NC}"
         if [ "$geo_ok" -eq 1 ]; then
-            echo -e "  ${CYAN}[5]${NC}  QR URL для Happ (исправить ошибку загрузки)"
-            echo -e "  ${RED}[6]${NC}  Удалить (вернуть стандартные v2fly файлы)"
+            echo -e "  ${GREEN}[3]${NC}  Применить правила routing вручную"
+        fi
+        echo -e "  ${CYAN}[4]${NC}  Свой список доменов (direct/proxy)"
+        echo -e "  ${WHITE}── Клиенты ───────────────────────────${NC}"
+        echo -e "  ${CYAN}[5]${NC}  QR URL для Happ"
+        echo -e "  ${CYAN}[6]${NC}  Экспорт bypass списка для Happ/v2rayTun"
+        if [ "$geo_ok" -eq 1 ]; then
+            echo -e "  ${WHITE}── Удаление ──────────────────────────${NC}"
+            echo -e "  ${RED}[9]${NC}  Удалить (вернуть стандартные v2fly файлы)"
         fi
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -4957,27 +4977,11 @@ CEOF
                     echo -e "  nano ${cfile}"
                     read -p "  Enter..." < /dev/tty
                 } ;;
-            5)
-                if [ "$geo_ok" -eq 1 ]; then
-                    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
-                    clear
-                    echo -e "
-${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
-"
-                    echo -e "  В Happ → Правила маршрутизации → Гео файлы"
-                    echo -e "  Замени URL на актуальные:
-"
-                    echo -e "  ${WHITE}1. Файл Гео-айпи (geoip.dat):${NC}"
-                    echo "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" | qrencode -t ANSIUTF8 2>/dev/null
-                    echo -e "  ${WHITE}2. Файл Гео-сайтов (geosite.dat):${NC}"
-                    echo "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" | qrencode -t ANSIUTF8 2>/dev/null
-                    echo ""
-                    read -p "  Enter..." < /dev/tty
-                fi ;;
+            5) _3xui_qr_happ_urls ;;
+            6) _3xui_export_bypass_list ;;
             7) [ "$geo_ok" -eq 1 ] && _3xui_backup_geofiles ;;
-            9) _3xui_export_bypass_list ;;
             8) [ -f "/etc/govpn/geofiles_backup/geosite.dat" ] && _3xui_restore_geofiles ;;
-            6)
+            9)
                 if [ "$geo_ok" -eq 1 ]; then
                     echo -ne "\n  ${RED}Удалить roscomvpn файлы и восстановить стандартные? (y/n): ${NC}"
                     read -r c < /dev/tty
@@ -5006,34 +5010,56 @@ ${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
 }
 
 _3xui_update_geofiles() {
-    echo -e "\n${CYAN}━━━ Обновление GeoIP / GeoSite (roscomvpn) ━━━${NC}\n"
     local xray_dir="/usr/local/x-ui/bin"
-    [ ! -d "$xray_dir" ] && xray_dir="/usr/local/share/xray" 
-    [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname)
-    if [ -z "$xray_dir" ]; then
-        echo -e "  ${RED}✗ Не удалось найти директорию xray${NC}"
-        return 1
-    fi
+    [ ! -d "$xray_dir" ] && xray_dir=$(find /usr/local -name "xray" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "/usr/local/x-ui/bin")
+
+    echo -e "\n${CYAN}━━━ Обновление GeoIP / GeoSite (roscomvpn) ━━━${NC}\n"
     echo -e "  ${WHITE}Директория:${NC} ${CYAN}${xray_dir}${NC}"
 
     local CDN="https://cdn.jsdelivr.net/gh/hydraponique"
+    local GH="https://github.com/hydraponique"
     local ok=0
 
+    # geoip.dat
     echo -ne "  ${CYAN}→ geoip.dat...${NC} "
-    # GitHub Releases как основной источник, jsDelivr как fallback
-    local GH_GEOIP="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-    local GH_GEOSITE="https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
-
-    if curl -fsSL --max-time 30 "${GH_GEOIP}"         -o "${xray_dir}/geoip.dat" 2>/dev/null ||        curl -fsSL --max-time 30         "${CDN}/roscomvpn-geoip/release/geoip.dat"         -o "${xray_dir}/geoip.dat" 2>/dev/null; then
+    if curl -fsSL --max-time 30 \
+            "${CDN}/roscomvpn-geoip/release/geoip.dat" \
+            -o "${xray_dir}/geoip.dat" 2>/dev/null && \
+       [ -s "${xray_dir}/geoip.dat" ]; then
         echo -e "${GREEN}✓${NC}"
+        (( ok++ ))
+    elif curl -fsSL --max-time 30 \
+            "${GH}/roscomvpn-geoip/releases/latest/download/geoip.dat" \
+            -o "${xray_dir}/geoip.dat" 2>/dev/null && \
+       [ -s "${xray_dir}/geoip.dat" ]; then
+        echo -e "${GREEN}✓${NC} (GH)"
         (( ok++ ))
     else
         echo -e "${RED}✗${NC}"
     fi
 
+    # geosite.dat
     echo -ne "  ${CYAN}→ geosite.dat...${NC} "
-    if curl -fsSL --max-time 30 "${GH_GEOSITE}"         -o "${xray_dir}/geosite.dat" 2>/dev/null ||        curl -fsSL --max-time 30         "${CDN}/roscomvpn-geosite/release/geosite.dat"         -o "${xray_dir}/geosite.dat" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC}"
+    if curl -fsSL --max-time 30 \
+            "${CDN}/roscomvpn-geosite/release/geosite.dat" \
+            -o "${xray_dir}/geosite.dat" 2>/dev/null && \
+       [ -s "${xray_dir}/geosite.dat" ]; then
+        local sz; sz=$(stat -c%s "${xray_dir}/geosite.dat" 2>/dev/null || echo 0)
+        if [ "$sz" -gt 2000000 ]; then
+            echo -e "${GREEN}✓${NC} (${sz} байт)"
+            (( ok++ ))
+        else
+            echo -e "${YELLOW}⚠ файл мал (${sz}B) — пробую GitHub${NC}"
+            curl -fsSL --max-time 30 \
+                "${GH}/roscomvpn-geosite/releases/latest/download/geosite.dat" \
+                -o "${xray_dir}/geosite.dat" 2>/dev/null && \
+            [ -s "${xray_dir}/geosite.dat" ] && (( ok++ )) || true
+        fi
+    elif curl -fsSL --max-time 30 \
+            "${GH}/roscomvpn-geosite/releases/latest/download/geosite.dat" \
+            -o "${xray_dir}/geosite.dat" 2>/dev/null && \
+       [ -s "${xray_dir}/geosite.dat" ]; then
+        echo -e "${GREEN}✓${NC} (GH)"
         (( ok++ ))
     else
         echo -e "${RED}✗${NC}"
@@ -5044,11 +5070,10 @@ _3xui_update_geofiles() {
         echo -e "  ${WHITE}Источник:${NC} roscomvpn (Россия+Беларусь прямые, остальное через прокси)"
         log_action "3XUI: обновлены geoip/geosite (roscomvpn)"
 
-        # Применяем правила routing ПЕРЕД перезапуском xray
+        # Применяем правила routing ДО перезапуска xray
         echo -e "  ${CYAN}Применяю правила routing...${NC}"
         _3xui_add_geo_routing
 
-        # Перезапускаем xray после изменений
         sleep 1
         systemctl restart x-ui > /dev/null 2>&1
         sleep 3
@@ -5058,6 +5083,7 @@ _3xui_update_geofiles() {
     fi
     read -p "  Enter..." < /dev/tty
 }
+
 
 # Автообновление geofiles через cron
 _3xui_setup_geo_autoupdate() {
