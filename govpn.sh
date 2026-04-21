@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.08"
+VERSION="6.09"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6127,71 +6127,61 @@ _3xui_selfsteal_wizard() {
 
     local db="/etc/x-ui/x-ui.db"
 
-    # Показываем inbounds через Python (безопасный парсинг JSON)
-    python3 /tmp/ss_check.py "$db" "$domain" "$nginx_port" check 2>/dev/null || \
-    python3 - "$db" "$domain" "$nginx_port" check << 'SSPY'
-import json, subprocess, sys
-db, domain, nginx_port, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-r = subprocess.run(['sqlite3', db,
-    "SELECT id||'|||'||remark||'|||'||stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%';"],
-    capture_output=True, text=True)
-for line in r.stdout.strip().split('\n'):
-    if '|||' not in line: continue
-    parts = line.split('|||', 2)
-    if len(parts) < 3: continue
-    ib_id, remark, stream = parts
+    # Пишем Python скрипт во временный файл и запускаем
+    cat > /tmp/_govpn_ss.py << 'PYEOF_SS'
+import json, sys, sqlite3, os
+
+db = sys.argv[1]
+domain = sys.argv[2]
+nginx_port = int(sys.argv[3])
+mode = sys.argv[4] if len(sys.argv) > 4 else 'check'
+
+conn = sqlite3.connect(db)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+cur = conn.cursor()
+cur.execute("SELECT id, remark, stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%'")
+rows = cur.fetchall()
+
+changed = 0
+for ib_id, remark, stream in rows:
     try:
         ss = json.loads(stream)
         rs = ss.get('realitySettings', {})
-        cur = rs.get('dest', rs.get('target', '?'))
-        ok = '127.0.0.1' in str(cur)
-        print(f"  #{ib_id} {remark}")
-        print(f"      target: {cur}  {'✓ Self-Steal' if ok else '⚠ нужно исправить'}")
-    except: print(f"  #{ib_id} {remark} — ошибка парсинга")
-SSPY
+        cur_target = rs.get('dest', rs.get('target', '?'))
+        is_self = '127.0.0.1' in str(cur_target)
+        if mode == 'check':
+            print(f"  #{ib_id} {remark}")
+            print(f"      target: {cur_target}  {'✓ Self-Steal' if is_self else '⚠ нужно исправить'}")
+        else:
+            rs['dest'] = f'127.0.0.1:{nginx_port}'
+            rs['target'] = f'127.0.0.1:{nginx_port}'
+            rs['serverNames'] = [domain]
+            ss['realitySettings'] = rs
+            new_ss = json.dumps(ss, ensure_ascii=False)
+            conn.execute("UPDATE inbounds SET stream_settings=? WHERE id=?", (new_ss, ib_id))
+            conn.commit()
+            print(f"  ✓ #{ib_id} {remark} → 127.0.0.1:{nginx_port}")
+            changed += 1
+    except Exception as e:
+        print(f"  ✗ #{ib_id} {remark}: {e}")
+
+conn.close()
+if mode == 'apply':
+    print(f"CHANGED:{changed}")
+PYEOF_SS
+
+    python3 /tmp/_govpn_ss.py "$db" "$domain" "$nginx_port" check
 
     echo ""
-    echo -ne "  ${YELLOW}Применить Self-Steal ко всем Reality inbounds? (y/n):${NC} "
+    echo -ne "  ${YELLOW}Применить Self-Steal? (y/n):${NC} "
     read -r confirm < /dev/tty
     [ "$confirm" != "y" ] && return
 
-    # Применяем
-    local changed
-    changed=$(python3 - "$db" "$domain" "$nginx_port" apply << 'SSPY2'
-import json, subprocess, sys
-db, domain, nginx_port, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-r = subprocess.run(['sqlite3', db,
-    "SELECT id||'|||'||remark||'|||'||stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%';"],
-    capture_output=True, text=True)
-changed = 0
-for line in r.stdout.strip().split('\n'):
-    if '|||' not in line: continue
-    parts = line.split('|||', 2)
-    if len(parts) < 3: continue
-    ib_id, remark, stream = parts
-    try:
-        ss = json.loads(stream)
-        rs = ss.get('realitySettings', {})
-        rs['dest'] = f'127.0.0.1:{nginx_port}'
-        rs['target'] = f'127.0.0.1:{nginx_port}'
-        rs['serverNames'] = [domain]
-        ss['realitySettings'] = rs
-        new_ss = json.dumps(ss, ensure_ascii=False).replace("'", "''")
-        r2 = subprocess.run(['sqlite3', db,
-            f"UPDATE inbounds SET stream_settings='{new_ss}' WHERE id={ib_id};"],
-            capture_output=True, text=True)
-        if r2.returncode == 0:
-            print(f"  ✓ #{ib_id} {remark}")
-            changed += 1
-        else:
-            print(f"  ✗ #{ib_id}: {r2.stderr.strip()}")
-    except Exception as e:
-        print(f"  ✗ #{ib_id}: {e}")
-print(f"CHANGED:{changed}")
-SSPY2
-)
-    echo "$changed" | grep -v '^CHANGED:'
-    local cnt; cnt=$(echo "$changed" | grep '^CHANGED:' | cut -d: -f2)
+    local result
+    result=$(python3 /tmp/_govpn_ss.py "$db" "$domain" "$nginx_port" apply)
+    echo "$result" | grep -v '^CHANGED:'
+    local cnt; cnt=$(echo "$result" | grep '^CHANGED:' | cut -d: -f2)
+
     if [ "${cnt:-0}" -gt 0 ]; then
         systemctl restart x-ui > /dev/null 2>&1; sleep 2
         echo -e "\n  ${GREEN}✓ Применено: ${cnt} inbound(s), xray перезапущен${NC}"
@@ -6203,6 +6193,7 @@ SSPY2
     fi
     read -p "  Enter..." < /dev/tty
 }
+
 
 
 _3xui_install_stub_site() {
