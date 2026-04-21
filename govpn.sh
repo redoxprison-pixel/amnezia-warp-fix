@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.03"
+VERSION="6.04"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2015,8 +2015,8 @@ if os.path.exists(custom_file):
             if not line or line.startswith("#"): continue
             parts = line.split()
             domain = parts[0]
-            direction = parts[1].lower() if len(parts) > 1 else "proxy"
-            (custom_direct if direction == "direct" else custom_proxy).append(domain)
+            direction = parts[1].lower() if len(parts) > 1 else "direct"
+            (custom_proxy if direction == "proxy" else custom_direct).append(domain)
     if custom_direct:
         NEW_RULES.insert(0, {"type":"field","domain":custom_direct,"outboundTag":"direct","_comment":"govpn: custom direct"})
     if custom_proxy:
@@ -4891,57 +4891,26 @@ _3xui_qr_happ_urls() {
 
 
 _3xui_export_bypass_list() {
-    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
     local custom_file="/etc/govpn/custom_domains.txt"
     clear
-    echo -e "\n${CYAN}━━━ Bypass список для Happ / v2rayTun ━━━${NC}\n"
+    echo -e "\n${CYAN}━━━ Список доменов (bypass) ━━━${NC}\n"
 
-    # Читаем ВСЕ домены из файла (direct и proxy)
-    local -a all_domains=()
-    local -a direct_domains=()
-    if [ -f "$custom_file" ]; then
-        while IFS= read -r line; do
-            # Убираем комментарии и пустые строки
-            line="${line%%#*}"
-            line="${line#"${line%%[![:space:]]*}"}"  # ltrim
-            [ -z "$line" ] && continue
-            # Берём только первое слово (домен)
-            local domain="${line%% *}"
-            [ -z "$domain" ] && continue
-            local dir="proxy"
-            [[ "$line" == *" direct"* ]] || [[ "$line" == *"	direct"* ]] && dir="direct"
-            all_domains+=("$domain")
-            [ "$dir" = "direct" ] && direct_domains+=("$domain")
-        done < "$custom_file"
-    fi
-
-    if [ ${#all_domains[@]} -eq 0 ]; then
-        echo -e "  ${YELLOW}Список доменов пуст${NC}"
-        echo -e "  ${WHITE}Добавьте домены через [4]${NC}"
+    if [ ! -f "$custom_file" ]; then
+        echo -e "  ${YELLOW}Файл не найден. Добавьте домены через [4]${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
-    # Показываем список (только домены, без direct/proxy)
-    echo -e "  ${WHITE}Ваш список доменов:${NC}\n"
-    for d in "${all_domains[@]}"; do
-        local marker="${GREEN}→ direct${NC}"
-        printf '%s
-' "${direct_domains[@]}" | grep -qx "$d" &&             echo -e "  ${GREEN}•${NC} ${d}" ||             echo -e "  ${CYAN}•${NC} ${d} ${YELLOW}(через VPN)${NC}"
-    done
+    # Показываем только домены без direct/proxy
+    echo -e "  ${WHITE}Домены (для копирования в Happ):${NC}\n"
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        [ -z "$line" ] && continue
+        local domain="${line%% *}"
+        [ -n "$domain" ] && echo "  $domain"
+    done < "$custom_file"
 
-    if [ ${#direct_domains[@]} -gt 0 ]; then
-        echo ""
-        echo -e "  ${WHITE}QR bypass (direct домены) → открыть Happ:\n"
-        local domains_str; domains_str=$(printf '%s,' "${direct_domains[@]}")
-        domains_str="${domains_str%,}"
-        echo "happ://bypass?domains=${domains_str}" | qrencode -t ANSIUTF8 2>/dev/null
-    fi
-
-    local export_file="/tmp/govpn_bypass.txt"
-    printf '%s
-' "${direct_domains[@]}" > "$export_file"
-    echo -e "\n  ${WHITE}Файл для импорта:${NC} ${CYAN}${export_file}${NC}"
-    echo -e "  ${CYAN}cat ${export_file}${NC}"
+    echo ""
     read -p "  Enter..." < /dev/tty
 }
 
@@ -5129,23 +5098,25 @@ _3xui_update_geofiles() {
     fi
 
 
-    # geosite.dat — с проверкой что файл бинарный (>500KB)
+    # geosite.dat — используем -L для следования редиректам GitHub
     echo -ne "  ${CYAN}→ geosite.dat...${NC} "
     local geo_tmp="${xray_dir}/geosite.dat.tmp"
     local geo_ok_site=0
-    for geo_url in \
-        "${GH}/roscomvpn-geosite/releases/latest/download/geosite.dat" \
-        "${CDN}/roscomvpn-geosite/release/geosite.dat" \
-        "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat"; do
-        curl -fsSL --max-time 45 "$geo_url" -o "$geo_tmp" 2>/dev/null || continue
+    # Источники в порядке приоритета:
+    # 1. runetfreedom — содержит category-ru, работает с -L
+    # 2. v2fly — стандартный без category-ru (fallback)
+    for geo_url in         "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat"         "${CDN}/roscomvpn-geosite/release/geosite.dat"         "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"; do
+        curl -fsSL -L --max-time 90 "$geo_url" -o "$geo_tmp" 2>/dev/null || continue
         local sz; sz=$(stat -c%s "$geo_tmp" 2>/dev/null || echo 0)
         if [ "$sz" -gt 500000 ]; then
             mv "$geo_tmp" "${xray_dir}/geosite.dat"
             geo_ok_site=1
-            if [ "$sz" -gt 2000000 ]; then
+            if [ "$sz" -gt 10000000 ]; then
+                echo -e "${GREEN}✓${NC} (runetfreedom ${sz}B — содержит category-ru)"
+            elif [ "$sz" -gt 2000000 ]; then
                 echo -e "${GREEN}✓${NC} (roscomvpn ${sz}B)"
             else
-                echo -e "${YELLOW}✓${NC} (базовый ${sz}B)"
+                echo -e "${YELLOW}✓${NC} (v2fly стандартный ${sz}B — без category-ru)"
             fi
             break
         fi
@@ -5192,7 +5163,7 @@ _3xui_setup_geo_autoupdate() {
 #!/bin/bash
 # Автообновление roscomvpn geoip/geosite
 curl -fsSL --max-time 60 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geoip/release/geoip.dat" -o "${xray_dir}/geoip.dat" 2>/dev/null
-curl -fsSL --max-time 60 "https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null || curl -fsSL --max-time 60 "${CDN}/roscomvpn-geosite/release/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null
+curl -fsSL -L --max-time 90 "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null || curl -fsSL -L --max-time 60 "${CDN}/roscomvpn-geosite/release/geosite.dat" -o "${xray_dir}/geosite.dat" 2>/dev/null
 systemctl restart x-ui > /dev/null 2>&1
 CRONEOF
     chmod +x /etc/cron.daily/govpn-geo-update
