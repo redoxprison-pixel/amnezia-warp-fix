@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.06"
+VERSION="6.07"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5982,6 +5982,271 @@ domain_menu() {
 }
 
 
+_3xui_selfsteal_setup() {
+    # Мастер настройки Self-Steal Reality для 3X-UI
+    clear
+    echo -e "\n${CYAN}━━━ Настройка Self-Steal Reality ━━━${NC}\n"
+    echo -e "  ${WHITE}Self-Steal = Xray маскируется под твой СОБСТВЕННЫЙ домен${NC}"
+    echo -e "  ${WHITE}Цензор видит легитимный сайт с реальным сертификатом${NC}\n"
+
+    # Определяем домен и порт nginx
+    local domain; domain=$(sqlite3 /etc/x-ui/x-ui.db \
+        "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null | head -1)
+    [ -z "$domain" ] && domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    local nginx_ssl_port=""
+
+    echo -e "  ${WHITE}Текущий домен:${NC} ${CYAN}${domain:-не определён}${NC}\n"
+    echo -e "  ${WHITE}Обнаруженные Nginx порты с SSL:${NC}"
+    ss -tlnp | grep nginx | grep -oP ':\K[0-9]+' | sort -u | while read p; do
+        [ "$p" = "80" ] && continue
+        echo -e "    ${CYAN}${p}${NC}"
+        [ -z "$nginx_ssl_port" ] && nginx_ssl_port="$p"
+    done
+
+    echo ""
+    echo -e "  ${YELLOW}[1]${NC}  Диагностика текущей конфигурации"
+    echo -e "  ${YELLOW}[2]${NC}  Мастер настройки Self-Steal (авто)"
+    echo -e "  ${YELLOW}[3]${NC}  Инструкция — как сделать вручную"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор: " ss_ch < /dev/tty
+
+    case "$ss_ch" in
+        1) _3xui_selfsteal_diagnose ;;
+        2) _3xui_selfsteal_wizard ;;
+        3) _3xui_selfsteal_manual ;;
+        0|"") return ;;
+    esac
+}
+
+_3xui_selfsteal_diagnose() {
+    clear
+    echo -e "\n${CYAN}━━━ Диагностика Self-Steal ━━━${NC}\n"
+
+    # Порты
+    echo -e "  ${WHITE}Порты:${NC}"
+    ss -tlnp | grep -E 'nginx|xray' | while read -r line; do
+        local port; port=$(echo "$line" | grep -oP ':\K[0-9]+' | head -1)
+        local proc; proc=$(echo "$line" | grep -oP '"[^"]+",pid' | tr -d '",' | sed 's/pid//')
+        echo -e "    ${CYAN}${port}${NC} → ${proc}"
+    done
+
+    echo ""
+    echo -e "  ${WHITE}Inbounds в 3X-UI:${NC}"
+    sqlite3 /etc/x-ui/x-ui.db "SELECT remark, port FROM inbounds;" | while IFS='|' read r p; do
+        echo -e "    ${CYAN}${p}${NC}  ${r}"
+    done
+
+    echo ""
+    echo -e "  ${WHITE}Сертификаты:${NC}"
+    certbot certificates 2>/dev/null | grep -E 'Domains:|Expiry' | while read -r l; do
+        echo -e "    $l"
+    done
+
+    echo ""
+    # Проверяем Self-Steal признаки
+    local has_selfsteal=0
+    sqlite3 /etc/x-ui/x-ui.db "SELECT stream_settings FROM inbounds;" 2>/dev/null | \
+    while read -r ss; do
+        local target; target=$(echo "$ss" | python3 -c "
+import json,sys
+try:
+    d=json.loads(sys.stdin.read())
+    r=d.get('realitySettings',{})
+    print(r.get('dest',r.get('target','')))
+except: pass
+" 2>/dev/null)
+        if [[ "$target" == *"127.0.0.1"* ]]; then
+            echo -e "  ${GREEN}✓ Self-Steal найден: target=${target}${NC}"
+            has_selfsteal=1
+        fi
+    done
+    [ "$has_selfsteal" -eq 0 ] && \
+        echo -e "  ${RED}✗ Self-Steal НЕ настроен${NC} — используются чужие домены"
+
+    echo ""
+    read -p "  Enter..." < /dev/tty
+}
+
+_3xui_selfsteal_manual() {
+    clear
+    echo -e "\n${CYAN}━━━ Инструкция Self-Steal Reality ━━━${NC}\n"
+
+    local domain; domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    local nginx_port; nginx_port=$(ss -tlnp | grep nginx | grep -v ':443\|:80' | \
+        grep -oP ':\K[0-9]+' | head -1)
+
+    echo -e "  ${WHITE}Твои данные:${NC}"
+    echo -e "  Домен:      ${CYAN}${domain:-cdn-msk.site}${NC}"
+    echo -e "  Nginx SSL:  ${CYAN}${nginx_port:-7443}${NC} (уже есть сертификат)${NC}\n"
+
+    echo -e "  ${YELLOW}Шаг 1.${NC} В 3X-UI создай/измени основной inbound:"
+    echo -e "  ${WHITE}Protocol:${NC}     vless"
+    echo -e "  ${WHITE}Port:${NC}         443"
+    echo -e "  ${WHITE}Transport:${NC}    xhttp  mode=packet-up"
+    echo -e "  ${WHITE}Path:${NC}         /media/fragments/ (или другой)"
+    echo -e "  ${WHITE}Security:${NC}     reality"
+    echo -e "  ${WHITE}Dest:${NC}         ${CYAN}127.0.0.1:${nginx_port:-7443}${NC} ← КЛЮЧЕВОЕ"
+    echo -e "  ${WHITE}ServerNames:${NC}  ${CYAN}${domain:-cdn-msk.site}${NC}"
+    echo -e "  ${WHITE}uTLS:${NC}         chrome\n"
+
+    echo -e "  ${YELLOW}Шаг 2.${NC} Nginx должен слушать на ${nginx_port:-7443} с реальным сертификатом"
+    echo -e "  ${GREEN}✓ У тебя nginx уже на ${nginx_port:-7443} — готово${NC}\n"
+
+    echo -e "  ${YELLOW}Шаг 3.${NC} Проверка: зайди в браузере на https://${domain:-cdn-msk.site}"
+    echo -e "  Должен открыться твой сайт (Xray пропустит браузер на Nginx)\n"
+
+    echo -e "  ${YELLOW}Шаг 4.${NC} Замени index.html на легитимную заглушку"
+    echo -e "  ${CYAN}ls /var/www/html/${NC}\n"
+
+    echo -e "  ${WHITE}Для xHTTP(warp) inbound тот же принцип:${NC}"
+    echo -e "  ${WHITE}Dest:${NC} ${CYAN}127.0.0.1:${nginx_port:-7443}${NC}"
+    echo -e "  ${WHITE}ServerNames:${NC} ${CYAN}${domain:-cdn-msk.site}${NC}"
+    echo -e "  ${WHITE}Path:${NC} /api/v1/stream/ (другой путь)\n"
+
+    echo -e "  ${YELLOW}Важно:${NC} путь в xHTTP должен отличаться для каждого inbound!"
+    read -p "  Enter..." < /dev/tty
+}
+
+_3xui_selfsteal_wizard() {
+    clear
+    echo -e "\n${CYAN}━━━ Мастер Self-Steal (авто) ━━━${NC}\n"
+
+    # Находим параметры
+    local domain; domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    local nginx_port; nginx_port=$(ss -tlnp 2>/dev/null | grep nginx | \
+        grep -v ':443 \|:80 ' | grep -oP '\d+\.\d+\.\d+\.\d+:\K[0-9]+|::\K[0-9]+' | \
+        sort -n | head -1)
+    nginx_port="${nginx_port:-7443}"
+
+    if [ -z "$domain" ]; then
+        echo -e "  ${RED}✗ Домен не найден. Сначала настройте SSL через Домен и SSL${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    echo -e "  ${WHITE}Домен:${NC}      ${CYAN}${domain}${NC}"
+    echo -e "  ${WHITE}Nginx:${NC}      ${CYAN}127.0.0.1:${nginx_port}${NC}"
+    echo -e "  ${WHITE}Self-Steal:${NC} ${CYAN}${domain} → 127.0.0.1:${nginx_port}${NC}\n"
+
+    # Получаем список inbounds для исправления
+    echo -e "  ${WHITE}Inbounds для перевода на Self-Steal:${NC}"
+    local db="/etc/x-ui/x-ui.db"
+    local inbounds_json
+    inbounds_json=$(sqlite3 "$db" "SELECT id, remark, stream_settings FROM inbounds \
+        WHERE stream_settings LIKE '%reality%';" 2>/dev/null)
+
+    if [ -z "$inbounds_json" ]; then
+        echo -e "  ${YELLOW}Reality inbounds не найдены${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    local changed=0
+    while IFS='|' read -r ib_id ib_remark ib_stream; do
+        [ -z "$ib_id" ] && continue
+        local cur_target; cur_target=$(echo "$ib_stream" | python3 -c "
+import json,sys
+try:
+    d=json.loads(sys.stdin.read())
+    r=d.get('realitySettings',{})
+    print(r.get('dest',r.get('target','')))
+except: print('')
+" 2>/dev/null)
+        echo -e "  ${CYAN}#${ib_id}${NC} ${ib_remark} → target: ${cur_target}"
+        if [[ "$cur_target" != *"127.0.0.1"* ]]; then
+            echo -e "      ${YELLOW}⚠ Не Self-Steal — нужно исправить${NC}"
+        else
+            echo -e "      ${GREEN}✓ Self-Steal${NC}"
+        fi
+    done <<< "$inbounds_json"
+
+    echo ""
+    echo -ne "  ${YELLOW}Исправить все Reality inbounds на Self-Steal? (y/n):${NC} "
+    read -r confirm < /dev/tty
+    [ "$confirm" != "y" ] && return
+
+    # Применяем исправления
+    while IFS='|' read -r ib_id ib_remark ib_stream; do
+        [ -z "$ib_id" ] && continue
+        local new_stream
+        new_stream=$(echo "$ib_stream" | python3 - << PYEOF
+import json, sys
+ss = json.load(sys.stdin)
+rs = ss.get('realitySettings', {})
+# Меняем target/dest на Self-Steal
+rs['dest'] = '127.0.0.1:${nginx_port}'
+rs['target'] = '127.0.0.1:${nginx_port}'
+rs['serverNames'] = ['${domain}']
+ss['realitySettings'] = rs
+print(json.dumps(ss, ensure_ascii=False))
+PYEOF
+)
+        if [ -n "$new_stream" ]; then
+            local escaped; escaped=$(echo "$new_stream" | sed "s/'/''/g")
+            sqlite3 "$db" "UPDATE inbounds SET stream_settings='${escaped}' WHERE id=${ib_id};" 2>/dev/null
+            echo -e "  ${GREEN}✓ #${ib_id} ${ib_remark} → Self-Steal${NC}"
+            (( changed++ ))
+        fi
+    done <<< "$inbounds_json"
+
+    if [ "$changed" -gt 0 ]; then
+        systemctl restart x-ui > /dev/null 2>&1
+        sleep 2
+        echo -e "\n  ${GREEN}✓ Применено: ${changed} inbound(s), xray перезапущен${NC}"
+        echo -e "  ${WHITE}Проверь: https://${domain} должен открыть Nginx сайт${NC}"
+
+        # Предлагаем установить заглушку CinemaLab
+        echo ""
+        echo -ne "  ${YELLOW}Установить красивую заглушку для сайта? (y/n):${NC} "
+        read -r install_stub < /dev/tty
+        [ "$install_stub" = "y" ] && _3xui_install_stub_site
+    fi
+    read -p "  Enter..." < /dev/tty
+}
+
+_3xui_install_stub_site() {
+    local webroot="/var/www/html"
+    mkdir -p "$webroot"
+    echo -e "  ${CYAN}Устанавливаю заглушку CinemaLab...${NC}"
+    cat > "${webroot}/index.html" << 'STUBHTML'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CinemaLab | Студия профессионального видеопроизводства</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>body{font-family:sans-serif;}.hero-gradient{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);}</style>
+</head>
+<body class="bg-white text-slate-900">
+    <nav class="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-slate-100 py-4 px-6">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <span class="text-2xl font-bold uppercase text-slate-800">Cinema<span class="text-red-600">Lab</span></span>
+            <button class="bg-slate-900 text-white px-5 py-2 rounded text-sm font-bold hover:bg-red-600 transition uppercase">Вход для клиентов</button>
+        </div>
+    </nav>
+    <header class="relative h-[70vh] flex items-center justify-center hero-gradient">
+        <div class="text-center px-4">
+            <h1 class="text-5xl font-bold text-white mb-6 uppercase">Cinema<span class="text-red-500">Lab</span></h1>
+            <p class="text-slate-300 max-w-2xl mx-auto text-lg mb-8">Профессиональное видеопроизводство. 4K/8K. Рекламные ролики, документальные фильмы.</p>
+            <button class="bg-red-600 text-white px-10 py-4 rounded font-bold uppercase hover:scale-105 transition">Смотреть портфолио</button>
+        </div>
+    </header>
+    <section class="py-20 bg-slate-50">
+        <div class="max-w-4xl mx-auto px-6 text-center">
+            <h2 class="text-3xl font-bold mb-6">Удалённый монтаж и <span class="text-red-600">Proxy-серверы</span></h2>
+            <p class="text-slate-600 text-lg">Collaborative Workflow. Синхронизация проектов в реальном времени. Средний объём — до 450 ГБ/сутки.</p>
+        </div>
+    </section>
+    <footer class="bg-slate-900 text-slate-500 py-8 px-6 text-center text-sm">
+        <div class="font-bold text-white mb-2">CinemaLab 2026</div>
+        <div>Москва • +7 (495) 000-00-00</div>
+    </footer>
+</body>
+</html>
+STUBHTML
+    echo -e "  ${GREEN}✓ Заглушка установлена в ${webroot}/index.html${NC}"
+}
+
 system_menu() {
     while true; do
         clear
@@ -6027,6 +6292,7 @@ system_menu() {
         echo -e " ${CYAN}── Сервер ────────────────────────────${NC}"
         echo -e "  ${YELLOW}[8]${NC}  Домен и SSL"
         echo -e "  ${YELLOW}[9]${NC}  Установка и компоненты"
+        is_3xui && echo -e "  ${CYAN}[s]${NC}  Self-Steal Reality (настройка маскировки)"
         echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
         echo ""
         echo -e " ${CYAN}── Опасная зона ──────────────────────${NC}"
@@ -6069,6 +6335,7 @@ system_menu() {
                 read -p "$(echo -e "  ${RED}Перезагрузить сервер? (y/n): ${NC}")" c
                 [[ "$c" == "y" ]] && reboot
                 ;;
+            [sS]) is_3xui && _3xui_selfsteal_setup ;;
             x|X)
                 _full_uninstall
                 ;;
