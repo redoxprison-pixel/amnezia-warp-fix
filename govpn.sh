@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.05"
+VERSION="6.06"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2659,17 +2659,39 @@ _awg_patch_start_sh() {
     local start_sh="/opt/amnezia/start.sh"
     local -a selected=("$@")
 
-    # Бэкап оригинала
-    docker exec "$AWG_CONTAINER" sh -c \
-        "[ -f /opt/amnezia/start.sh.orig ] || cp '${start_sh}' /opt/amnezia/start.sh.orig" 2>/dev/null
+    # Стандартная основа start.sh (всегда надёжная)
+    local base_sh
+    base_sh=$(cat << 'BASESH'
+#!/bin/bash
+echo "Container startup"
 
-    # Читаем оригинальный start.sh (до любых GOVPN/WARP блоков)
+awg-quick down /opt/amnezia/awg/awg0.conf
+if [ -f /opt/amnezia/awg/awg0.conf ]; then
+    awg-quick up /opt/amnezia/awg/awg0.conf
+fi
+
+iptables -A INPUT -i awg0 -j ACCEPT
+iptables -A FORWARD -i awg0 -j ACCEPT
+iptables -A OUTPUT -o awg0 -j ACCEPT
+iptables -A FORWARD -i awg0 -o eth0 -s 10.8.1.0/24 -j ACCEPT
+iptables -A FORWARD -i awg0 -o eth1 -s 10.8.1.0/24 -j ACCEPT
+iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o eth1 -j MASQUERADE
+BASESH
+)
+
+    # Пробуем читать из контейнера (убираем GOVPN блоки и tail)
     local orig
-    orig=$(docker exec "$AWG_CONTAINER" sh -c \
-        "sed '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d; /# --- WARP BEGIN ---/,/# --- WARP END ---/d' '${start_sh}' 2>/dev/null" 2>/dev/null)
-
-    # Убираем tail -f /dev/null если есть (добавим в конец сами)
+    orig=$(docker exec "$AWG_CONTAINER" sh -c         "sed '/# --- GOVPN WARP BEGIN ---/,/# --- GOVPN WARP END ---/d; /# --- WARP-MANAGER BEGIN ---/,/# --- WARP-MANAGER END ---/d; /# --- WARP BEGIN ---/,/# --- WARP END ---/d' '${start_sh}' 2>/dev/null" 2>/dev/null)
     orig=$(echo "$orig" | grep -v '^tail -f /dev/null')
+
+    # Если orig пустой или слишком короткий — используем стандартную базу
+    local orig_lines; orig_lines=$(echo "$orig" | wc -l)
+    if [ "$orig_lines" -lt 5 ]; then
+        echo -e "  ${YELLOW}⚠ start.sh в контейнере пустой — использую стандартный шаблон${NC}"
+        orig="$base_sh"
+    fi
 
     local iface; iface=$(_awg_iface)
 
@@ -2717,6 +2739,9 @@ _awg_patch_start_sh() {
         cp "$tmp_file" "$f" && chmod +x "$f"
     done
     rm -f "$tmp_file"
+
+    # Сохраняем бэкап хорошего start.sh
+    cp "$tmp_file" /etc/govpn/start.sh.backup 2>/dev/null || true
 
     echo -e "  ${GREEN}✓ start.sh обновлён (${#selected[@]} клиентов через WARP)${NC}"
 }
@@ -6753,6 +6778,91 @@ _full_uninstall() {
 #  УПРАВЛЕНИЕ ПИРАМИ AWG (создание/удаление клиентов)
 # ═══════════════════════════════════════════════════════════════
 
+_awg_emergency_restore() {
+    # Экстренное восстановление AWG контейнера
+    clear
+    echo -e "\n${RED}━━━ Экстренное восстановление AWG ━━━${NC}\n"
+    echo -e "  ${WHITE}Используй если контейнер упал и не поднимается${NC}\n"
+
+    local container="${AWG_CONTAINER:-amnezia-awg2}"
+    echo -e "  ${WHITE}Контейнер:${NC} ${CYAN}${container}${NC}"
+    echo -e "  ${WHITE}Статус:${NC} $(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || echo 'не найден')\n"
+
+    # Создаём правильный start.sh
+    local tmp_sh; tmp_sh=$(mktemp)
+    cat > "$tmp_sh" << 'STARTSH'
+#!/bin/bash
+echo "Container startup"
+
+awg-quick down /opt/amnezia/awg/awg0.conf
+if [ -f /opt/amnezia/awg/awg0.conf ]; then
+    awg-quick up /opt/amnezia/awg/awg0.conf
+fi
+
+iptables -A INPUT -i awg0 -j ACCEPT
+iptables -A FORWARD -i awg0 -j ACCEPT
+iptables -A OUTPUT -o awg0 -j ACCEPT
+iptables -A FORWARD -i awg0 -o eth0 -s 10.8.1.0/24 -j ACCEPT
+iptables -A FORWARD -i awg0 -o eth1 -s 10.8.1.0/24 -j ACCEPT
+iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o eth1 -j MASQUERADE
+
+tail -f /dev/null
+STARTSH
+
+    echo -e "  ${YELLOW}[1]${NC}  Восстановить start.sh (без WARP)"
+    echo -e "  ${YELLOW}[2]${NC}  Восстановить start.sh (с WARP если настроен)"
+    echo -e "  ${YELLOW}[3]${NC}  Только перезапустить контейнер"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор: " er_ch < /dev/tty
+
+    case "$er_ch" in
+        1|2)
+            echo -e "  ${CYAN}Записываю start.sh во все overlay слои...${NC}"
+            local updated=0
+            for f in /var/lib/docker/overlay2/*/diff/opt/amnezia/start.sh; do
+                cp "$tmp_sh" "$f" && chmod +x "$f" && (( updated++ ))
+            done
+            echo -e "  ${GREEN}✓ Обновлено слоёв: ${updated}${NC}"
+
+            docker stop "$container" 2>/dev/null || true
+            sleep 2
+            docker start "$container"
+            sleep 8
+
+            if docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
+                echo -e "  ${GREEN}✓ Контейнер запущен${NC}"
+                if [ "$er_ch" = "2" ]; then
+                    echo -e "  ${CYAN}Применяю WARP правила...${NC}"
+                    sleep 3
+                    # Читаем сохранённых WARP клиентов
+                    local warp_clients
+                    warp_clients=$(_awg_selected_clients 2>/dev/null)
+                    if [ -n "$warp_clients" ]; then
+                        local -a sel_arr=()
+                        while IFS= read -r ip; do [ -n "$ip" ] && sel_arr+=("$ip"); done <<< "$warp_clients"
+                        _awg_apply_rules "${sel_arr[@]}"
+                        echo -e "  ${GREEN}✓ WARP восстановлен (${#sel_arr[@]} клиентов)${NC}"
+                    fi
+                fi
+            else
+                echo -e "  ${RED}✗ Контейнер всё ещё не запускается${NC}"
+                echo -e "  ${WHITE}Проверь:${NC} docker logs ${container} --tail 20"
+            fi ;;
+        3)
+            docker stop "$container" 2>/dev/null || true
+            sleep 2
+            docker start "$container"
+            sleep 5
+            docker ps | grep "$container" ;;
+        0|"") ;;
+    esac
+    rm -f "$tmp_sh"
+    read -p "  Enter..." < /dev/tty
+}
+
 awg_peers_menu() {
     if ! is_amnezia; then
         echo -e "${YELLOW}Amnezia не обнаружен.${NC}"; read -p "Enter..."; return
@@ -6850,6 +6960,7 @@ awg_peers_menu() {
         echo -e "  ${YELLOW}[+]${NC}   Добавить клиента"
         [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC} Конфиг / QR код"
         [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[-]${NC}   Удалить клиента"
+        echo -e "  ${RED}[!]${NC}   Экстренное восстановление AWG"
         echo -e "  ${YELLOW}[/]${NC}   Сменить сортировку (${sort_mode})"
         echo -e "  ${YELLOW}[0]${NC}   Назад"
         echo ""
@@ -6859,6 +6970,7 @@ awg_peers_menu() {
         [ -z "$ch" ] && continue
 
         case "$ch" in
+            "!") _awg_emergency_restore ;;
             +)  _awg_add_peer ;;
             -)  _awg_del_peer "${sorted_ips[@]}" ;;
             /)
@@ -8171,6 +8283,7 @@ show_menu() {
         echo -e "  7)  Серверы, скорость, тесты"
         echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
         echo -e "  8)  Система и управление"
+        is_amnezia && echo -e "  ${RED}!${NC}  AWG авария? → ${RED}[!]${NC} Экстренное восстановление"
         # h) Hysteria2 скрыт
         echo -e "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
@@ -8198,6 +8311,7 @@ show_menu() {
             7) tools_menu ;;
             8) system_menu ;;
             # h|H|р|Р) is_hysteria2 && hysteria2_menu ;;
+            "!") is_amnezia && _awg_emergency_restore ;;
             0)
                 clear; exit 0 ;;
         esac
