@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="5.98"
+VERSION="5.99"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -4787,6 +4787,81 @@ ${CYAN}Восстановление из бэкапа...${NC}"
     read -p "  Enter..." < /dev/tty
 }
 
+_3xui_export_bypass_list() {
+    # Экспорт списка доменов для bypass в Happ/v2rayTun
+    local custom_file="/etc/govpn/custom_domains.txt"
+    local export_file="/tmp/govpn_bypass_export.txt"
+
+    clear
+    echo -e "\n${CYAN}━━━ Экспорт bypass списка для Happ / v2rayTun ━━━${NC}\n"
+
+    # Собираем домены direct из custom списка
+    local -a direct_domains=()
+    if [ -f "$custom_file" ]; then
+        while IFS= read -r line; do
+            line="${line%%#*}"  # убираем комментарии
+            line="${line// /}"  # убираем пробелы слева
+            [ -z "$line" ] && continue
+            local parts=($line)
+            local domain="${parts[0]}"
+            local dir="${parts[1]:-proxy}"
+            [[ "$dir" == "direct" ]] && direct_domains+=("$domain")
+        done < "$custom_file"
+    fi
+
+    if [ ${#direct_domains[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}В custom_domains.txt нет доменов с направлением 'direct'${NC}"
+        echo -e "  ${WHITE}Добавьте домены в формате:${NC}"
+        echo -e "  ${CYAN}2ip.ru direct${NC}"
+        echo -e "  ${CYAN}gosuslugi.ru direct${NC}"
+        read -p "  Enter..." < /dev/tty
+        return
+    fi
+
+    # Создаём файл экспорта
+    {
+        echo "# GoVPN bypass list — домены без VPN"
+        echo "# Создан: $(date '+%Y-%m-%d %H:%M')"
+        echo "# Для Happ: Правила → Прокси → исключения"
+        echo "# Для v2rayTun: bypass domains"
+        echo ""
+        for d in "${direct_domains[@]}"; do
+            echo "$d"
+        done
+    } > "$export_file"
+
+    echo -e "  ${GREEN}✓ Экспортировано доменов: ${#direct_domains[@]}${NC}\n"
+    for d in "${direct_domains[@]}"; do
+        echo -e "  ${WHITE}${d}${NC}"
+    done
+
+    echo ""
+    echo -e "  ${WHITE}Для импорта в Happ/v2rayTun — отсканируй QR:${NC}"
+
+    # Генерируем содержимое для QR
+    if command -v qrencode &>/dev/null; then
+        local content_str
+        content_str=$(printf '%s\n' "${direct_domains[@]}")
+        # QR слишком большой если доменов много — показываем URL файла
+        if [ ${#direct_domains[@]} -le 10 ]; then
+            echo "$content_str" | qrencode -t ANSIUTF8 2>/dev/null
+        else
+            echo -e "  ${YELLOW}Слишком много доменов для QR (${#direct_domains[@]}) — используй файл${NC}"
+        fi
+    fi
+
+    echo ""
+    echo -e "  ${WHITE}Файл:${NC} ${CYAN}${export_file}${NC}"
+    echo -e "  ${WHITE}Команда для копирования:${NC}"
+    echo -e "  ${CYAN}cat ${export_file}${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Как использовать в Happ:${NC}"
+    echo -e "  Настройки → Правила маршрутизации → Домены для обхода"
+    echo -e "  Добавь каждый домен в список исключений приложения"
+    echo ""
+    read -p "  Enter..." < /dev/tty
+}
+
 _3xui_geo_menu() {
     local xray_dir="/usr/local/x-ui/bin"
     [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
@@ -4828,7 +4903,8 @@ _3xui_geo_menu() {
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${GREEN}[3]${NC}  Добавить правила routing в 3X-UI (авто)"
         fi
-        echo -e "  ${CYAN}[4]${NC}  Свой список доменов"
+        echo -e "  ${CYAN}[4]${NC}  Свой список доменов (direct/proxy)"
+        echo -e "  ${CYAN}[9]${NC}  Экспорт bypass списка для Happ/v2rayTun"
         if [ "$geo_ok" -eq 1 ]; then
             echo -e "  ${YELLOW}[7]${NC}  Сохранить бэкап текущих файлов"
         fi
@@ -4899,6 +4975,7 @@ ${CYAN}━━━ QR для обновления URL в Happ ━━━${NC}
                     read -p "  Enter..." < /dev/tty
                 fi ;;
             7) [ "$geo_ok" -eq 1 ] && _3xui_backup_geofiles ;;
+            9) _3xui_export_bypass_list ;;
             8) [ -f "/etc/govpn/geofiles_backup/geosite.dat" ] && _3xui_restore_geofiles ;;
             6)
                 if [ "$geo_ok" -eq 1 ]; then
@@ -4965,30 +5042,17 @@ _3xui_update_geofiles() {
     if [ "$ok" -eq 2 ]; then
         echo -e "\n  ${GREEN}✅ GeoIP и GeoSite обновлены${NC}"
         echo -e "  ${WHITE}Источник:${NC} roscomvpn (Россия+Беларусь прямые, остальное через прокси)"
-        # Перезапускаем xray чтобы применить
-        systemctl restart x-ui > /dev/null 2>&1
-        echo -e "  ${CYAN}↻ xray перезапущен${NC}"
         log_action "3XUI: обновлены geoip/geosite (roscomvpn)"
 
-        # Автоматически применяем правила routing если ещё не добавлены
-        local db="/etc/x-ui/x-ui.db"
-        if [ -f "$db" ]; then
-            local has_rules
-            has_rules=$(sqlite3 "$db"                 "SELECT value FROM settings WHERE key='xrayTemplateConfig';" 2>/dev/null |                 python3 -c "
-import json,sys
-try:
-    cfg=json.load(sys.stdin)
-    rules=cfg.get('routing',{}).get('rules',[])
-    print(sum(1 for r in rules if 'roscomvpn' in r.get('_comment','')))
-except: print(0)
-" 2>/dev/null || echo 0)
-            if [ "${has_rules:-0}" -eq 0 ]; then
-                echo -e "  ${CYAN}Применяю правила routing автоматически...${NC}"
-                _3xui_add_geo_routing
-            else
-                echo -e "  ${GREEN}✓ Правила routing уже настроены${NC}"
-            fi
-        fi
+        # Применяем правила routing ПЕРЕД перезапуском xray
+        echo -e "  ${CYAN}Применяю правила routing...${NC}"
+        _3xui_add_geo_routing
+
+        # Перезапускаем xray после изменений
+        sleep 1
+        systemctl restart x-ui > /dev/null 2>&1
+        sleep 3
+        echo -e "  ${CYAN}↻ xray перезапущен${NC}"
     else
         echo -e "\n  ${YELLOW}⚠ Обновление частичное — проверьте интернет${NC}"
     fi
