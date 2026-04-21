@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.02"
+VERSION="6.03"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1878,96 +1878,37 @@ except: print('no')
         return
     fi
 
-    # Запрашиваем параметры РФ сервера
-    echo -e "  ${WHITE}Введите параметры РФ сервера:${NC}\n"
-    echo -ne "  IP или домен РФ сервера: "
-    read -r ru_host < /dev/tty
-    [ -z "$ru_host" ] && return
+    echo -e "  ${WHITE}Введите VLESS ссылку РФ сервера:${NC}"
+    echo -e "  ${CYAN}vless://uuid@host:port?...${NC}"
+    echo -e "  ${WHITE}(или Enter для ручного ввода SOCKS5)${NC}\n"
+    read -r ru_vless < /dev/tty
 
-    echo -ne "  Порт SOCKS5 (или Enter = 1080): "
-    read -r ru_port < /dev/tty
-    ru_port="${ru_port:-1080}"
+    local ru_host="" ru_port="1080" ru_uuid="" ru_mode=""
 
-    echo -ne "  Логин (Enter = пропустить): "
-    read -r ru_user < /dev/tty
-    echo -ne "  Пароль (Enter = пропустить): "
-    read -r ru_pass < /dev/tty
+    if [[ "$ru_vless" == vless://* ]]; then
+        ru_uuid=$(echo "$ru_vless" | python3 -c "import sys,urllib.parse; u=sys.stdin.read().strip()[8:]; print(u.split('@')[0])")
+        ru_host=$(echo "$ru_vless" | python3 -c "import sys; u=sys.stdin.read().strip()[8:]; h=u.split('@')[1].split('?')[0]; print(h.rsplit(':',1)[0])")
+        ru_port=$(echo "$ru_vless" | python3 -c "import sys; u=sys.stdin.read().strip()[8:]; h=u.split('@')[1].split('?')[0]; print(h.rsplit(':',1)[1])")
+        echo -e "  ${GREEN}✓${NC} Host: ${ru_host}  Port: ${ru_port}"
+    else
+        echo -ne "  IP или домен РФ сервера: "
+        read -r ru_host < /dev/tty
+        [ -z "$ru_host" ] && return
+        echo -ne "  Порт (Enter = 1080): "
+        read -r ru_port_in < /dev/tty
+        [ -n "$ru_port_in" ] && ru_port="$ru_port_in"
+        echo -ne "  Пароль/UUID (Enter = пропустить): "
+        read -r ru_uuid < /dev/tty
+        ru_vless=""
+    fi
 
     echo ""
-    echo -ne "  ${YELLOW}Направить через РФ сервер:${NC}\n"
-    echo -e "  [1] РФ/РБ сайты (geosite:category-ru) + свой список direct"
+    echo -e "  ${YELLOW}Направить через РФ сервер:${NC}"
+    echo -e "  [1] РФ/РБ сайты (category-ru) + свой список direct"
     echo -e "  [2] Только свой список direct"
-    echo -e "  [3] Без правил (только добавить outbound)"
+    echo -e "  [3] Без правил (только outbound)"
     read -r ru_mode < /dev/tty
 
-    # Добавляем outbound и правила через Python
-    python3 - << PYEOF2
-import json, subprocess as sp, sys
-
-db = '$db'
-ru_host = '$ru_host'
-ru_port = int('$ru_port')
-ru_user = '$ru_user'
-ru_pass = '$ru_pass'
-ru_mode = '$ru_mode'
-
-r = sp.run(['sqlite3', db, "SELECT value FROM settings WHERE key='xrayTemplateConfig';"],
-    capture_output=True, text=True)
-tmpl_str = r.stdout.strip()
-if not tmpl_str: sys.exit(1)
-cfg = json.loads(tmpl_str)
-
-# Создаём outbound
-ru_outbound = {
-    "tag": "ru_server",
-    "protocol": "socks",
-    "settings": {
-        "servers": [{
-            "address": ru_host,
-            "port": ru_port,
-            "users": [{"user": ru_user, "pass": ru_pass}] if ru_user else []
-        }]
-    }
-}
-# Удаляем старый если есть
-cfg['outbounds'] = [o for o in cfg.get('outbounds',[]) if o.get('tag') != 'ru_server']
-cfg['outbounds'].append(ru_outbound)
-
-# Добавляем правила
-if ru_mode in ('1', '2'):
-    routing = cfg.setdefault('routing', {})
-    rules = routing.setdefault('rules', [])
-    # Удаляем старые ru_server правила
-    rules = [r for r in rules if r.get('outboundTag') != 'ru_server']
-    new_rules = []
-    if ru_mode == '1':
-        new_rules.append({"type":"field","domain":["geosite:category-ru"],"outboundTag":"ru_server","_comment":"govpn: РФ через РФ сервер"})
-    # Свой список direct → ru_server
-    import os
-    custom_file = '/etc/govpn/custom_domains.txt'
-    if os.path.exists(custom_file):
-        direct_domains = []
-        with open(custom_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'): continue
-                parts = line.split()
-                if len(parts) > 1 and parts[1] == 'direct':
-                    direct_domains.append(parts[0])
-        if direct_domains:
-            new_rules.append({"type":"field","domain":direct_domains,"outboundTag":"ru_server","_comment":"govpn: custom list через РФ"})
-    rules = new_rules + rules
-    routing['rules'] = rules
-    cfg['routing'] = routing
-
-new_tmpl = json.dumps(cfg, ensure_ascii=False, indent=2).replace("'","''")
-r2 = sp.run(['sqlite3', db, f"UPDATE settings SET value='{new_tmpl}' WHERE key='xrayTemplateConfig';"],
-    capture_output=True, text=True)
-if r2.returncode == 0:
-    print(f"  OK: outbound ru_server добавлен ({ru_host}:{ru_port})")
-else:
-    print(f"  ERR: {r2.stderr}"); sys.exit(1)
-PYEOF2
     [ $? -eq 0 ] && systemctl restart x-ui > /dev/null 2>&1 && sleep 2 &&         echo -e "  ${GREEN}✓ Настроено, xray перезапущен${NC}" ||         echo -e "  ${RED}✗ Ошибка${NC}"
     read -p "  Enter..." < /dev/tty
 }
@@ -4936,14 +4877,15 @@ ${CYAN}Восстановление из бэкапа...${NC}"
 _3xui_qr_happ_urls() {
     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
     clear
-    echo -e "\n${CYAN}━━━ QR для обновления geofiles в Happ ━━━${NC}\n"
-    echo -e "  ${WHITE}Отсканируй — откроется Happ с нужными URL:${NC}\n"
-    # Deeplink roscomvpn routing для Happ
-    local deeplink="happ://update-geofiles?geoip=https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat&geosite=https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
-    echo "$deeplink" | qrencode -t ANSIUTF8 2>/dev/null
-    echo -e "\n  ${CYAN}geoip:   github.com/hydraponique/roscomvpn-geoip${NC}"
-    echo -e "  ${CYAN}geosite: github.com/hydraponique/roscomvpn-geosite${NC}\n"
-    echo -e "  ${WHITE}Если deeplink не открывается — скопируй URL вручную${NC}"
+    echo -e "\n${CYAN}━━━ Настройка Happ: roscomvpn маршрутизация ━━━${NC}\n"
+    echo -e "  ${WHITE}Шаг 1:${NC} Отсканируй QR — откроется Happ с настройками roscomvpn"
+    echo -e "  ${WHITE}Шаг 2:${NC} Нажми Apply / Применить в Happ\n"
+    echo "https://routing.help" | qrencode -t ANSIUTF8 2>/dev/null
+    echo -e "\n  ${CYAN}https://routing.help${NC}\n"
+    echo -e "  ${GREEN}✓${NC} РФ/РБ сайты напрямую"
+    echo -e "  ${GREEN}✓${NC} Заблокированные через VPN"
+    echo -e "  ${GREEN}✓${NC} Реклама заблокирована"
+    echo -e "  ${GREEN}✓${NC} Автообновление правил"
     read -p "  Enter..." < /dev/tty
 }
 
@@ -4952,44 +4894,54 @@ _3xui_export_bypass_list() {
     command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
     local custom_file="/etc/govpn/custom_domains.txt"
     clear
-    echo -e "\n${CYAN}━━━ QR bypass списка для Happ / v2rayTun ━━━${NC}\n"
+    echo -e "\n${CYAN}━━━ Bypass список для Happ / v2rayTun ━━━${NC}\n"
 
-    # Собираем домены с direct
+    # Читаем ВСЕ домены из файла (direct и proxy)
+    local -a all_domains=()
     local -a direct_domains=()
     if [ -f "$custom_file" ]; then
         while IFS= read -r line; do
+            # Убираем комментарии и пустые строки
             line="${line%%#*}"
-            [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-            local parts=($line)
-            local domain="${parts[0]}"
-            local dir="${parts[1]:-proxy}"
-            [[ "$dir" == "direct" ]] && direct_domains+=("$domain")
+            line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+            [ -z "$line" ] && continue
+            # Берём только первое слово (домен)
+            local domain="${line%% *}"
+            [ -z "$domain" ] && continue
+            local dir="proxy"
+            [[ "$line" == *" direct"* ]] || [[ "$line" == *"	direct"* ]] && dir="direct"
+            all_domains+=("$domain")
+            [ "$dir" = "direct" ] && direct_domains+=("$domain")
         done < "$custom_file"
     fi
 
-    if [ ${#direct_domains[@]} -eq 0 ]; then
-        echo -e "  ${YELLOW}Нет доменов с 'direct' в списке${NC}"
-        echo -e "  ${WHITE}Добавьте в [4]:${NC}  2ip.ru direct"
+    if [ ${#all_domains[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}Список доменов пуст${NC}"
+        echo -e "  ${WHITE}Добавьте домены через [4]${NC}"
         read -p "  Enter..." < /dev/tty; return
     fi
 
-    # Показываем список (без слова direct)
-    echo -e "  ${WHITE}Домены для bypass (без VPN):${NC}\n"
-    for d in "${direct_domains[@]}"; do
-        echo -e "  ${GREEN}•${NC} ${d}"
+    # Показываем список (только домены, без direct/proxy)
+    echo -e "  ${WHITE}Ваш список доменов:${NC}\n"
+    for d in "${all_domains[@]}"; do
+        local marker="${GREEN}→ direct${NC}"
+        printf '%s
+' "${direct_domains[@]}" | grep -qx "$d" &&             echo -e "  ${GREEN}•${NC} ${d}" ||             echo -e "  ${CYAN}•${NC} ${d} ${YELLOW}(через VPN)${NC}"
     done
 
-    echo ""
-    # QR с deeplink для Happ
-    local domains_csv; domains_csv=$(IFS=,; echo "${direct_domains[*]}")
-    local deeplink="happ://bypass?domains=${domains_csv}"
-    echo -e "  ${WHITE}QR → открыть Happ и добавить bypass:${NC}\n"
-    echo "$deeplink" | qrencode -t ANSIUTF8 2>/dev/null
+    if [ ${#direct_domains[@]} -gt 0 ]; then
+        echo ""
+        echo -e "  ${WHITE}QR bypass (direct домены) → открыть Happ:\n"
+        local domains_str; domains_str=$(printf '%s,' "${direct_domains[@]}")
+        domains_str="${domains_str%,}"
+        echo "happ://bypass?domains=${domains_str}" | qrencode -t ANSIUTF8 2>/dev/null
+    fi
 
-    # Сохраняем в файл
     local export_file="/tmp/govpn_bypass.txt"
-    printf '%s\n' "${direct_domains[@]}" > "$export_file"
-    echo -e "\n  ${WHITE}Файл:${NC} ${CYAN}${export_file}${NC}"
+    printf '%s
+' "${direct_domains[@]}" > "$export_file"
+    echo -e "\n  ${WHITE}Файл для импорта:${NC} ${CYAN}${export_file}${NC}"
+    echo -e "  ${CYAN}cat ${export_file}${NC}"
     read -p "  Enter..." < /dev/tty
 }
 
@@ -5106,6 +5058,25 @@ CEOF
                     read -r c < /dev/tty
                     if [ "$c" = "y" ]; then
                         # Скачиваем стандартные файлы Cloudflare/v2fly
+                        # Сначала удаляем roscomvpn правила из routing
+                        echo -e "  ${CYAN}Удаляю roscomvpn правила routing...${NC}"
+                        local xui_db="/etc/x-ui/x-ui.db"
+                        if [ -f "$xui_db" ]; then
+                            sqlite3 "$xui_db" \
+                                "SELECT value FROM settings WHERE key='xrayTemplateConfig';" 2>/dev/null | \
+                            python3 -c "
+import json,sys
+cfg=json.load(sys.stdin)
+rules=cfg.get('routing',{}).get('rules',[])
+cfg['routing']['rules']=[r for r in rules if 'roscomvpn' not in r.get('_comment','') and 'govpn' not in r.get('_comment','')]
+print(json.dumps(cfg,ensure_ascii=False))
+" 2>/dev/null | python3 -c "
+import sys
+d=sys.stdin.read().replace(chr(39),chr(39)+chr(39))
+print(f\"UPDATE settings SET value=\'{d}\' WHERE key=\'xrayTemplateConfig\';\")" 2>/dev/null | \
+                            sqlite3 "$xui_db" 2>/dev/null && \
+                            echo -e "  ${GREEN}✓ Правила routing удалены${NC}"
+                        fi
                         echo -e "  ${CYAN}Восстанавливаю стандартные файлы...${NC}"
                         curl -fsSL --max-time 30 \
                             "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" \
