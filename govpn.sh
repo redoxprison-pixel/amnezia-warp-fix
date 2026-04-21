@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.09"
+VERSION="6.11"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -3625,6 +3625,71 @@ apply_rule() {
     echo -e "${GREEN}  ✓ Правило добавлено${NC}"
 }
 
+_iptables_diagnose() {
+    clear
+    echo -e "\n${CYAN}━━━ Диагностика iptables ━━━${NC}\n"
+
+    # Занятые порты
+    echo -e "  ${WHITE}Занятые порты (443, 8443, MTProto):${NC}"
+    for port in 443 8443 25 587; do
+        local proc; proc=$(ss -tlnp | grep ":${port} " | grep -oP '"[^"]+"' | head -1 | tr -d '"')
+        if [ -n "$proc" ]; then
+            echo -e "    ${CYAN}:${port}${NC} → ${proc}"
+        else
+            echo -e "    ${GREEN}:${port}${NC} → свободен"
+        fi
+    done
+
+    echo ""
+    echo -e "  ${WHITE}REDIRECT правила (UDP диапазоны):${NC}"
+    local has_redirect=0
+    iptables -t nat -S PREROUTING 2>/dev/null | grep REDIRECT | while read -r rule; do
+        local dport; dport=$(echo "$rule" | grep -oP '(?<=--dport )[^ ]+')
+        local toport; toport=$(echo "$rule" | grep -oP '(?<=--to-port )[^ ]+')
+        local proto; proto=$(echo "$rule" | grep -oP '(?<=-p )[^ ]+')
+        echo -e "    ${YELLOW}${proto}:${dport}${NC} → ${GREEN}:${toport}${NC}"
+        has_redirect=1
+
+        # Анализ
+        if echo "$dport" | grep -q ':'; then
+            local from_p; from_p="${dport%:*}"
+            local to_p; to_p="${dport#*:}"
+            local range=$((to_p - from_p))
+            echo -e "    ${WHITE}Диапазон: ${range} портов${NC}"
+        fi
+        if [ "$toport" = "443" ]; then
+            echo -e "    ${YELLOW}⚠ Редирект на 443 — порт должен быть свободен или слушать xray${NC}"
+            # Проверяем что слушает на 443
+            local p443; p443=$(ss -tlnp | grep ':443 ' | grep -oP '"[^"]+"' | head -1 | tr -d '"')
+            if [ -n "$p443" ]; then
+                echo -e "    ${GREEN}✓ 443 слушает: ${p443}${NC}"
+            else
+                echo -e "    ${RED}✗ 443 никто не слушает! Редирект бесполезен${NC}"
+            fi
+        fi
+    done
+
+    echo ""
+    echo -e "  ${WHITE}Рекомендации:${NC}"
+    echo -e "  ${CYAN}•${NC} UDP 25300:25400 → 443 полезен только если Xray слушает UDP:443"
+    echo -e "  ${CYAN}•${NC} Для MTProto используй порты 443, 8443 напрямую"
+    echo -e "  ${CYAN}•${NC} REDIRECT правила теряются при перезагрузке если не сохранены"
+    echo -e "  ${CYAN}•${NC} Проверь: iptables-save | grep REDIRECT"
+
+    echo ""
+    echo -ne "  ${YELLOW}Удалить все UDP REDIRECT правила? (y/n):${NC} "
+    read -r c < /dev/tty
+    if [ "$c" = "y" ]; then
+        iptables -t nat -S PREROUTING 2>/dev/null | grep REDIRECT | \
+            sed 's/^-A /-D /' | while read -r r; do
+            iptables -t nat $r 2>/dev/null && echo -e "  ${GREEN}✓ Удалено: ${r}${NC}"
+        done
+        save_iptables 2>/dev/null
+        echo -e "  ${GREEN}✓ REDIRECT правила удалены${NC}"
+    fi
+    read -p "  Enter..." < /dev/tty
+}
+
 iptables_menu() {
     while true; do
         clear
@@ -3656,12 +3721,28 @@ iptables_menu() {
             echo -e "  ${YELLOW}Правил нет${NC}\n"
         fi
 
+        # Показываем REDIRECT правила (UDP порт-диапазоны → 443)
+        local redirects; redirects=$(iptables -t nat -S PREROUTING 2>/dev/null | grep REDIRECT)
+        if [ -n "$redirects" ]; then
+            echo -e "${WHITE}UDP REDIRECT правила:${NC}"
+            echo "$redirects" | while read -r rule; do
+                local dport; dport=$(echo "$rule" | grep -oP '(?<=--dport )[^ ]+')
+                local toport; toport=$(echo "$rule" | grep -oP '(?<=--to-port )[^ ]+')
+                local proto; proto=$(echo "$rule" | grep -oP '(?<=-p )[^ ]+')
+                echo -e "  ${YELLOW}${proto}:${dport}${NC} → ${GREEN}:${toport}${NC}  ${YELLOW}[REDIRECT]${NC}"
+            done
+            echo ""
+        fi
+
+        echo -e "  ${WHITE}── Добавить правило ──────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  AmneziaWG / WireGuard (UDP)"
         echo -e "  ${YELLOW}[2]${NC}  VLESS / XRay (TCP)"
         echo -e "  ${YELLOW}[3]${NC}  MTProto (TCP)"
         echo -e "  ${YELLOW}[4]${NC}  Кастомное правило"
+        echo -e "  ${WHITE}── Управление ────────────────────────${NC}"
+        echo -e "  ${CYAN}[7]${NC}  Диагностика и рекомендации"
         echo -e "  ${YELLOW}[5]${NC}  Удалить правило"
-        echo -e "  ${RED}[6]${NC}  Сбросить все"
+        echo -e "  ${RED}[6]${NC}  Сбросить все govpn правила"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
@@ -3672,6 +3753,7 @@ iptables_menu() {
             3) _add_rule "tcp" "MTProto" ;;
             4) _add_custom_rule ;;
             5) _delete_rule ;;
+            7) _iptables_diagnose ;;
             6)
                 read -p "$(echo -e "${RED}Сбросить все правила govpn? (y/n): ${NC}")" c
                 [[ "$c" == "y" ]] && {
@@ -5982,6 +6064,48 @@ domain_menu() {
 }
 
 
+_3xui_reorder_inbounds() {
+    clear
+    echo -e "\n${CYAN}━━━ Сортировка inbounds по порядку ━━━${NC}\n"
+
+    local db="/etc/x-ui/x-ui.db"
+
+    python3 - << 'PYEOF'
+import sqlite3, json, sys
+
+db = '/etc/x-ui/x-ui.db'
+conn = sqlite3.connect(db)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+
+rows = conn.execute("SELECT id, remark, port FROM inbounds ORDER BY id").fetchall()
+
+print("  Текущий порядок:")
+for ib_id, remark, port in rows:
+    print(f"    #{ib_id:2d}  {remark:30s}  port:{port}")
+
+print()
+
+# Пересортируем: назначаем новые ID начиная с 1
+# Нельзя просто поменять ID из-за внешних ключей, поэтому создаём таблицу порядка
+# Используем поле order если есть, иначе просто показываем
+cols = [c[1] for c in conn.execute("PRAGMA table_info(inbounds)").fetchall()]
+if 'sort_order' in cols or 'displayOrder' in cols:
+    print("  Поле сортировки найдено — можно применить")
+else:
+    print("  Поле сортировки не найдено в этой версии 3X-UI")
+    print("  Порядок отображения определяется ID inbound'а")
+    print()
+    print("  Для изменения порядка рекомендуется:")
+    print("  1. Удалить и пересоздать inbounds в нужном порядке через панель")
+    print("  2. Или использовать drag&drop в панели 3X-UI")
+
+conn.close()
+PYEOF
+
+    echo ""
+    read -p "  Enter..." < /dev/tty
+}
+
 _3xui_selfsteal_setup() {
     # Мастер настройки Self-Steal Reality для 3X-UI
     clear
@@ -6004,9 +6128,14 @@ _3xui_selfsteal_setup() {
     done
 
     echo ""
-    echo -e "  ${YELLOW}[1]${NC}  Диагностика текущей конфигурации"
-    echo -e "  ${YELLOW}[2]${NC}  Мастер настройки Self-Steal (авто)"
+    echo -e "  ${WHITE}── Диагностика ────────────────────────${NC}"
+    echo -e "  ${YELLOW}[1]${NC}  Полная диагностика всех inbounds"
+    echo -e "  ${WHITE}── Self-Steal ──────────────────────────${NC}"
+    echo -e "  ${YELLOW}[2]${NC}  Мастер Self-Steal (авто)"
     echo -e "  ${YELLOW}[3]${NC}  Инструкция — как сделать вручную"
+    echo -e "  ${WHITE}── Управление ──────────────────────────${NC}"
+    echo -e "  ${CYAN}[4]${NC}  Установить заглушку сайта"
+    echo -e "  ${CYAN}[5]${NC}  Сортировать inbounds по порядку"
     echo -e "  ${YELLOW}[0]${NC}  Назад"
     echo ""
     read -p "  Выбор: " ss_ch < /dev/tty
@@ -6015,55 +6144,111 @@ _3xui_selfsteal_setup() {
         1) _3xui_selfsteal_diagnose ;;
         2) _3xui_selfsteal_wizard ;;
         3) _3xui_selfsteal_manual ;;
+        4) _3xui_install_stub_site ;;
+        5) _3xui_reorder_inbounds ;;
         0|"") return ;;
     esac
 }
 
 _3xui_selfsteal_diagnose() {
     clear
-    echo -e "\n${CYAN}━━━ Диагностика Self-Steal ━━━${NC}\n"
+    echo -e "
+${CYAN}━━━ Полная диагностика inbounds ━━━${NC}
+"
 
-    # Порты
-    echo -e "  ${WHITE}Порты:${NC}"
-    ss -tlnp | grep -E 'nginx|xray' | while read -r line; do
-        local port; port=$(echo "$line" | grep -oP ':\K[0-9]+' | head -1)
-        local proc; proc=$(echo "$line" | grep -oP '"[^"]+",pid' | tr -d '",' | sed 's/pid//')
-        echo -e "    ${CYAN}${port}${NC} → ${proc}"
-    done
+    cat > /tmp/_govpn_diag.py << 'PYEOF_DIAG'
+import sqlite3, json, subprocess, sys
 
-    echo ""
-    echo -e "  ${WHITE}Inbounds в 3X-UI:${NC}"
-    sqlite3 /etc/x-ui/x-ui.db "SELECT remark, port FROM inbounds;" | while IFS='|' read r p; do
-        echo -e "    ${CYAN}${p}${NC}  ${r}"
-    done
+db = '/etc/x-ui/x-ui.db'
+conn = sqlite3.connect(db)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 
-    echo ""
-    echo -e "  ${WHITE}Сертификаты:${NC}"
-    certbot certificates 2>/dev/null | grep -E 'Domains:|Expiry' | while read -r l; do
-        echo -e "    $l"
-    done
+# Получаем домены с сертификатами
+certs = subprocess.run(['certbot','certificates'], capture_output=True, text=True)
+local_domains = []
+for line in certs.stdout.splitlines():
+    if 'Domains:' in line:
+        local_domains.append(line.split()[-1])
 
-    echo ""
-    # Проверяем Self-Steal признаки
-    local has_selfsteal=0
-    sqlite3 /etc/x-ui/x-ui.db "SELECT stream_settings FROM inbounds;" 2>/dev/null | \
-    while read -r ss; do
-        local target; target=$(echo "$ss" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    r=d.get('realitySettings',{})
-    print(r.get('dest',r.get('target','')))
-except: pass
-" 2>/dev/null)
-        if [[ "$target" == *"127.0.0.1"* ]]; then
-            echo -e "  ${GREEN}✓ Self-Steal найден: target=${target}${NC}"
-            has_selfsteal=1
-        fi
-    done
-    [ "$has_selfsteal" -eq 0 ] && \
-        echo -e "  ${RED}✗ Self-Steal НЕ настроен${NC} — используются чужие домены"
+# Получаем nginx порты
+ss_out = subprocess.run(['ss','-tlnp'], capture_output=True, text=True).stdout
+nginx_ports = []
+for line in ss_out.splitlines():
+    if 'nginx' in line:
+        import re
+        m = re.search(r'[\d.]+:(\d+)', line)
+        if m and m.group(1) not in ('80','443'):
+            nginx_ports.append(int(m.group(1)))
 
+print(f"  Домены с SSL: {local_domains}")
+print(f"  Nginx порты (не 80/443): {nginx_ports}
+")
+
+rows = conn.execute("SELECT id, remark, port, enable, stream_settings FROM inbounds").fetchall()
+
+issues = []
+for ib_id, remark, port, enable, stream in rows:
+    status = "✓" if enable else "✗ (выкл)"
+    try:
+        ss = json.loads(stream)
+        network = ss.get('network', 'tcp')
+        security = ss.get('security', 'none')
+        rs = ss.get('realitySettings', {})
+        target = rs.get('dest', rs.get('target', ''))
+        server_names = rs.get('serverNames', [])
+
+        problems = []
+        suggestions = []
+
+        if security == 'reality':
+            # Проверка Self-Steal
+            is_self = '127.0.0.1' in str(target)
+            if not is_self:
+                problems.append(f"target={target} — чужой домен")
+                if local_domains and nginx_ports:
+                    suggestions.append(f"Исправь: target=127.0.0.1:{nginx_ports[0]}, serverNames={local_domains[0]}")
+            else:
+                # Проверяем что порт nginx правильный
+                try:
+                    tport = int(target.split(':')[-1])
+                    if tport not in nginx_ports:
+                        problems.append(f"target port {tport} не совпадает с nginx {nginx_ports}")
+                except: pass
+
+            # Проверка serverNames
+            if server_names and local_domains:
+                if not any(d in server_names for d in local_domains):
+                    problems.append(f"serverNames={server_names} — не твой домен")
+                    suggestions.append(f"serverNames должен быть {local_domains[0]}")
+
+            # gRPC устарел
+            if network == 'grpc':
+                problems.append("gRPC deprecated — мигрируй на xhttp stream-up")
+                suggestions.append("Замени на xhttp mode=stream-up или packet-up")
+
+            # VLESS без flow
+            clients = ss.get('settings', {}) if isinstance(ss.get('settings'), dict) else {}
+            # Проверяем через БД
+            for client in clients.get('clients', []):
+                if not client.get('flow') and network in ('tcp',):
+                    problems.append("VLESS без flow на TCP — рекомендуется xtls-rprx-vision")
+
+        icon = "🟢" if not problems else "🔴"
+        print(f"  {icon} #{ib_id} {remark} (port:{port}, {network}/{security}) {status}")
+        for p in problems:
+            print(f"      ⚠ {p}")
+        for s in suggestions:
+            print(f"      → {s}")
+        if not problems and security == 'reality':
+            print(f"      ✓ Self-Steal: {target}")
+
+    except Exception as e:
+        print(f"  ❓ #{ib_id} {remark}: ошибка={e}")
+
+conn.close()
+PYEOF_DIAG
+
+    python3 /tmp/_govpn_diag.py
     echo ""
     read -p "  Enter..." < /dev/tty
 }
@@ -6129,30 +6314,46 @@ _3xui_selfsteal_wizard() {
 
     # Пишем Python скрипт во временный файл и запускаем
     cat > /tmp/_govpn_ss.py << 'PYEOF_SS'
-import json, sys, sqlite3, os
+import json, sys, sqlite3
 
 db = sys.argv[1]
 domain = sys.argv[2]
 nginx_port = int(sys.argv[3])
 mode = sys.argv[4] if len(sys.argv) > 4 else 'check'
 
+# Сети которые поддерживают Self-Steal нормально
+SUPPORTED = ('tcp', 'xhttp', 'h2', 'http')
+# gRPC пропускаем - deprecated и Self-Steal работает иначе
+SKIP_NETWORKS = ('grpc',)
+
 conn = sqlite3.connect(db)
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-cur = conn.cursor()
-cur.execute("SELECT id, remark, stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%'")
-rows = cur.fetchall()
+
+rows = conn.execute(
+    "SELECT id, remark, stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%'"
+).fetchall()
 
 changed = 0
 for ib_id, remark, stream in rows:
     try:
         ss = json.loads(stream)
+        network = ss.get('network', 'tcp')
         rs = ss.get('realitySettings', {})
         cur_target = rs.get('dest', rs.get('target', '?'))
         is_self = '127.0.0.1' in str(cur_target)
+
+        if network in SKIP_NETWORKS:
+            if mode == 'check':
+                print(f"  ⚪ #{ib_id} {remark} ({network}) — пропущен (deprecated)")
+            continue
+
         if mode == 'check':
-            print(f"  #{ib_id} {remark}")
-            print(f"      target: {cur_target}  {'✓ Self-Steal' if is_self else '⚠ нужно исправить'}")
+            status = '✓ Self-Steal' if is_self else '⚠ нужно исправить'
+            print(f"  #{ib_id} {remark} ({network})")
+            print(f"      target: {cur_target}  {status}")
         else:
+            # Сохраняем бэкап
+            old_target = cur_target
             rs['dest'] = f'127.0.0.1:{nginx_port}'
             rs['target'] = f'127.0.0.1:{nginx_port}'
             rs['serverNames'] = [domain]
@@ -6160,7 +6361,7 @@ for ib_id, remark, stream in rows:
             new_ss = json.dumps(ss, ensure_ascii=False)
             conn.execute("UPDATE inbounds SET stream_settings=? WHERE id=?", (new_ss, ib_id))
             conn.commit()
-            print(f"  ✓ #{ib_id} {remark} → 127.0.0.1:{nginx_port}")
+            print(f"  ✓ #{ib_id} {remark}: {old_target} → 127.0.0.1:{nginx_port}")
             changed += 1
     except Exception as e:
         print(f"  ✗ #{ib_id} {remark}: {e}")
@@ -6199,46 +6400,57 @@ PYEOF_SS
 _3xui_install_stub_site() {
     local webroot="/var/www/html"
     mkdir -p "$webroot"
-    echo -e "  ${CYAN}Устанавливаю заглушку CinemaLab...${NC}"
-    cat > "${webroot}/index.html" << 'STUBHTML'
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CinemaLab | Студия профессионального видеопроизводства</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>body{font-family:sans-serif;}.hero-gradient{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);}</style>
-</head>
-<body class="bg-white text-slate-900">
-    <nav class="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-slate-100 py-4 px-6">
-        <div class="max-w-7xl mx-auto flex justify-between items-center">
-            <span class="text-2xl font-bold uppercase text-slate-800">Cinema<span class="text-red-600">Lab</span></span>
-            <button class="bg-slate-900 text-white px-5 py-2 rounded text-sm font-bold hover:bg-red-600 transition uppercase">Вход для клиентов</button>
-        </div>
-    </nav>
-    <header class="relative h-[70vh] flex items-center justify-center hero-gradient">
-        <div class="text-center px-4">
-            <h1 class="text-5xl font-bold text-white mb-6 uppercase">Cinema<span class="text-red-500">Lab</span></h1>
-            <p class="text-slate-300 max-w-2xl mx-auto text-lg mb-8">Профессиональное видеопроизводство. 4K/8K. Рекламные ролики, документальные фильмы.</p>
-            <button class="bg-red-600 text-white px-10 py-4 rounded font-bold uppercase hover:scale-105 transition">Смотреть портфолио</button>
-        </div>
-    </header>
-    <section class="py-20 bg-slate-50">
-        <div class="max-w-4xl mx-auto px-6 text-center">
-            <h2 class="text-3xl font-bold mb-6">Удалённый монтаж и <span class="text-red-600">Proxy-серверы</span></h2>
-            <p class="text-slate-600 text-lg">Collaborative Workflow. Синхронизация проектов в реальном времени. Средний объём — до 450 ГБ/сутки.</p>
-        </div>
-    </section>
-    <footer class="bg-slate-900 text-slate-500 py-8 px-6 text-center text-sm">
-        <div class="font-bold text-white mb-2">CinemaLab 2026</div>
-        <div>Москва • +7 (495) 000-00-00</div>
-    </footer>
-</body>
-</html>
-STUBHTML
+    clear
+    echo -e "
+${CYAN}━━━ Установка заглушки сайта ━━━${NC}
+"
+    echo -e "  ${WHITE}[1]${NC}  CinemaLab — видеостудия (объясняет большой трафик)"
+    echo -e "  ${WHITE}[2]${NC}  TechCorp — IT компания (корпоративный стиль)"
+    echo -e "  ${WHITE}[3]${NC}  CloudStorage — облачное хранилище"
+    echo -e "  ${WHITE}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор: " stub_ch < /dev/tty
+
+    case "$stub_ch" in
+        1) _stub_cinemalab "$webroot" ;;
+        2) _stub_techcorp "$webroot" ;;
+        3) _stub_cloudstorage "$webroot" ;;
+        0|"") return ;;
+    esac
     echo -e "  ${GREEN}✓ Заглушка установлена в ${webroot}/index.html${NC}"
+    systemctl reload nginx 2>/dev/null
 }
+
+_stub_cinemalab() {
+    cat > "$1/index.html" << 'STUBEND'
+<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>CinemaLab | Студия видеопроизводства</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-white"><nav class="bg-white border-b py-4 px-6 flex justify-between items-center"><span class="text-2xl font-bold">Cinema<span class="text-red-600">Lab</span></span><button class="bg-slate-900 text-white px-5 py-2 rounded text-sm">Вход для клиентов</button></nav>
+<header class="h-96 flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-700"><div class="text-center text-white"><h1 class="text-5xl font-bold mb-4">Профессиональное видеопроизводство</h1><p class="text-slate-300 text-lg">4K/8K • Collaborative Workflow • 450 ГБ/сутки</p></div></header>
+<section class="py-16 max-w-4xl mx-auto px-6"><h2 class="text-3xl font-bold mb-4">Удалённый монтаж</h2><p class="text-slate-600">Синхронизация проектов в реальном времени через высокоскоростное облачное хранилище. Adobe Premiere & DaVinci Resolve.</p></section>
+<footer class="bg-slate-900 text-slate-400 py-8 text-center">CinemaLab 2026 • Москва</footer></body></html>
+STUBEND
+}
+
+_stub_techcorp() {
+    cat > "$1/index.html" << 'STUBEND'
+<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>TechCorp | Корпоративные IT решения</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-50"><nav class="bg-white shadow py-4 px-8 flex justify-between items-center"><span class="text-xl font-bold text-blue-600">TechCorp</span><div class="space-x-6 text-sm text-gray-600"><a href="#" class="hover:text-blue-600">Услуги</a><a href="#" class="hover:text-blue-600">Клиенты</a><a href="#" class="hover:text-blue-600">Контакты</a></div></nav>
+<header class="bg-blue-700 text-white py-24 px-8 text-center"><h1 class="text-4xl font-bold mb-4">Корпоративная IT инфраструктура</h1><p class="text-blue-200 text-lg">Защищённые каналы связи • VPN решения • 24/7 поддержка</p></header>
+<section class="py-16 max-w-5xl mx-auto px-8 grid grid-cols-3 gap-8"><div class="bg-white rounded-lg p-6 shadow"><h3 class="font-bold text-lg mb-2">🔒 Безопасность</h3><p class="text-gray-600 text-sm">Корпоративные VPN, шифрование данных, защита периметра</p></div><div class="bg-white rounded-lg p-6 shadow"><h3 class="font-bold text-lg mb-2">☁️ Облако</h3><p class="text-gray-600 text-sm">Гибридные облачные решения, резервное копирование</p></div><div class="bg-white rounded-lg p-6 shadow"><h3 class="font-bold text-lg mb-2">📡 Сети</h3><p class="text-gray-600 text-sm">Проектирование и обслуживание корпоративных сетей</p></div></section>
+<footer class="bg-gray-800 text-gray-400 py-8 text-center text-sm">© 2026 TechCorp LLC • Все права защищены</footer></body></html>
+STUBEND
+}
+
+_stub_cloudstorage() {
+    cat > "$1/index.html" << 'STUBEND'
+<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>CloudDrive | Безопасное облачное хранилище</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gradient-to-br from-indigo-50 to-blue-50 min-h-screen"><nav class="bg-white/80 backdrop-blur py-4 px-8 flex justify-between items-center shadow-sm"><span class="text-xl font-bold text-indigo-600">☁ CloudDrive</span><button class="bg-indigo-600 text-white px-6 py-2 rounded-full text-sm">Войти</button></nav>
+<header class="text-center py-24 px-8"><h1 class="text-5xl font-bold text-gray-800 mb-6">Ваши данные <span class="text-indigo-600">в безопасности</span></h1><p class="text-gray-500 text-xl mb-8">Зашифрованное хранилище для бизнеса и частных лиц. До 10 ТБ на аккаунт.</p><button class="bg-indigo-600 text-white px-10 py-4 rounded-full text-lg hover:bg-indigo-700">Начать бесплатно</button></header>
+<section class="max-w-4xl mx-auto px-8 pb-16 grid grid-cols-2 gap-6"><div class="bg-white rounded-2xl p-6 shadow-sm"><div class="text-3xl mb-3">🔐</div><h3 class="font-bold mb-2">Шифрование AES-256</h3><p class="text-gray-500 text-sm">Данные зашифрованы до загрузки на сервер</p></div><div class="bg-white rounded-2xl p-6 shadow-sm"><div class="text-3xl mb-3">⚡</div><h3 class="font-bold mb-2">Высокая скорость</h3><p class="text-gray-500 text-sm">До 10 Гбит/с для корпоративных клиентов</p></div></section>
+<footer class="text-center py-8 text-gray-400 text-sm">© 2026 CloudDrive Inc.</footer></body></html>
+STUBEND
+}
+
 
 system_menu() {
     while true; do
