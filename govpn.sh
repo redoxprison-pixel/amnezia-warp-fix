@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.11"
+VERSION="6.12"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -8743,12 +8743,14 @@ show_menu() {
             echo -e "  ${GREEN}3)  Клиенты 3X-UI${NC}"
         fi
         echo -e " ${CYAN}── ПРОКСИ ────────────────────────────${NC}"
-        # MTProto показываем всегда — порты можно выбрать вручную
-        local _mtg_cnt; _mtg_cnt=$(_mtg_count_running 2>/dev/null || echo 0)
-        if [ "$_mtg_cnt" -gt 0 ]; then
-            echo -e "  ${GREEN}5)  MTProto прокси${NC}  ${CYAN}(${_mtg_cnt} активных)${NC}"
-        else
-            echo -e "  5)  MTProto прокси"
+        # MTProto только на не-bridge серверах
+        if ! is_bridge; then
+            local _mtg_cnt; _mtg_cnt=$(_mtg_count_running 2>/dev/null || echo 0)
+            if [ "$_mtg_cnt" -gt 0 ]; then
+                echo -e "  ${GREEN}5)  MTProto прокси${NC}  ${CYAN}(${_mtg_cnt} активных)${NC}"
+            else
+                echo -e "  5)  MTProto прокси"
+            fi
         fi
         echo -e "  6)  iptables проброс"
         echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
