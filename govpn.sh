@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.12"
+VERSION="6.13"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2003,7 +2003,8 @@ if has_ru:
     })
     # category-ru-blocked только если файл runetfreedom (>10MB)
     import os
-    geo_size = os.path.getsize(geosite_path) if os.path.exists(geosite_path) else 0
+    _geosite_path = f'{xray_dir}/geosite.dat'
+    geo_size = os.path.getsize(_geosite_path) if os.path.exists(_geosite_path) else 0
     if geo_size > 10_000_000:
         NEW_RULES.append({
             "type": "field",
