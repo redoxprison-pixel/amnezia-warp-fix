@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.13"
+VERSION="6.14"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -2001,17 +2001,53 @@ if has_ru:
         "outboundTag": "direct",
         "_comment": "roscomvpn: РФ/РБ напрямую"
     })
-    # category-ru-blocked только если файл runetfreedom (>10MB)
-    import os
+    # Проверяем поддержку category-ru-blocked через xray binary
+    import os, subprocess, tempfile
     _geosite_path = f'{xray_dir}/geosite.dat'
     geo_size = os.path.getsize(_geosite_path) if os.path.exists(_geosite_path) else 0
-    if geo_size > 10_000_000:
+
+    # Ищем xray binary
+    xray_bin = None
+    for candidate in [f'{xray_dir}/xray', '/usr/local/x-ui/bin/xray', '/usr/bin/xray']:
+        if os.path.isfile(candidate):
+            xray_bin = candidate
+            break
+
+    has_blocked = False
+    if geo_size > 10_000_000 and xray_bin:
+        # Тест-конфиг с category-ru-blocked
+        test_cfg = {
+            "routing": {"rules": [{"type":"field","domain":["geosite:category-ru-blocked"],"outboundTag":"direct"}]},
+            "outbounds": [{"tag":"direct","protocol":"freedom"}]
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            import json as _json
+            _json.dump(test_cfg, f)
+            test_file = f.name
+        try:
+            r = subprocess.run([xray_bin, '-test', '-c', test_file],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, 'XRAY_LOCATION_ASSET': xray_dir})
+            has_blocked = r.returncode == 0
+            if not has_blocked:
+                print(f"  ℹ category-ru-blocked недоступен в этой версии xray")
+        except Exception as e:
+            has_blocked = False
+        finally:
+            os.unlink(test_file)
+    elif geo_size <= 10_000_000:
+        print(f"  ℹ geosite.dat ({geo_size//1024}KB) — обновите до runetfreedom")
+
+    if has_blocked:
         NEW_RULES.append({
             "type": "field",
             "domain": ["geosite:category-ru-blocked"],
             "outboundTag": proxy_tag,
-            "_comment": f"roscomvpn: заблокированные через {proxy_tag}"
+            "_comment": f"roscomvpn: заблокированные РКН через {proxy_tag}"
         })
+    else:
+        # Удаляем старое правило если оно есть
+        rules = [r for r in rules if "category-ru-blocked" not in str(r.get("domain", []))]
 
 # Свой список доменов
 custom_file = "/etc/govpn/custom_domains.txt"
