@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.16"
+VERSION="6.17"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5144,7 +5144,7 @@ _3xui_inbound_templates() {
     echo -e "\n${CYAN}━━━ Шаблоны inbound для 3X-UI ━━━${NC}\n"
 
     local domain; domain="${XUI_SUB_DOMAIN:-$(certbot certificates 2>/dev/null | grep 'Domains:' | head -1 | awk '{print $2}')}"
-    local nginx_port; nginx_port=$(ss -tlnp | grep nginx | grep -vE ':443 |:80 ' | grep -oP '[\d.]+:\K[0-9]+' | sort -n | head -1)
+    local nginx_port; nginx_port=$(_nginx_find_ssl_port)
     nginx_port="${nginx_port:-7443}"
     domain="${domain:-your-domain.com}"
 
@@ -6319,6 +6319,41 @@ PYEOF
     read -p "  Enter..." < /dev/tty
 }
 
+_nginx_find_ssl_port() {
+    # Возвращает nginx SSL порт без proxy_protocol
+    # Если все порты с proxy_protocol — создаёт новый
+    local all_ports
+    all_ports=$(ss -tlnp 2>/dev/null | grep nginx | \
+        grep -vE ':443 |:80 ' | grep -oP '\d+\.\d+\.\d+\.\d+:\K[0-9]+|\*:\K[0-9]+|:::\K[0-9]+' | \
+        sort -un)
+
+    for _np in $all_ports; do
+        local _pp; _pp=$(grep -rn "listen.*${_np}.*proxy_protocol" \
+            /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null | wc -l)
+        if [ "$_pp" -eq 0 ]; then
+            echo "$_np"; return 0
+        fi
+    done
+
+    # Все порты с proxy_protocol — добавляем новый
+    local _pp_port; _pp_port=$(echo "$all_ports" | head -1)
+    if [ -n "$_pp_port" ]; then
+        local _new_port=$(( _pp_port + 10000 ))
+        local _conf; _conf=$(grep -rl "listen.*${_pp_port}.*proxy_protocol" \
+            /etc/nginx/sites-enabled/ 2>/dev/null | head -1)
+        if [ -n "$_conf" ]; then
+            # Добавляем listen без proxy_protocol
+            sed -i "/listen ${_pp_port} ssl.*proxy_protocol/a\\        listen ${_new_port} ssl http2;" \
+                "$_conf" 2>/dev/null
+            sed -i "/listen \[::\]:${_pp_port} ssl.*proxy_protocol/a\\        listen [::]:${_new_port} ssl http2;" \
+                "$_conf" 2>/dev/null
+            nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null
+            echo "$_new_port"; return 0
+        fi
+    fi
+    echo "17443"
+}
+
 _3xui_selfsteal_setup() {
     # Мастер настройки Self-Steal Reality для 3X-UI
     clear
@@ -6511,9 +6546,8 @@ _3xui_selfsteal_wizard() {
     echo -e "\n${CYAN}━━━ Мастер Self-Steal (авто) ━━━${NC}\n"
 
     local domain; domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
-    local nginx_port; nginx_port=$(ss -tlnp 2>/dev/null | grep nginx | \
-        grep -vE ':443 |:80 ' | grep -oP '[\d.]+:\K[0-9]+' | sort -n | head -1)
-    nginx_port="${nginx_port:-7443}"
+    local nginx_port; nginx_port=$(_nginx_find_ssl_port)
+    echo -e "  ${CYAN}Nginx SSL порт (без proxy_protocol): ${nginx_port}${NC}"
 
     if [ -z "$domain" ]; then
         echo -e "  ${RED}✗ Домен не найден${NC}"
