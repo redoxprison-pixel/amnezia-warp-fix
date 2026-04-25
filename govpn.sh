@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.15"
+VERSION="6.16"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -1596,6 +1596,13 @@ _3xui_clients_menu() {
 
     local SERVER_LABEL="Текущий"
     local SERVER_IP="$MY_IP"
+    # Устанавливаем subDomain если пустой
+    if [ -z "$XUI_SUB_DOMAIN" ] && [ -n "$(certbot certificates 2>/dev/null | grep 'Domains:' | head -1 | awk '{print $2}')" ]; then
+        local _auto_domain; _auto_domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+        sqlite3 "$XUI_DB" "UPDATE settings SET value='${_auto_domain}' WHERE key='subDomain';" 2>/dev/null
+        XUI_SUB_DOMAIN="$_auto_domain"
+        echo -e "  ${GREEN}✓ subDomain установлен: ${_auto_domain}${NC}"
+    fi
     local SSH_TUNNEL_PID=""
 
     _3xui_switch_server() {
@@ -3665,6 +3672,46 @@ apply_rule() {
     echo -e "${GREEN}  ✓ Правило добавлено${NC}"
 }
 
+_iptables_hosts_setup() {
+    clear
+    echo -e "\n${CYAN}━━━ Настройка /etc/hosts ━━━${NC}\n"
+
+    local hostname; hostname=$(hostname)
+    local main_ip; main_ip=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+')
+
+    echo -e "  ${WHITE}Текущий hostname:${NC} ${CYAN}${hostname}${NC}"
+    echo -e "  ${WHITE}Основной IP:${NC}     ${CYAN}${main_ip}${NC}\n"
+
+    echo -e "  ${WHITE}Текущий /etc/hosts:${NC}"
+    cat /etc/hosts | while read -r l; do echo "    $l"; done
+
+    echo ""
+    echo -e "  ${WHITE}Рекомендуемые записи:${NC}"
+    echo -e "    ${CYAN}127.0.0.1${NC}  localhost"
+    echo -e "    ${CYAN}127.0.1.1${NC}  ${hostname}"
+    echo -e "    ${CYAN}::1${NC}        localhost ip6-localhost ip6-loopback\n"
+
+    echo -e "  ${YELLOW}[1]${NC}  Добавить стандартные записи"
+    echo -e "  ${YELLOW}[2]${NC}  Открыть в редакторе (nano)"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор: " hosts_ch < /dev/tty
+
+    case "$hosts_ch" in
+        1)
+            # Добавляем если нет
+            grep -q "^127.0.1.1" /etc/hosts || \
+                echo "127.0.1.1 ${hostname}" >> /etc/hosts
+            grep -q "^::1.*ip6-loopback" /etc/hosts || \
+                echo "::1 localhost ip6-localhost ip6-loopback" >> /etc/hosts
+            echo -e "  ${GREEN}✓ Записи добавлены${NC}"
+            cat /etc/hosts ;;
+        2)
+            nano /etc/hosts ;;
+    esac
+    read -p "  Enter..." < /dev/tty
+}
+
 _iptables_diagnose() {
     clear
     echo -e "\n${CYAN}━━━ Диагностика iptables ━━━${NC}\n"
@@ -3781,6 +3828,7 @@ iptables_menu() {
         echo -e "  ${YELLOW}[4]${NC}  Кастомное правило"
         echo -e "  ${WHITE}── Управление ────────────────────────${NC}"
         echo -e "  ${CYAN}[7]${NC}  Диагностика и рекомендации"
+        echo -e "  ${CYAN}[8]${NC}  Настройка /etc/hosts (localhost записи)"
         echo -e "  ${YELLOW}[5]${NC}  Удалить правило"
         echo -e "  ${RED}[6]${NC}  Сбросить все govpn правила"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
@@ -3794,6 +3842,7 @@ iptables_menu() {
             4) _add_custom_rule ;;
             5) _delete_rule ;;
             7) _iptables_diagnose ;;
+            8) _iptables_hosts_setup ;;
             6)
                 read -p "$(echo -e "${RED}Сбросить все правила govpn? (y/n): ${NC}")" c
                 [[ "$c" == "y" ]] && {
@@ -5069,6 +5118,125 @@ _3xui_export_bypass_list() {
 }
 
 
+_3xui_yukikras_info() {
+    clear
+    echo -e "\n${CYAN}━━━ YukiKras/vless-scripts ━━━${NC}\n"
+    echo -e "  ${WHITE}Автор:${NC} YukiKras"
+    echo -e "  ${WHITE}Репо:${NC}  ${CYAN}https://github.com/YukiKras/vless-scripts${NC}\n"
+    echo -e "  ${WHITE}Скрипты:${NC}"
+    echo -e "  ${CYAN}3xinstall.sh${NC}   — установка 3X-UI с настройкой Reality"
+    echo -e "  ${CYAN}fakesite.sh${NC}    — установка сайта-заглушки"
+    echo -e "  ${CYAN}3xuiportfix.sh${NC} — исправление портов 3X-UI\n"
+    echo -e "  ${YELLOW}[1]${NC}  Запустить 3xinstall.sh (установка 3X-UI)"
+    echo -e "  ${YELLOW}[2]${NC}  Запустить fakesite.sh (заглушка)"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор: " yk_ch < /dev/tty
+    case "$yk_ch" in
+        1) bash <(curl -fsSL https://raw.githubusercontent.com/YukiKras/vless-scripts/main/3xinstall.sh) ;;
+        2) bash <(curl -fsSL https://raw.githubusercontent.com/YukiKras/vless-scripts/main/fakesite.sh) ;;
+    esac
+    read -p "  Enter..." < /dev/tty
+}
+
+_3xui_inbound_templates() {
+    clear
+    echo -e "\n${CYAN}━━━ Шаблоны inbound для 3X-UI ━━━${NC}\n"
+
+    local domain; domain="${XUI_SUB_DOMAIN:-$(certbot certificates 2>/dev/null | grep 'Domains:' | head -1 | awk '{print $2}')}"
+    local nginx_port; nginx_port=$(ss -tlnp | grep nginx | grep -vE ':443 |:80 ' | grep -oP '[\d.]+:\K[0-9]+' | sort -n | head -1)
+    nginx_port="${nginx_port:-7443}"
+    domain="${domain:-your-domain.com}"
+
+    echo -e "  ${WHITE}Домен:${NC}      ${CYAN}${domain}${NC}"
+    echo -e "  ${WHITE}Nginx:${NC}      ${CYAN}127.0.0.1:${nginx_port}${NC}\n"
+
+    echo -e "  ${YELLOW}[1]${NC}  xHTTP + Reality Self-Steal"
+    echo -e "  ${YELLOW}[2]${NC}  gRPC + Reality (SNI: ads.x5.ru)"
+    echo -e "  ${YELLOW}[3]${NC}  TCP + Reality Self-Steal"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    read -p "  Выбор: " tmpl_ch < /dev/tty
+
+    case "$tmpl_ch" in
+        1) _show_xhttp_template "$domain" "$nginx_port" ;;
+        2) _show_grpc_template "$domain" "$nginx_port" ;;
+        3) _show_tcp_template "$domain" "$nginx_port" ;;
+    esac
+}
+
+_show_xhttp_template() {
+    local domain="$1" nginx_port="$2"
+    clear
+    echo -e "\n${CYAN}━━━ xHTTP + Reality Self-Steal ━━━${NC}\n"
+    echo -e "  ${WHITE}Настройки inbound в 3X-UI:${NC}\n"
+    echo -e "  ${CYAN}Protocol:${NC}       vless"
+    echo -e "  ${CYAN}Port:${NC}           25352 (или любой свободный)"
+    echo -e "  ${CYAN}Transport:${NC}      xhttp"
+    echo -e "  ${CYAN}Mode:${NC}           packet-up"
+    echo -e "  ${CYAN}Path:${NC}           /media/fragments/  (уникальный для каждого inbound)"
+    echo -e "  ${CYAN}Security:${NC}       reality\n"
+    echo -e "  ${WHITE}Reality:${NC}"
+    echo -e "  ${CYAN}Dest:${NC}           127.0.0.1:${nginx_port}  ${GREEN}← Self-Steal${NC}"
+    echo -e "  ${CYAN}ServerNames:${NC}    ${domain}"
+    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
+    echo -e "  ${WHITE}ExternalProxy:${NC}  ${domain}:25352"
+    echo -e "  ${CYAN}forceTls:${NC}       same\n"
+    echo -e "  ${YELLOW}Важно:${NC}"
+    echo -e "  • Path должен быть уникальным для каждого xHTTP inbound"
+    echo -e "  • Mode=packet-up даёт лучшую производительность"
+    echo -e "  • ExternalProxy нужен если клиент подключается через CDN/домен"
+    read -p "  Enter..." < /dev/tty
+}
+
+_show_grpc_template() {
+    local domain="$1" nginx_port="$2"
+    clear
+    echo -e "\n${CYAN}━━━ gRPC + Reality ━━━${NC}\n"
+    echo -e "  ${WHITE}⚠ gRPC deprecated в новых версиях Xray${NC}"
+    echo -e "  ${WHITE}Рекомендуется: xHTTP mode=stream-up вместо gRPC${NC}\n"
+    echo -e "  ${WHITE}Настройки inbound (если всё же нужен gRPC):${NC}\n"
+    echo -e "  ${CYAN}Protocol:${NC}       vless"
+    echo -e "  ${CYAN}Port:${NC}           25333"
+    echo -e "  ${CYAN}Transport:${NC}      grpc"
+    echo -e "  ${CYAN}serviceName:${NC}    grpc-api-v1  (любое уникальное имя)"
+    echo -e "  ${CYAN}Security:${NC}       reality\n"
+    echo -e "  ${WHITE}Reality (для РФ сервера — чужой SNI):${NC}"
+    echo -e "  ${CYAN}Dest:${NC}           ads.x5.ru:443"
+    echo -e "  ${CYAN}ServerNames:${NC}    ads.x5.ru"
+    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
+    echo -e "  ${WHITE}Reality (для нероссийского — Self-Steal):${NC}"
+    echo -e "  ${CYAN}Dest:${NC}           127.0.0.1:${nginx_port}"
+    echo -e "  ${CYAN}ServerNames:${NC}    ${domain}"
+    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
+    echo -e "  ${YELLOW}Альтернатива — xHTTP stream-up (лучше gRPC):${NC}"
+    echo -e "  ${CYAN}Transport:${NC}      xhttp"
+    echo -e "  ${CYAN}Mode:${NC}           stream-up"
+    echo -e "  ${CYAN}Path:${NC}           /api/v1/stream/"
+    read -p "  Enter..." < /dev/tty
+}
+
+_show_tcp_template() {
+    local domain="$1" nginx_port="$2"
+    clear
+    echo -e "\n${CYAN}━━━ TCP + Reality Self-Steal ━━━${NC}\n"
+    echo -e "  ${WHITE}Настройки inbound:${NC}\n"
+    echo -e "  ${CYAN}Protocol:${NC}       vless"
+    echo -e "  ${CYAN}Port:${NC}           443"
+    echo -e "  ${CYAN}Transport:${NC}      tcp"
+    echo -e "  ${CYAN}Flow:${NC}           xtls-rprx-vision  ${GREEN}← обязательно для TCP${NC}"
+    echo -e "  ${CYAN}Security:${NC}       reality\n"
+    echo -e "  ${WHITE}Reality Self-Steal:${NC}"
+    echo -e "  ${CYAN}Dest:${NC}           127.0.0.1:${nginx_port}"
+    echo -e "  ${CYAN}ServerNames:${NC}    ${domain}"
+    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
+    echo -e "  ${YELLOW}Важно:${NC}"
+    echo -e "  • TCP Reality требует Flow = xtls-rprx-vision у клиента"
+    echo -e "  • Занимает порт 443 — Nginx должен быть на 7443/8443"
+    echo -e "  • Самый быстрый вариант для больших объёмов трафика"
+    read -p "  Enter..." < /dev/tty
+}
+
 _3xui_geo_menu() {
     local xray_dir="/usr/local/x-ui/bin"
     [ ! -d "$xray_dir" ] && xray_dir=$(find /usr -name "geoip.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
@@ -5739,6 +5907,9 @@ install_wizard() {
         echo -e "  ${YELLOW}[1]${NC}  AmneziaWG (Docker)     ${status_awg}"
         echo -e "  ${YELLOW}[2]${NC}  3X-UI / 3X-UI Pro      ${status_xui}"
         is_3xui && echo -e "  ${YELLOW}[3]${NC}  GeoIP/GeoSite (roscomvpn)"
+        is_3xui && echo -e "  ${CYAN}[4]${NC}  Шаблоны inbound (xHTTP/gRPC/TCP)"
+        echo -e "  ${WHITE}── Внешние скрипты ───────────────────${NC}"
+        echo -e "  ${CYAN}[y]${NC}  YukiKras/vless-scripts (3X-UI + fakesite)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -5747,6 +5918,8 @@ install_wizard() {
             1) _install_amnezia_awg ;;
             2) _install_3xui ;;
             3) is_3xui && _3xui_geo_menu ;;
+            4) is_3xui && _3xui_inbound_templates ;;
+            [yY]) _3xui_yukikras_info ;;
             0|"") return ;;
         esac
     done
