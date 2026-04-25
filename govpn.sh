@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.14"
+VERSION="6.15"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -334,7 +334,10 @@ _3xui_load_config() {
     XUI_SUB_PORT=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null || echo "")
     XUI_SUB_PATH=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPath';" 2>/dev/null || echo "")
     XUI_SUB_DOMAIN=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null || echo "")
-    # Если subDomain пустой — проверяем через nginx конфиги
+    # Если subDomain пустой — ищем из certbot, nginx или x-ui настроек
+    if [ -z "$XUI_SUB_DOMAIN" ]; then
+        XUI_SUB_DOMAIN=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    fi
     if [ -z "$XUI_SUB_DOMAIN" ]; then
         XUI_SUB_DOMAIN=$(grep -rh 'server_name' /etc/nginx/sites-enabled/ 2>/dev/null |             grep -v '#\|localhost\|_\|default' | grep -oP 'server_name\s+\K\S+' |             grep '\.' | head -1 || echo "")
     fi
@@ -8226,6 +8229,11 @@ _mtg_add() {
     clear
     echo -e "\n${CYAN}━━━ Новый MTProto прокси ━━━${NC}\n"
 
+    # Определяем домен сервера (для secret и отображения)
+    local SERVER_DOMAIN=""
+    SERVER_DOMAIN=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    [ -z "$SERVER_DOMAIN" ] && SERVER_DOMAIN=$(sqlite3 /etc/x-ui/x-ui.db         "SELECT value FROM settings WHERE key='subDomain';" 2>/dev/null | head -1)
+
     # Определяем страну сервера
     echo -ne "${WHITE}Определяю страну сервера...${NC} "
     # Убеждаемся что MY_IP определён
@@ -8313,22 +8321,37 @@ _mtg_add() {
         printf "  ${YELLOW}[%d]${NC} %-20s ${col}%s${NC}  %s\n" \
             "${#domain_list[@]}" "$d" "${ms}ms" "$desc"
     done
-    echo -e "  ${YELLOW}[$((${#domain_list[@]}+1))]${NC} Свой домен"
+    # Показываем домен сервера как опцию
+    local server_domain_idx=0
+    if [ -n "$SERVER_DOMAIN" ]; then
+        server_domain_idx=$(( ${#domain_list[@]} + 1 ))
+        echo -e "  ${GREEN}[${server_domain_idx}]${NC} ${GREEN}${SERVER_DOMAIN}${NC}  ${CYAN}← ваш домен (Self-Steal)${NC}"
+    fi
+    local custom_idx=$(( ${#domain_list[@]} + ([ -n "$SERVER_DOMAIN" ] && echo 2 || echo 1) ))
+    custom_idx=$(( ${#domain_list[@]} + ( [ -n "$SERVER_DOMAIN" ] && echo 2 || echo 1 ) ))
+    [ -n "$SERVER_DOMAIN" ] && custom_idx=$(( server_domain_idx + 1 )) || custom_idx=$(( ${#domain_list[@]} + 1 ))
+    echo -e "  ${YELLOW}[${custom_idx}]${NC} Свой домен"
     echo ""
     echo -e "${YELLOW}  ⚠ Не используйте домены заблокированные в вашем регионе!${NC}"
     echo ""
-    read -p "Выбор [1]: " domain_choice
-    [ -z "$domain_choice" ] && domain_choice=1
+    # Дефолт — домен сервера если есть
+    local default_choice=1
+    [ -n "$SERVER_DOMAIN" ] && default_choice="$server_domain_idx"
+    read -p "Выбор [${default_choice}]: " domain_choice
+    [ -z "$domain_choice" ] && domain_choice="$default_choice"
 
     local chosen_domain=""
     if [[ "$domain_choice" =~ ^[0-9]+$ ]] && (( domain_choice >= 1 && domain_choice <= ${#domain_list[@]} )); then
         chosen_domain="${domain_list[$((domain_choice-1))]}"
-    elif (( domain_choice == ${#domain_list[@]} + 1 )); then
+    elif [ -n "$SERVER_DOMAIN" ] && (( domain_choice == server_domain_idx )); then
+        chosen_domain="$SERVER_DOMAIN"
+        echo -e "  ${GREEN}✓ Используется ваш домен: ${SERVER_DOMAIN}${NC}"
+    elif (( domain_choice == custom_idx )); then
         echo -e "${WHITE}Введите домен (например: telegram.org):${NC}"
-        read -p "> " chosen_domain
+        read -p "> " chosen_domain < /dev/tty
         [ -z "$chosen_domain" ] && return
     else
-        chosen_domain="bing.com"
+        chosen_domain="${SERVER_DOMAIN:-bing.com}"
     fi
 
     # Генерируем имя контейнера
