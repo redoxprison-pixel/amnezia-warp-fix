@@ -9211,6 +9211,8 @@ PYEOF
 
 MTG_CONF_DIR="${CONF_DIR}/mtproto"
 MTG_IMAGE="nineseconds/mtg:2"
+TELEMT_IMAGE="ghcr.io/telemt/telemt:latest"
+MTG_ENGINE="mtg"   # mtg | telemt — выбор движка
 
 # Список доменов для FakeTLS с описаниями
 MTG_DOMAINS=(
@@ -9751,6 +9753,828 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
     done
 }
 
+
+# ═══════════════════════════════════════════════════════════════
+#  TELEMT — MTProxy на Rust (замена mtg)
+# ═══════════════════════════════════════════════════════════════
+
+_telemt_install() {
+    echo -e "\n${CYAN}Устанавливаем Telemt...${NC}"
+    if curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh; then
+        echo -e "  ${GREEN}✓ Telemt установлен${NC}"
+        return 0
+    else
+        echo -e "  ${RED}✗ Ошибка установки Telemt${NC}"
+        return 1
+    fi
+}
+
+_telemt_is_installed() {
+    command -v telemt &>/dev/null || [ -f /usr/local/bin/telemt ]
+}
+
+_telemt_add() {
+    clear
+    echo -e "\n${CYAN}━━━ Новый Telemt MTProto прокси ━━━${NC}\n"
+
+    # Проверяем установку
+    if ! _telemt_is_installed; then
+        echo -e "  ${YELLOW}Telemt не установлен. Установить?${NC}"
+        echo -ne "  (y/n): "; read -r inst < /dev/tty
+        [[ "$inst" != "y" ]] && return
+        _telemt_install || return
+    fi
+
+    # Получаем домен сервера
+    local server_domain
+    server_domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    [ -z "$server_domain" ] && server_domain=$(grep "^MTG_DOMAIN=" /etc/govpn/config 2>/dev/null | cut -d= -f2 | tr -d '"')
+
+    echo -ne "  Порт [443]: "; read -r port < /dev/tty
+    port="${port:-443}"
+
+    echo -ne "  Домен маскировки (FakeTLS) [storage.googleapis.com]: "; read -r tls_domain < /dev/tty
+    tls_domain="${tls_domain:-storage.googleapis.com}"
+
+    echo -ne "  Имя пользователя [user1]: "; read -r username < /dev/tty
+    username="${username:-user1}"
+
+    # Генерируем 32-hex секрет для пользователя
+    local user_secret; user_secret=$(python3 -c "import os,binascii; print(binascii.hexlify(os.urandom(16)).decode())")
+
+    # Адрес для ссылки
+    local server_addr="${server_domain:-$MY_IP}"
+
+    mkdir -p "$MTG_CONF_DIR"
+    local name="telemt-${port}"
+    local conf_file="${MTG_CONF_DIR}/${name}.toml"
+
+    cat > "$conf_file" << TOML
+[general]
+use_middle_proxy = false
+log_level = "normal"
+
+[general.modes]
+tls = true
+
+[general.links]
+show = "*"
+public_host = "${server_addr}"
+public_port = ${port}
+
+[server]
+port = 3128
+
+[server.api]
+enabled = true
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1"]
+
+[[server.listeners]]
+ip = "0.0.0.0"
+
+[censorship]
+tls_domain = "${tls_domain}"
+mask = true
+tls_emulation = true
+
+[access.users]
+${username} = "${user_secret}"
+TOML
+
+    echo -e "\n  ${CYAN}Запускаем Telemt в Docker...${NC}"
+    docker rm -f "$name" 2>/dev/null
+    docker run -d \
+        --name "$name" \
+        --restart unless-stopped \
+        -v "${conf_file}:/app/config.toml" \
+        -p "0.0.0.0:${port}:3128" \
+        "$TELEMT_IMAGE" 2>/dev/null || {
+            # Пробуем нативный запуск
+            cat > "/etc/systemd/system/${name}.service" << SYSTEMD
+[Unit]
+Description=Telemt MTProto proxy ${name}
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/telemt --config ${conf_file}
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+SYSTEMD
+            systemctl daemon-reload
+            systemctl enable --now "$name" 2>/dev/null
+        }
+
+    sleep 3
+
+    # FakeTLS ссылка (ee + random16 + domain_hex)
+    local fake_secret
+    fake_secret=$(python3 -c "
+import os, binascii
+rand = os.urandom(16)
+domain = '${tls_domain}'.encode()
+print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode())
+")
+
+    # Сохраняем мета
+    local link="tg://proxy?server=${server_addr}&port=${port}&secret=${fake_secret}"
+    cat > "${MTG_CONF_DIR}/${name}.meta" << META
+port=${port}
+domain=${tls_domain}
+server=${server_addr}
+secret=${fake_secret}
+user_secret=${user_secret}
+username=${username}
+engine=telemt
+link=${link}
+link_tme=https://t.me/proxy?server=${server_addr}&port=${port}&secret=${fake_secret}
+created=$(date '+%Y-%m-%d %H:%M:%S')
+META
+
+    echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${GREEN}✓ Telemt запущен!${NC}"
+    echo -e "  ${WHITE}Порт:   ${CYAN}${port}${NC}"
+    echo -e "  ${WHITE}Домен:  ${CYAN}${tls_domain}${NC}"
+    echo -e "  ${WHITE}Ссылка: ${GREEN}${link}${NC}"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    read -p "  Нажмите Enter..." < /dev/tty
+}
+
+_telemt_add_user() {
+    local name="$1"
+    local conf_file="${MTG_CONF_DIR}/${name}.toml"
+    [ ! -f "$conf_file" ] && { echo -e "  ${RED}Конфиг не найден${NC}"; return; }
+
+    echo -ne "  Имя нового пользователя: "; read -r uname < /dev/tty
+    [[ -z "$uname" ]] && return
+    local usecret; usecret=$(python3 -c "import os,binascii; print(binascii.hexlify(os.urandom(16)).decode())")
+
+    # Добавляем в конфиг
+    echo "${uname} = \"${usecret}\"" >> "$conf_file"
+
+    # Перезапускаем
+    docker restart "$name" 2>/dev/null || systemctl restart "$name" 2>/dev/null
+    echo -e "  ${GREEN}✓ Пользователь ${uname} добавлен, секрет: ${usecret}${NC}"
+    sleep 2
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  SSL ПРОВЕРКА И ВЫПУСК ДЛЯ ЗАГЛУШКИ
+# ═══════════════════════════════════════════════════════════════
+
+_ssl_check_and_issue() {
+    local domain="$1"
+    [ -z "$domain" ] && return 1
+
+    echo -e "\n  ${CYAN}Проверяем SSL для ${domain}...${NC}"
+
+    # Проверяем существующий сертификат
+    if certbot certificates 2>/dev/null | grep -q "Domains:.*${domain}"; then
+        local expiry; expiry=$(certbot certificates 2>/dev/null | grep -A3 "Domains:.*${domain}" | grep "Expiry" | awk '{print $3}')
+        echo -e "  ${GREEN}✓ SSL сертификат есть (истекает: ${expiry})${NC}"
+        return 0
+    fi
+
+    echo -e "  ${YELLOW}SSL сертификат не найден — выпускаем...${NC}"
+
+    # Проверяем что порт 80 доступен
+    if ss -tlnp | grep -q ":80.*nginx\|:80.*apache"; then
+        # Используем webroot
+        local webroot="/var/www/${domain}"
+        mkdir -p "$webroot"
+        certbot certonly --webroot -w "$webroot" -d "$domain" \
+            --non-interactive --agree-tos -m "admin@${domain}" 2>/dev/null && {
+            echo -e "  ${GREEN}✓ SSL выпущен через webroot${NC}"; return 0
+        }
+    fi
+
+    # Standalone (временно останавливаем nginx)
+    systemctl stop nginx 2>/dev/null
+    certbot certonly --standalone -d "$domain" \
+        --non-interactive --agree-tos -m "admin@${domain}" 2>/dev/null && {
+        systemctl start nginx 2>/dev/null
+        echo -e "  ${GREEN}✓ SSL выпущен через standalone${NC}"; return 0
+    }
+    systemctl start nginx 2>/dev/null
+    echo -e "  ${RED}✗ Не удалось выпустить SSL — проверь DNS и порт 80${NC}"
+    return 1
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  HTML ЗАГЛУШКИ — ВЫБОР ШАБЛОНА
+# ═══════════════════════════════════════════════════════════════
+
+_stub_templates() {
+    local domain="$1"
+    local webroot="${2:-/var/www/${domain}}"
+
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ HTML Заглушка для ${domain} ━━━${NC}\n"
+        echo -e "  ${WHITE}── Категории ────────────────────────${NC}"
+        echo -e "  ${YELLOW}[1]${NC}  📰 Новостной блог / IT медиа"
+        echo -e "  ${YELLOW}[2]${NC}  🏢 Бизнес / Корпоративный сайт"
+        echo -e "  ${YELLOW}[3]${NC}  🛠️  Технологии / SaaS"
+        echo -e "  ${YELLOW}[4]${NC}  🎓 Образование / Курсы"
+        echo -e "  ${YELLOW}[5]${NC}  🛒 Магазин / E-commerce"
+        echo -e "  ${YELLOW}[6]${NC}  👤 Портфолио / Личный сайт"
+        echo -e "  ${YELLOW}[7]${NC}  🔧 В разработке (Under Construction)"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+
+        case "$ch" in
+            1) _stub_create_news "$webroot" "$domain" ;;
+            2) _stub_create_business "$webroot" "$domain" ;;
+            3) _stub_create_saas "$webroot" "$domain" ;;
+            4) _stub_create_education "$webroot" "$domain" ;;
+            5) _stub_create_shop "$webroot" "$domain" ;;
+            6) _stub_create_portfolio "$webroot" "$domain" ;;
+            7) _stub_create_under_construction "$webroot" "$domain" ;;
+            0|"") return ;;
+        esac
+
+        # После создания — перезагрузить nginx
+        nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null
+        echo -e "\n  ${GREEN}✓ Заглушка установлена! Проверь: http://${domain}${NC}"
+        read -p "  Enter для продолжения..." < /dev/tty
+        return
+    done
+}
+
+_stub_create_news() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TechNews — Новости технологий</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f4f6f8;color:#333}
+header{background:#1a1a2e;color:#fff;padding:0 20px}
+.header-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:60px}
+.logo{font-size:1.4em;font-weight:700;color:#e94560}
+nav a{color:#ccc;text-decoration:none;margin-left:20px;font-size:.9em}
+nav a:hover{color:#fff}
+.hero{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;padding:60px 20px;text-align:center}
+.hero h1{font-size:2.2em;margin-bottom:15px}
+.hero p{color:#aaa;font-size:1.1em;max-width:600px;margin:0 auto 25px}
+.btn{background:#e94560;color:#fff;padding:12px 28px;border-radius:5px;text-decoration:none;font-size:.95em}
+.container{max-width:1100px;margin:40px auto;padding:0 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:25px}
+.card{background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.card-img{height:160px;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;align-items:center;justify-content:center;font-size:3em}
+.card-body{padding:20px}
+.tag{background:#e94560;color:#fff;font-size:.7em;padding:3px 8px;border-radius:3px;text-transform:uppercase}
+.card h3{margin:10px 0 8px;font-size:1.05em}
+.card p{color:#666;font-size:.9em;line-height:1.5}
+.card-meta{color:#999;font-size:.8em;margin-top:12px}
+footer{background:#1a1a2e;color:#777;text-align:center;padding:30px;margin-top:60px;font-size:.9em}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="logo">⚡ TechNews</div>
+    <nav>
+      <a href="#">Главная</a><a href="#">ИИ</a><a href="#">Безопасность</a><a href="#">Разработка</a>
+    </nav>
+  </div>
+</header>
+<div class="hero">
+  <h1>Технологии, которые меняют мир</h1>
+  <p>Актуальные новости из мира IT, искусственного интеллекта и кибербезопасности</p>
+  <a href="#" class="btn">Читать далее</a>
+</div>
+<div class="container">
+  <div class="grid">
+    <div class="card">
+      <div class="card-img">🤖</div>
+      <div class="card-body">
+        <span class="tag">ИИ</span>
+        <h3>Новые модели ИИ устанавливают рекорды производительности</h3>
+        <p>Исследователи представили архитектуру, превосходящую предыдущие решения на ключевых бенчмарках.</p>
+        <div class="card-meta">5 минут назад · 3 мин чтения</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">🔐</div>
+      <div class="card-body">
+        <span class="tag">Безопасность</span>
+        <h3>Критическая уязвимость обнаружена в популярном ПО</h3>
+        <p>Специалисты рекомендуют немедленно обновить системы для защиты от эксплойта.</p>
+        <div class="card-meta">1 час назад · 5 мин чтения</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">💻</div>
+      <div class="card-body">
+        <span class="tag">Dev</span>
+        <h3>Rust обходит C++ по популярности в системном программировании</h3>
+        <p>Ежегодный опрос разработчиков зафиксировал значительный сдвиг предпочтений.</p>
+        <div class="card-meta">3 часа назад · 4 мин чтения</div>
+      </div>
+    </div>
+  </div>
+</div>
+<footer>© 2026 TechNews. Все права защищены.</footer>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'Новостной блог' создан${NC}"
+}
+
+_stub_create_business() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexora — Бизнес решения</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#333}
+header{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:0 30px;position:sticky;top:0;z-index:10}
+.header-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:65px}
+.logo{font-size:1.5em;font-weight:800;color:#2563eb}
+nav a{color:#555;text-decoration:none;margin-left:25px;font-size:.9em;font-weight:500}
+.btn-nav{background:#2563eb;color:#fff!important;padding:8px 18px;border-radius:6px}
+.hero{background:linear-gradient(135deg,#eff6ff,#dbeafe);padding:90px 30px;text-align:center}
+.hero h1{font-size:2.8em;font-weight:800;color:#1e3a8a;margin-bottom:20px;line-height:1.2}
+.hero p{color:#64748b;font-size:1.15em;max-width:580px;margin:0 auto 35px}
+.btn-primary{background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;margin-right:10px}
+.btn-secondary{background:#fff;color:#2563eb;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;border:2px solid #2563eb}
+.stats{display:flex;justify-content:center;gap:60px;padding:50px;background:#fff}
+.stat{text-align:center}
+.stat .num{font-size:2.2em;font-weight:800;color:#2563eb}
+.stat .label{color:#64748b;font-size:.9em;margin-top:5px}
+.features{max-width:1100px;margin:60px auto;padding:0 30px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:30px}
+.feature{background:#f8fafc;padding:30px;border-radius:12px;border-left:4px solid #2563eb}
+.feature .icon{font-size:2em;margin-bottom:15px}
+.feature h3{font-weight:700;margin-bottom:10px}
+.feature p{color:#64748b;line-height:1.6;font-size:.95em}
+footer{background:#1e3a8a;color:#94a3b8;text-align:center;padding:35px;font-size:.9em}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="logo">Nexora</div>
+    <nav>
+      <a href="#">Решения</a><a href="#">О нас</a><a href="#">Цены</a><a href="#" class="btn-nav">Начать</a>
+    </nav>
+  </div>
+</header>
+<div class="hero">
+  <h1>Масштабируйте бизнес<br>с умными решениями</h1>
+  <p>Комплексные IT-решения для роста вашей компании. Автоматизация, аналитика, безопасность.</p>
+  <a href="#" class="btn-primary">Попробовать бесплатно</a>
+  <a href="#" class="btn-secondary">Узнать больше</a>
+</div>
+<div class="stats">
+  <div class="stat"><div class="num">500+</div><div class="label">Клиентов</div></div>
+  <div class="stat"><div class="num">99.9%</div><div class="label">Uptime</div></div>
+  <div class="stat"><div class="num">24/7</div><div class="label">Поддержка</div></div>
+  <div class="stat"><div class="num">5 лет</div><div class="label">На рынке</div></div>
+</div>
+<div class="features">
+  <div class="feature"><div class="icon">🚀</div><h3>Быстрое развёртывание</h3><p>Запустите решение за несколько часов без долгих внедрений и сложных настроек.</p></div>
+  <div class="feature"><div class="icon">🔒</div><h3>Корпоративная безопасность</h3><p>Шифрование данных, контроль доступа и соответствие требованиям GDPR.</p></div>
+  <div class="feature"><div class="icon">📊</div><h3>Аналитика в реальном времени</h3><p>Дашборды и отчёты для принятия обоснованных бизнес-решений.</p></div>
+</div>
+<footer>© 2026 Nexora Technologies. Все права защищены.</footer>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'Бизнес' создан${NC}"
+}
+
+_stub_create_saas() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CloudFlow — SaaS платформа</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f0f23;color:#e2e8f0}
+header{padding:20px 40px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1e293b}
+.logo{font-size:1.4em;font-weight:700;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+nav a{color:#94a3b8;text-decoration:none;margin-left:20px;font-size:.9em;transition:.2s}
+nav a:hover{color:#fff}
+.btn-hero{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:9px 20px;border-radius:20px;text-decoration:none;font-size:.9em}
+.hero{text-align:center;padding:100px 40px 80px;max-width:900px;margin:0 auto}
+.badge{display:inline-block;background:#1e293b;color:#667eea;padding:6px 16px;border-radius:20px;font-size:.85em;margin-bottom:25px;border:1px solid #334155}
+.hero h1{font-size:3.2em;font-weight:800;line-height:1.15;margin-bottom:20px}
+.hero h1 span{background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{color:#94a3b8;font-size:1.15em;line-height:1.7;max-width:600px;margin:0 auto 40px}
+.actions{display:flex;justify-content:center;gap:15px;flex-wrap:wrap}
+.btn-main{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:14px 30px;border-radius:8px;text-decoration:none;font-weight:600}
+.btn-ghost{color:#e2e8f0;padding:14px 30px;border-radius:8px;text-decoration:none;border:1px solid #334155}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;max-width:1000px;margin:0 auto 80px;padding:0 40px}
+.feature{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:25px}
+.feature .icon{font-size:1.8em;margin-bottom:12px}
+.feature h3{font-size:1em;margin-bottom:8px;color:#f1f5f9}
+.feature p{color:#64748b;font-size:.88em;line-height:1.6}
+footer{border-top:1px solid #1e293b;text-align:center;padding:30px;color:#475569;font-size:.85em}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">⚡ CloudFlow</div>
+  <nav>
+    <a href="#">Возможности</a><a href="#">Цены</a><a href="#">Документация</a>
+    <a href="#" class="btn-hero">Начать →</a>
+  </nav>
+</header>
+<div class="hero">
+  <div class="badge">🚀 Новый релиз v3.0</div>
+  <h1>Инфраструктура для <span>современных команд</span></h1>
+  <p>Разворачивайте, масштабируйте и управляйте сервисами одним кликом. Без DevOps экспертизы.</p>
+  <div class="actions">
+    <a href="#" class="btn-main">Попробовать бесплатно</a>
+    <a href="#" class="btn-ghost">Смотреть демо</a>
+  </div>
+</div>
+<div class="features">
+  <div class="feature"><div class="icon">⚡</div><h3>Мгновенный деплой</h3><p>Push в Git — и приложение уже в продакшне. CI/CD из коробки.</p></div>
+  <div class="feature"><div class="icon">📈</div><h3>Автомасштабирование</h3><p>Система сама добавит ресурсы при пиковой нагрузке и уберёт их после.</p></div>
+  <div class="feature"><div class="icon">🔐</div><h3>Zero-trust безопасность</h3><p>Сквозное шифрование и управление доступом на уровне сервиса.</p></div>
+  <div class="feature"><div class="icon">📊</div><h3>Метрики и алерты</h3><p>Prometheus, Grafana и умные уведомления о проблемах.</p></div>
+</div>
+<footer>© 2026 CloudFlow Technologies · Политика конфиденциальности</footer>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'SaaS' создан${NC}"
+}
+
+_stub_create_education() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EduPath — Онлайн обучение</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#fff;color:#1a1a1a}
+header{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:0 30px;position:sticky;top:0;z-index:10}
+.header-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:65px}
+.logo{font-size:1.4em;font-weight:800;color:#7c3aed}
+nav a{color:#6b7280;text-decoration:none;margin-left:22px;font-size:.9em;font-weight:500}
+.btn-start{background:#7c3aed;color:#fff!important;padding:9px 20px;border-radius:7px}
+.hero{background:linear-gradient(135deg,#f5f3ff,#ede9fe);padding:80px 30px;text-align:center}
+.hero h1{font-size:2.6em;font-weight:800;color:#4c1d95;margin-bottom:18px;line-height:1.25}
+.hero p{color:#6d28d9;font-size:1.1em;max-width:560px;margin:0 auto 30px;opacity:.8}
+.btn-cta{background:#7c3aed;color:#fff;padding:14px 30px;border-radius:8px;text-decoration:none;font-weight:600;font-size:1em}
+.courses{max-width:1100px;margin:60px auto;padding:0 30px}
+.courses h2{font-size:1.7em;font-weight:700;margin-bottom:30px;text-align:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:25px}
+.course{background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;transition:.2s}
+.course:hover{box-shadow:0 8px 25px rgba(124,58,237,.15);transform:translateY(-2px)}
+.course-header{padding:30px;text-align:center;font-size:3em}
+.course-header.py{background:#fef3c7}
+.course-header.js{background:#dbeafe}
+.course-header.sec{background:#fee2e2}
+.course-body{padding:20px}
+.course-body h3{font-weight:700;margin-bottom:8px}
+.course-body p{color:#6b7280;font-size:.9em;line-height:1.5;margin-bottom:12px}
+.meta{display:flex;justify-content:space-between;font-size:.82em;color:#9ca3af}
+.enroll{display:block;text-align:center;background:#7c3aed;color:#fff;padding:10px;border-radius:6px;text-decoration:none;margin-top:15px;font-size:.9em}
+footer{background:#4c1d95;color:#c4b5fd;text-align:center;padding:30px;font-size:.9em;margin-top:60px}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="logo">📚 EduPath</div>
+    <nav>
+      <a href="#">Курсы</a><a href="#">Преподаватели</a><a href="#">Блог</a><a href="#" class="btn-start">Войти</a>
+    </nav>
+  </div>
+</header>
+<div class="hero">
+  <h1>Освойте IT профессию<br>онлайн</h1>
+  <p>Практические курсы от экспертов индустрии. Учитесь в своём темпе, получайте реальные навыки.</p>
+  <a href="#" class="btn-cta">Начать бесплатно →</a>
+</div>
+<div class="courses">
+  <h2>Популярные курсы</h2>
+  <div class="grid">
+    <div class="course">
+      <div class="course-header py">🐍</div>
+      <div class="course-body">
+        <h3>Python для начинающих</h3>
+        <p>Основы программирования, работа с данными, автоматизация задач.</p>
+        <div class="meta"><span>⏱ 40 часов</span><span>👥 12,400 студентов</span></div>
+        <a href="#" class="enroll">Записаться</a>
+      </div>
+    </div>
+    <div class="course">
+      <div class="course-header js">🌐</div>
+      <div class="course-body">
+        <h3>Full-Stack JavaScript</h3>
+        <p>React, Node.js, базы данных. Создайте полноценное веб-приложение.</p>
+        <div class="meta"><span>⏱ 80 часов</span><span>👥 8,200 студентов</span></div>
+        <a href="#" class="enroll">Записаться</a>
+      </div>
+    </div>
+    <div class="course">
+      <div class="course-header sec">🛡️</div>
+      <div class="course-body">
+        <h3>Кибербезопасность</h3>
+        <p>Пентест, защита сетей, анализ уязвимостей. Подготовка к CEH.</p>
+        <div class="meta"><span>⏱ 60 часов</span><span>👥 5,800 студентов</span></div>
+        <a href="#" class="enroll">Записаться</a>
+      </div>
+    </div>
+  </div>
+</div>
+<footer>© 2026 EduPath · Политика конфиденциальности · Условия использования</footer>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'Образование' создан${NC}"
+}
+
+_stub_create_shop() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TechStore — Электроника</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#f9fafb;color:#111}
+header{background:#111;color:#fff;padding:0 30px}
+.header-inner{max-width:1200px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:65px}
+.logo{font-size:1.4em;font-weight:700}
+.logo span{color:#f59e0b}
+nav a{color:#d1d5db;text-decoration:none;margin-left:20px;font-size:.9em}
+.cart{background:#f59e0b;color:#111;padding:8px 16px;border-radius:6px;font-weight:600;font-size:.85em}
+.banner{background:linear-gradient(135deg,#111,#1f2937);color:#fff;padding:70px 30px;text-align:center}
+.banner h1{font-size:2.5em;font-weight:800;margin-bottom:15px}
+.banner h1 span{color:#f59e0b}
+.banner p{color:#9ca3af;font-size:1.1em;margin-bottom:25px}
+.btn-shop{background:#f59e0b;color:#111;padding:13px 28px;border-radius:7px;text-decoration:none;font-weight:700}
+.products{max-width:1200px;margin:50px auto;padding:0 30px}
+.products h2{font-size:1.5em;font-weight:700;margin-bottom:25px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px}
+.product{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.07)}
+.product-img{height:140px;display:flex;align-items:center;justify-content:center;font-size:4em;background:#f3f4f6}
+.product-body{padding:15px}
+.product-body h3{font-size:.95em;margin-bottom:6px}
+.product-body .price{color:#f59e0b;font-size:1.1em;font-weight:700}
+.product-body .old-price{color:#9ca3af;font-size:.85em;text-decoration:line-through;margin-left:5px}
+.add-btn{display:block;text-align:center;background:#111;color:#fff;padding:9px;border-radius:6px;text-decoration:none;margin-top:12px;font-size:.9em}
+footer{background:#111;color:#6b7280;text-align:center;padding:30px;font-size:.85em;margin-top:60px}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="logo">Tech<span>Store</span></div>
+    <nav><a href="#">Каталог</a><a href="#">Акции</a><a href="#">Доставка</a><a href="#" class="cart">🛒 Корзина</a></nav>
+  </div>
+</header>
+<div class="banner">
+  <h1>Электроника по <span>лучшим ценам</span></h1>
+  <p>Гарантия качества · Быстрая доставка · Официальная гарантия</p>
+  <a href="#" class="btn-shop">В каталог →</a>
+</div>
+<div class="products">
+  <h2>🔥 Хиты продаж</h2>
+  <div class="grid">
+    <div class="product"><div class="product-img">💻</div><div class="product-body"><h3>Ноутбук ProBook X5</h3><span class="price">89 900 ₽</span><span class="old-price">110 000 ₽</span><a href="#" class="add-btn">В корзину</a></div></div>
+    <div class="product"><div class="product-img">📱</div><div class="product-body"><h3>Смартфон Ultra Pro</h3><span class="price">54 990 ₽</span><span class="old-price">65 000 ₽</span><a href="#" class="add-btn">В корзину</a></div></div>
+    <div class="product"><div class="product-img">🎧</div><div class="product-body"><h3>Наушники AirMax</h3><span class="price">12 500 ₽</span><span class="old-price">18 000 ₽</span><a href="#" class="add-btn">В корзину</a></div></div>
+    <div class="product"><div class="product-img">⌚</div><div class="product-body"><h3>Смарт-часы FitPro</h3><span class="price">8 990 ₽</span><span class="old-price">12 000 ₽</span><a href="#" class="add-btn">В корзину</a></div></div>
+  </div>
+</div>
+<footer>© 2026 TechStore · ИНН 7712345678 · Все права защищены</footer>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'Магазин' создан${NC}"
+}
+
+_stub_create_portfolio() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alex Dev — Full Stack разработчик</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0a;color:#e2e8f0;line-height:1.6}
+nav{position:fixed;top:0;width:100%;background:rgba(10,10,10,.9);backdrop-filter:blur(10px);padding:18px 40px;display:flex;justify-content:space-between;align-items:center;z-index:100;border-bottom:1px solid #1e293b}
+.logo{font-weight:700;color:#38bdf8;font-size:1.1em}
+nav a{color:#94a3b8;text-decoration:none;margin-left:20px;font-size:.9em;transition:.2s}
+nav a:hover{color:#38bdf8}
+.hero{min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:40px;background:radial-gradient(ellipse at center,#0f172a 0%,#0a0a0a 70%)}
+.hero-content{max-width:700px}
+.greeting{color:#38bdf8;font-size:.95em;letter-spacing:.1em;text-transform:uppercase;margin-bottom:15px}
+.hero h1{font-size:3.5em;font-weight:800;margin-bottom:15px;line-height:1.1}
+.hero h1 span{color:#38bdf8}
+.hero p{color:#64748b;font-size:1.1em;margin-bottom:35px}
+.skills{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-bottom:35px}
+.skill{background:#1e293b;color:#38bdf8;padding:6px 14px;border-radius:20px;font-size:.85em;border:1px solid #334155}
+.actions{display:flex;justify-content:center;gap:15px}
+.btn-main{background:#38bdf8;color:#0a0a0a;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:700}
+.btn-ghost{color:#e2e8f0;padding:13px 28px;border-radius:8px;text-decoration:none;border:1px solid #334155}
+.projects{max-width:900px;margin:80px auto;padding:0 40px}
+.projects h2{font-size:1.8em;font-weight:700;text-align:center;margin-bottom:40px}
+.project-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
+.project{background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:25px;transition:.2s}
+.project:hover{border-color:#38bdf8;transform:translateY(-3px)}
+.project .icon{font-size:2em;margin-bottom:12px}
+.project h3{font-weight:700;margin-bottom:8px;font-size:1em}
+.project p{color:#64748b;font-size:.88em}
+footer{text-align:center;padding:40px;color:#334155;border-top:1px solid #1e293b;font-size:.85em}
+</style>
+</head>
+<body>
+<nav>
+  <div class="logo">&lt;AlexDev /&gt;</div>
+  <div><a href="#">О себе</a><a href="#">Проекты</a><a href="#">Контакты</a></div>
+</nav>
+<div class="hero">
+  <div class="hero-content">
+    <div class="greeting">👋 Привет, я</div>
+    <h1>Full Stack <span>разработчик</span></h1>
+    <p>Создаю современные веб-приложения и API. Специализация на React, Node.js и облачных решениях.</p>
+    <div class="skills">
+      <span class="skill">React</span><span class="skill">Node.js</span><span class="skill">TypeScript</span>
+      <span class="skill">PostgreSQL</span><span class="skill">Docker</span><span class="skill">Rust</span>
+    </div>
+    <div class="actions">
+      <a href="#" class="btn-main">Смотреть проекты</a>
+      <a href="#" class="btn-ghost">Написать</a>
+    </div>
+  </div>
+</div>
+<div class="projects">
+  <h2>Избранные проекты</h2>
+  <div class="project-grid">
+    <div class="project"><div class="icon">🛒</div><h3>E-commerce платформа</h3><p>Полноценный магазин с корзиной, оплатой и админкой. React + Node + PostgreSQL.</p></div>
+    <div class="project"><div class="icon">📊</div><h3>Аналитический дашборд</h3><p>Визуализация данных в реальном времени. WebSockets + D3.js + Redis.</p></div>
+    <div class="project"><div class="icon">🤖</div><h3>Telegram бот</h3><p>Автоматизация бизнес-процессов. Python + aiogram + PostgreSQL.</p></div>
+  </div>
+</div>
+<footer>© 2026 AlexDev · Сделано с ❤️ и ☕</footer>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'Портфолио' создан${NC}"
+}
+
+_stub_create_under_construction() {
+    local webroot="$1" domain="$2"
+    mkdir -p "$webroot"
+    cat > "${webroot}/index.html" << HTMLEOF
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${domain} — Скоро</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);min-height:100vh;display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;padding:20px}
+.container{max-width:550px}
+.icon{font-size:5em;margin-bottom:25px;display:block}
+h1{font-size:2.5em;font-weight:800;margin-bottom:15px}
+p{color:#a78bfa;font-size:1.1em;line-height:1.6;margin-bottom:35px}
+.domain{color:#c4b5fd;font-size:.9em;margin-bottom:40px;opacity:.7}
+.counter{display:flex;justify-content:center;gap:20px;margin-bottom:40px}
+.counter-item{background:rgba(255,255,255,.1);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.2);border-radius:12px;padding:20px 25px;min-width:80px}
+.counter-item .num{font-size:2em;font-weight:800}
+.counter-item .label{font-size:.75em;opacity:.7;margin-top:5px;text-transform:uppercase}
+.notify{display:flex;max-width:400px;margin:0 auto;gap:10px}
+.notify input{flex:1;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:8px;padding:12px 16px;color:#fff;font-size:.9em;outline:none}
+.notify input::placeholder{color:rgba(255,255,255,.4)}
+.notify button{background:#7c3aed;color:#fff;border:none;border-radius:8px;padding:12px 20px;cursor:pointer;font-size:.9em;white-space:nowrap}
+footer{position:fixed;bottom:20px;color:rgba(255,255,255,.3);font-size:.8em;width:100%;text-align:center}
+</style>
+</head>
+<body>
+<div class="container">
+  <span class="icon">🚀</span>
+  <h1>Скоро открытие</h1>
+  <p>Мы работаем над чем-то особенным. Подпишитесь, чтобы узнать первыми.</p>
+  <div class="domain">${domain}</div>
+  <div class="counter">
+    <div class="counter-item"><div class="num" id="days">14</div><div class="label">Дней</div></div>
+    <div class="counter-item"><div class="num" id="hours">07</div><div class="label">Часов</div></div>
+    <div class="counter-item"><div class="num" id="mins">23</div><div class="label">Минут</div></div>
+    <div class="counter-item"><div class="num" id="secs">45</div><div class="label">Секунд</div></div>
+  </div>
+  <div class="notify">
+    <input type="email" placeholder="Ваш email">
+    <button>Уведомить</button>
+  </div>
+</div>
+<footer>${domain}</footer>
+<script>
+const target=new Date(Date.now()+14*24*3600*1000);
+setInterval(()=>{
+  const d=target-Date.now();
+  if(d<0)return;
+  const pad=n=>String(Math.floor(n)).padStart(2,'0');
+  document.getElementById('days').textContent=pad(d/86400000);
+  document.getElementById('hours').textContent=pad(d%86400000/3600000);
+  document.getElementById('mins').textContent=pad(d%3600000/60000);
+  document.getElementById('secs').textContent=pad(d%60000/1000);
+},1000);
+</script>
+</body>
+</html>
+HTMLEOF
+    echo -e "  ${GREEN}✓ Шаблон 'Under Construction' создан${NC}"
+}
+
+# Настройка заглушки — полный цикл (SSL + nginx + шаблон)
+_stub_setup_full() {
+    clear
+    echo -e "\n${CYAN}━━━ Настройка сайта-заглушки ━━━${NC}\n"
+
+    echo -ne "  Домен сайта: "; read -r domain < /dev/tty
+    [[ -z "$domain" ]] && return
+
+    local webroot="/var/www/${domain}"
+
+    # 1. SSL
+    _ssl_check_and_issue "$domain"
+
+    # 2. nginx конфиг
+    local ssl_cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
+    local ssl_key="/etc/letsencrypt/live/${domain}/privkey.pem"
+    local nginx_conf="/etc/nginx/sites-available/${domain}"
+
+    if [ ! -f "$nginx_conf" ]; then
+        mkdir -p "$webroot"
+        if [ -f "$ssl_cert" ]; then
+            cat > "$nginx_conf" << NGINXEOF
+server {
+    listen 80;
+    server_name ${domain};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 8443 ssl http2;
+    server_name ${domain};
+    ssl_certificate     ${ssl_cert};
+    ssl_certificate_key ${ssl_key};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    root ${webroot};
+    index index.html;
+    location / { try_files \$uri \$uri/ =404; }
+}
+NGINXEOF
+        else
+            cat > "$nginx_conf" << NGINXEOF
+server {
+    listen 80;
+    server_name ${domain};
+    root ${webroot};
+    index index.html;
+    location / { try_files \$uri \$uri/ =404; }
+}
+NGINXEOF
+        fi
+        ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/${domain}"
+        nginx -t && systemctl reload nginx && echo -e "  ${GREEN}✓ nginx настроен${NC}"
+    fi
+
+    # 3. Выбор шаблона
+    _stub_templates "$domain" "$webroot"
+}
+
 mtproto_menu() {
     if ! command -v docker &>/dev/null; then
         echo -e "${RED}Docker не установлен.${NC}"; read -p "Enter..."; return
@@ -9822,14 +10646,20 @@ except:
             echo -e "  ${YELLOW}Прокси не найдены${NC}\n"
         fi
 
-        echo -e "  ${YELLOW}[+]${NC}  Добавить прокси"
-        [ ${#names[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Управление"
+        echo -e "  ${WHITE}── Добавить ─────────────────────────${NC}"
+        echo -e "  ${YELLOW}[+]${NC}  Новый прокси (mtg)"
+        echo -e "  ${YELLOW}[t]${NC}  Новый прокси ${GREEN}Telemt${NC} ${CYAN}(Rust, быстрее)${NC}"
+        [ ${#names[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Управление прокси"
+        echo -e "  ${WHITE}── Сайт ──────────────────────────────${NC}"
+        echo -e "  ${CYAN}[s]${NC}  Настроить сайт-заглушку (SSL + шаблон)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
 
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
         [ "$ch" = "+" ] && { _mtg_add; continue; }
+        [ "$ch" = "t" ] || [ "$ch" = "T" ] && { _telemt_add; continue; }
+        [ "$ch" = "s" ] || [ "$ch" = "S" ] && { _stub_setup_full; continue; }
 
         if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#names[@]} )); then
             _mtg_manage "${names[$((ch-1))]}"
