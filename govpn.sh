@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.21"
+VERSION="6.23"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -9244,24 +9244,16 @@ MTG_PORTS=(443 8443 2053 2083 2087)
 _mtg_list_instances() {
     # Docker контейнеры mtg/mtproto
     docker ps -a --format '{{.Names}}	{{.Status}}	{{.Ports}}' 2>/dev/null |         grep -iE "^(mtg-|mtproto)" | sort
-    # Нативные telemt systemd сервисы
-    systemctl list-units --type=service --all --no-legend 2>/dev/null |         grep -oE "^[[:space:]]*telemt-[0-9]+" | tr -d ' ' | while read -r svc; do
-        local st; st=$(systemctl is-active "$svc" 2>/dev/null)
-        local port; port=$(echo "$svc" | grep -oE '[0-9]+$')
-        echo -e "${svc}	${st}	0.0.0.0:${port}->3128/tcp"
-    done
-    # Также ищем по meta-файлам (самый надёжный способ)
+    # Telemt — ищем только по meta-файлам
     if [ -d "$MTG_CONF_DIR" ]; then
         for meta in "${MTG_CONF_DIR}"/*.meta; do
             [ -f "$meta" ] || continue
-            local name; name=$(basename "$meta" .meta)
-            local engine; engine=$(grep "^engine=" "$meta" 2>/dev/null | cut -d= -f2)
-            [ "$engine" != "telemt" ] && continue
-            # Уже показан выше через systemctl? Пропускаем дубли
-            systemctl list-units --type=service --all --no-legend 2>/dev/null |                 grep -q "${name}.service" && continue
-            local port; port=$(grep "^port=" "$meta" | cut -d= -f2)
-            local st; st=$(systemctl is-active "$name" 2>/dev/null || echo "unknown")
-            echo -e "${name}	${st}	0.0.0.0:${port}->3128/tcp"
+            local mname; mname=$(basename "$meta" .meta)
+            local mengine; mengine=$(grep "^engine=" "$meta" 2>/dev/null | cut -d= -f2)
+            [ "$mengine" != "telemt" ] && continue
+            local mport; mport=$(grep "^port=" "$meta" | cut -d= -f2)
+            local mst; mst=$(systemctl is-active "$mname" 2>/dev/null || echo "inactive")
+            printf '%s\t%s\t0.0.0.0:%s->3128/tcp\n' "$mname" "$mst" "$mport"
         done
     fi
 }
@@ -9276,7 +9268,10 @@ _mtg_count_running() {
 _mtg_detect_type() {
     local name="$1"
     local engine; engine=$(grep "^engine=" "${MTG_CONF_DIR}/${name}.meta" 2>/dev/null | cut -d= -f2)
-    [ "$engine" = "telemt" ] && echo "telemt" && return
+    case "$engine" in
+        telemt) echo "telemt"; return ;;
+        mtg)    echo "govpn";  return ;;
+    esac
     [[ "$name" == mtg-* ]] && echo "govpn" || echo "external"
 }
 
@@ -9767,14 +9762,19 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
                 fi
                 sleep 1 ;;
             4)
-                read -p "$(echo -e "${RED}Удалить ${name}? (y/n): ${NC}")" c
-                [ "$c" != "y" ] && continue
-                docker stop "$name" > /dev/null 2>&1
-                docker rm "$name" > /dev/null 2>&1
-                rm -f "${MTG_CONF_DIR}/${name}.toml" "${MTG_CONF_DIR}/${name}.meta"
-                echo -e "${GREEN}  ✓ Удалён.${NC}"
-                log_action "MTG DEL: ${name}"
-                read -p "Нажмите Enter..."; return ;;
+                local del_type; del_type=$(_mtg_detect_type "$name")
+                if [ "$del_type" = "telemt" ]; then
+                    _telemt_remove "$name" && return
+                else
+                    read -p "$(echo -e "${RED}Удалить ${name}? (y/n): ${NC}")" c
+                    [ "$c" != "y" ] && continue
+                    docker stop "$name" > /dev/null 2>&1
+                    docker rm "$name" > /dev/null 2>&1
+                    rm -f "${MTG_CONF_DIR}/${name}.toml" "${MTG_CONF_DIR}/${name}.meta"
+                    echo -e "${GREEN}  ✓ Удалён.${NC}"
+                    log_action "MTG DEL: ${name}"
+                    read -p "Нажмите Enter..."; return
+                fi ;;
             0|"") return ;;
         esac
     done
@@ -9857,10 +9857,8 @@ _telemt_add() {
         tls_domain="storage.googleapis.com"
     fi
 
-    echo -ne "  Имя пользователя [user1]: "; read -r username < /dev/tty
-    username="${username:-user1}"
-
-    # Генерируем 32-hex секрет для пользователя
+    # Генерируем 32-hex секрет для пользователя (имя фиксированное)
+    local username="user"
     local user_secret; user_secret=$(python3 -c "import os,binascii; print(binascii.hexlify(os.urandom(16)).decode())")
 
     # Адрес для ссылки
@@ -9917,7 +9915,7 @@ TOML
 Description=Telemt MTProto proxy ${name}
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/telemt --config ${conf_file}
+ExecStart=/usr/local/bin/telemt ${conf_file}
 Restart=always
 RestartSec=5
 [Install]
@@ -9985,12 +9983,17 @@ _telemt_remove() {
     local name="$1"
     echo -ne "  ${RED}Удалить Telemt прокси ${name}? (y/n): ${NC}"; read -r c < /dev/tty
     [[ "$c" != "y" ]] && return
-    docker stop "$name" 2>/dev/null; docker rm "$name" 2>/dev/null
-    systemctl stop "$name" 2>/dev/null; systemctl disable "$name" 2>/dev/null
+    # Systemd
+    systemctl stop "${name}" 2>/dev/null
+    systemctl disable "${name}" 2>/dev/null
     rm -f "/etc/systemd/system/${name}.service" 2>/dev/null
-    rm -f "${MTG_CONF_DIR}/${name}.toml" "${MTG_CONF_DIR}/${name}.meta" 2>/dev/null
     systemctl daemon-reload 2>/dev/null
-    echo -e "  ${GREEN}✓ Удалён${NC}"; sleep 2
+    # Docker (если запущен как контейнер)
+    docker stop "${name}" 2>/dev/null
+    docker rm "${name}" 2>/dev/null
+    # Конфиги
+    rm -f "${MTG_CONF_DIR}/${name}.toml" "${MTG_CONF_DIR}/${name}.meta" 2>/dev/null
+    echo -e "  ${GREEN}✓ Прокси ${name} удалён${NC}"; sleep 2
 }
 
 # ═══════════════════════════════════════════════════════════════
