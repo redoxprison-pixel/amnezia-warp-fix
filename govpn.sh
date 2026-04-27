@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.17"
+VERSION="6.18"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -3826,6 +3826,7 @@ iptables_menu() {
         echo -e "  ${YELLOW}[2]${NC}  VLESS / XRay (TCP)"
         echo -e "  ${YELLOW}[3]${NC}  MTProto (TCP)"
         echo -e "  ${YELLOW}[4]${NC}  Кастомное правило"
+        echo -e "  ${YELLOW}[9]${NC}  REDIRECT диапазон портов → xray inbound"
         echo -e "  ${WHITE}── Управление ────────────────────────${NC}"
         echo -e "  ${CYAN}[7]${NC}  Диагностика и рекомендации"
         echo -e "  ${CYAN}[8]${NC}  Настройка /etc/hosts (localhost записи)"
@@ -3843,6 +3844,39 @@ iptables_menu() {
             5) _delete_rule ;;
             7) _iptables_diagnose ;;
             8) _iptables_hosts_setup ;;
+            9)
+                clear
+                echo -e "\n${CYAN}━━━ REDIRECT диапазон портов → xray inbound ━━━${NC}\n"
+                python3 -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+    conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+    for r in conn.execute('SELECT id, remark, port FROM inbounds WHERE port>0 ORDER BY id'):
+        print(f'  [{r[0]}] {r[1]} :{r[2]}')
+    conn.close()
+except: pass
+" 2>/dev/null
+                echo ""
+                echo -ne "  Целевой порт xray inbound: "; read -r redir_target < /dev/tty
+                [[ -z "$redir_target" ]] && continue
+                echo -ne "  Протокол (tcp/udp/both) [tcp]: "; read -r redir_proto < /dev/tty
+                redir_proto="${redir_proto:-tcp}"
+                echo -ne "  Диапазон портов (например 25400:25500): "; read -r redir_range < /dev/tty
+                [[ -z "$redir_range" ]] && continue
+                if [[ "$redir_proto" == "both" ]]; then
+                    iptables -t nat -A PREROUTING -p tcp --dport "$redir_range" -j REDIRECT --to-port "$redir_target" 2>/dev/null
+                    iptables -t nat -A PREROUTING -p udp --dport "$redir_range" -j REDIRECT --to-port "$redir_target" 2>/dev/null
+                    ufw allow "$redir_range/tcp" 2>/dev/null || true
+                    ufw allow "$redir_range/udp" 2>/dev/null || true
+                else
+                    iptables -t nat -A PREROUTING -p "$redir_proto" --dport "$redir_range" -j REDIRECT --to-port "$redir_target" 2>/dev/null
+                    ufw allow "$redir_range/$redir_proto" 2>/dev/null || true
+                fi
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+                echo -e "  ${GREEN}✓ REDIRECT ${redir_proto}:${redir_range} → ${redir_target} добавлен${NC}"
+                sleep 2
+                ;;
             6)
                 read -p "$(echo -e "${RED}Сбросить все правила govpn? (y/n): ${NC}")" c
                 [[ "$c" == "y" ]] && {
@@ -5139,102 +5173,699 @@ _3xui_yukikras_info() {
     read -p "  Enter..." < /dev/tty
 }
 
-_3xui_inbound_templates() {
-    clear
-    echo -e "\n${CYAN}━━━ Шаблоны inbound для 3X-UI ━━━${NC}\n"
+# ═══════════════════════════════════════════════════════════════
+#  СОЗДАНИЕ INBOUND'ОВ (x-ui-pro структура)
+# ═══════════════════════════════════════════════════════════════
 
-    local domain; domain="${XUI_SUB_DOMAIN:-$(certbot certificates 2>/dev/null | grep 'Domains:' | head -1 | awk '{print $2}')}"
-    local nginx_port; nginx_port=$(_nginx_find_ssl_port)
-    nginx_port="${nginx_port:-7443}"
+XRAY_BIN="/usr/local/x-ui/bin/xray-linux-amd64"
+XUIDB_PATH="/etc/x-ui/x-ui.db"
+
+# Генерация Reality ключей через xray
+_xui_gen_reality_keys() {
+    local output; output=$("$XRAY_BIN" x25519 2>/dev/null)
+    REALITY_PRIVATE=$(echo "$output" | grep "^PrivateKey:" | awk '{print $2}')
+    REALITY_PUBLIC=$(echo "$output" | grep "^Password" | awk '{print $3}')
+}
+
+# Генерация UUID через xray
+_xui_gen_uuid() {
+    "$XRAY_BIN" uuid 2>/dev/null | tr -d '[:space:]'
+}
+
+# Получить emoji флаг страны
+_xui_get_flag() {
+    curl -s --max-time 5 https://ipwho.is/ 2>/dev/null | python3 -c \
+        "import json,sys; d=json.load(sys.stdin); print(d.get('flag',{}).get('emoji','🌐'))" 2>/dev/null || echo "🌐"
+}
+
+# Получить домен из существующего inbound
+_xui_get_domain() {
+    python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT stream_settings FROM inbounds LIMIT 1').fetchone()
+if row:
+    ss = json.loads(row[0])
+    ext = ss.get('externalProxy', [{}])
+    if ext: print(ext[0].get('dest',''))
+conn.close()
+" 2>/dev/null
+}
+
+# Получить Reality настройки из основного inbound (port 8443)
+_xui_get_reality_settings() {
+    python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT stream_settings FROM inbounds WHERE port=8443').fetchone()
+if row:
+    ss = json.loads(row[0])
+    rs = ss.get('realitySettings', {})
+    print(rs.get('privateKey',''))
+    print(rs.get('settings',{}).get('publicKey',''))
+    print(rs.get('serverNames',[''])[0])
+    print(rs.get('target','127.0.0.1:9443'))
+conn.close()
+" 2>/dev/null
+}
+
+# Создать inbound в БД с остановкой x-ui
+_xui_db_insert() {
+    local remark="$1" port="$2" listen="$3" protocol="$4" settings="$5" stream="$6" tag="$7" sniffing="$8"
+    systemctl stop x-ui
+    sleep 1
+    rm -f /dev/shm/uds2023.sock 2>/dev/null
+
+    python3 << PYEOF
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.execute("DELETE FROM inbounds WHERE port=? AND port!=0", (${port},)) if ${port} != 0 else None
+conn.execute("""
+    INSERT INTO inbounds
+        (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing)
+    VALUES (1,0,0,0,?,1,0,?,?,'${protocol}',?,?,?,?)
+""", ('${remark}', '${listen}', ${port}, '''${settings}''', '''${stream}''', '${tag}', '''${sniffing}'''))
+conn.commit()
+conn.close()
+print("OK")
+PYEOF
+    systemctl start x-ui
+    sleep 3
+}
+
+# Генерация ссылки для клиента
+_xui_gen_link() {
+    local port="$1"
+    python3 << PYEOF
+import sqlite3, json
+from urllib.parse import urlencode
+conn = sqlite3.connect('${XUIDB_PATH}')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT settings, stream_settings FROM inbounds WHERE port=?', (${port},)).fetchone()
+if not row:
+    print("Inbound не найден"); conn.close(); exit()
+s = json.loads(row[0])
+ss = json.loads(row[1])
+uid = s['clients'][0]['id']
+net = ss.get('network')
+sec = ss.get('security')
+ext = ss.get('externalProxy', [{}])[0]
+host = ext.get('dest','')
+eport = ext.get('port', 443)
+rs = ss.get('realitySettings', {})
+params = {'type': net, 'security': sec}
+if sec == 'reality':
+    params['pbk'] = rs.get('settings',{}).get('publicKey','')
+    params['sid'] = rs.get('shortIds',[''])[0]
+    params['sni'] = rs.get('serverNames',[''])[0]
+    params['fp'] = 'chrome'
+if net == 'tcp':
+    params['flow'] = 'xtls-rprx-vision'
+if net == 'xhttp':
+    params['path'] = ss.get('xhttpSettings',{}).get('path','/')
+link = f"vless://{uid}@{host}:{eport}?{urlencode(params)}#inbound-{${port}}"
+print(link)
+conn.close()
+PYEOF
+}
+
+# Добавить iptables REDIRECT для inbound
+_xui_add_redirect() {
+    local target_port="$1"
+    echo ""
+    echo -e "  ${CYAN}Добавить iptables REDIRECT на порт ${target_port}?${NC}"
+    echo -e "  ${WHITE}Клиенты смогут подключаться через диапазон портов → ${target_port}${NC}"
+    echo -ne "  Добавить редирект? (y/n): "; read -r add_redir < /dev/tty
+    [[ "$add_redir" != "y" ]] && return
+
+    echo -ne "  Протокол (tcp/udp/both) [tcp]: "; read -r proto < /dev/tty
+    proto="${proto:-tcp}"
+    echo -ne "  Диапазон портов (например 25400:25500): "; read -r dport_range < /dev/tty
+    [[ -z "$dport_range" ]] && return
+
+    if [[ "$proto" == "both" ]]; then
+        iptables -t nat -A PREROUTING -p tcp --dport "$dport_range" -j REDIRECT --to-port "$target_port" 2>/dev/null
+        iptables -t nat -A PREROUTING -p udp --dport "$dport_range" -j REDIRECT --to-port "$target_port" 2>/dev/null
+    else
+        iptables -t nat -A PREROUTING -p "$proto" --dport "$dport_range" -j REDIRECT --to-port "$target_port" 2>/dev/null
+    fi
+
+    ufw allow "$dport_range/$proto" 2>/dev/null || true
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    echo -e "  ${GREEN}✓ Редирект ${proto}:${dport_range} → ${target_port} добавлен${NC}"
+}
+
+# Создать Reality TCP inbound (по образцу x-ui-pro)
+_xui_create_reality_tcp() {
+    clear
+    echo -e "\n${CYAN}━━━ Создание Reality TCP inbound ━━━${NC}\n"
+
+    # Читаем параметры из существующего 8443
+    local rs_params; rs_params=$(_xui_get_reality_settings)
+    local exist_privkey exist_pubkey exist_sni exist_target
+    exist_privkey=$(echo "$rs_params" | sed -n '1p')
+    exist_pubkey=$(echo  "$rs_params" | sed -n '2p')
+    exist_sni=$(echo     "$rs_params" | sed -n '3p')
+    exist_target=$(echo  "$rs_params" | sed -n '4p')
+
+    local domain; domain=$(_xui_get_domain)
     domain="${domain:-your-domain.com}"
 
-    echo -e "  ${WHITE}Домен:${NC}      ${CYAN}${domain}${NC}"
-    echo -e "  ${WHITE}Nginx:${NC}      ${CYAN}127.0.0.1:${nginx_port}${NC}\n"
+    echo -e "  ${WHITE}Домен:${NC} ${CYAN}${domain}${NC}"
+    echo -e "  ${WHITE}SNI (Reality target domain):${NC} ${CYAN}${exist_sni}${NC}"
+    echo -e "  ${WHITE}Target:${NC} ${CYAN}${exist_target}${NC}\n"
 
-    echo -e "  ${YELLOW}[1]${NC}  xHTTP + Reality Self-Steal"
-    echo -e "  ${YELLOW}[2]${NC}  gRPC + Reality (SNI: ads.x5.ru)"
-    echo -e "  ${YELLOW}[3]${NC}  TCP + Reality Self-Steal"
-    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo -e "  ${YELLOW}Режим ключей:${NC}"
+    echo -e "  ${WHITE}[1]${NC}  Использовать ключи от inbound 8443 (рекомендуется — nginx балансирует)"
+    echo -e "  ${WHITE}[2]${NC}  Генерировать новые ключи (нужен отдельный nginx маршрут)"
     echo ""
-    read -p "  Выбор: " tmpl_ch < /dev/tty
+    local key_mode; key_mode=$(read_choice "Выбор [1]: ")
+    key_mode="${key_mode:-1}"
 
-    case "$tmpl_ch" in
-        1) _show_xhttp_template "$domain" "$nginx_port" ;;
-        2) _show_grpc_template "$domain" "$nginx_port" ;;
-        3) _show_tcp_template "$domain" "$nginx_port" ;;
-    esac
+    local privkey pubkey
+    if [[ "$key_mode" == "2" ]]; then
+        _xui_gen_reality_keys
+        privkey="$REALITY_PRIVATE"
+        pubkey="$REALITY_PUBLIC"
+        echo -e "  ${GREEN}✓ Новые ключи сгенерированы${NC}"
+    else
+        privkey="$exist_privkey"
+        pubkey="$exist_pubkey"
+        echo -e "  ${GREEN}✓ Используем ключи от 8443${NC}"
+    fi
+
+    echo -ne "\n  Порт для нового inbound [14444]: "; read -r new_port < /dev/tty
+    new_port="${new_port:-14444}"
+
+    echo -ne "  Email клиента [user1]: "; read -r email < /dev/tty
+    email="${email:-user1}"
+
+    local client_id; client_id=$(_xui_gen_uuid)
+    local ts; ts=$(date +%s%3N)
+    local flag; flag=$(_xui_get_flag)
+
+    # Генерируем уникальные shortIds (16 символов каждый)
+    local short_ids=()
+    for i in {1..8}; do
+        short_ids+=("$(openssl rand -hex 8)")
+    done
+    local sids_json; sids_json=$(printf '"%s",' "${short_ids[@]}" | sed 's/,$//')
+
+    local settings='{
+  "clients": [{
+    "id": "'"$client_id"'",
+    "flow": "xtls-rprx-vision",
+    "email": "'"$email"'",
+    "limitIp": 0,
+    "totalGB": 0,
+    "expiryTime": 0,
+    "enable": true,
+    "tgId": "",
+    "subId": "first",
+    "reset": 0,
+    "created_at": '"$ts"',
+    "updated_at": '"$ts"'
+  }],
+  "decryption": "none",
+  "fallbacks": []
+}'
+
+    local stream='{
+  "network": "tcp",
+  "security": "reality",
+  "externalProxy": [{"forceTls": "same", "dest": "'"$domain"'", "port": 443, "remark": ""}],
+  "realitySettings": {
+    "show": false,
+    "xver": 0,
+    "target": "'"$exist_target"'",
+    "serverNames": ["'"$exist_sni"'"],
+    "privateKey": "'"$privkey"'",
+    "minClient": "",
+    "maxClient": "",
+    "maxTimediff": 0,
+    "shortIds": ['"$sids_json"'],
+    "settings": {
+      "publicKey": "'"$pubkey"'",
+      "fingerprint": "chrome",
+      "serverName": "",
+      "spiderX": "/"
+    }
+  },
+  "tcpSettings": {"acceptProxyProtocol": true, "header": {"type": "none"}}
+}'
+
+    local sniffing='{"enabled": false, "destOverride": ["http","tls","quic","fakedns"], "metadataOnly": false, "routeOnly": false}'
+
+    echo -e "\n  ${CYAN}Создаём inbound...${NC}"
+
+    systemctl stop x-ui; sleep 1; rm -f /dev/shm/uds2023.sock 2>/dev/null
+
+    python3 << PYEOF
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.execute("DELETE FROM inbounds WHERE port=?", (${new_port},))
+conn.execute("""INSERT INTO inbounds
+    (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing)
+    VALUES (1,0,0,0,?,1,0,'',?,'vless',?,?,?,?)""",
+    ('${flag} reality', ${new_port}, '''${settings}''', '''${stream}''', 'inbound-${new_port}', '''${sniffing}'''))
+conn.commit(); conn.close(); print("OK")
+PYEOF
+
+    systemctl start x-ui; sleep 3
+
+    if ss -tlnp | grep -q ":${new_port}"; then
+        echo -e "  ${GREEN}✓ Inbound создан, порт ${new_port} слушает${NC}"
+    else
+        echo -e "  ${RED}✗ Порт ${new_port} не поднялся — проверь логи: journalctl -u x-ui -n 20${NC}"
+    fi
+
+    # Если использовали те же ключи — добавить в nginx upstream
+    if [[ "$key_mode" == "1" ]]; then
+        echo -e "\n  ${YELLOW}Добавить ${new_port} в nginx upstream xray (балансировка с 8443)?${NC}"
+        echo -ne "  (y/n): "; read -r add_nginx < /dev/tty
+        if [[ "$add_nginx" == "y" ]]; then
+            if ! grep -q "127.0.0.1:${new_port}" /etc/nginx/stream-enabled/stream.conf 2>/dev/null; then
+                sed -i "s|server 127.0.0.1:8443;|server 127.0.0.1:8443;\n    server 127.0.0.1:${new_port};|" \
+                    /etc/nginx/stream-enabled/stream.conf
+                nginx -t && systemctl reload nginx && \
+                    echo -e "  ${GREEN}✓ nginx обновлён — балансировка 8443 + ${new_port}${NC}"
+            else
+                echo -e "  ${YELLOW}Уже добавлен в nginx${NC}"
+            fi
+        fi
+    fi
+
+    # Предложить iptables редирект
+    _xui_add_redirect "$new_port"
+
+    # Ссылка
+    echo -e "\n  ${WHITE}VLESS ссылка:${NC}"
+    local link="vless://${client_id}@${domain}:443?type=tcp&security=reality&pbk=${pubkey}&sid=${short_ids[0]}&sni=${exist_sni}&fp=chrome&flow=xtls-rprx-vision#reality-${new_port}"
+    echo -e "  ${CYAN}${link}${NC}"
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
 }
 
-_show_xhttp_template() {
-    local domain="$1" nginx_port="$2"
+# Создать xHTTP inbound (по образцу x-ui-pro — через Unix socket)
+_xui_create_xhttp() {
     clear
-    echo -e "\n${CYAN}━━━ xHTTP + Reality Self-Steal ━━━${NC}\n"
-    echo -e "  ${WHITE}Настройки inbound в 3X-UI:${NC}\n"
-    echo -e "  ${CYAN}Protocol:${NC}       vless"
-    echo -e "  ${CYAN}Port:${NC}           25352 (или любой свободный)"
-    echo -e "  ${CYAN}Transport:${NC}      xhttp"
-    echo -e "  ${CYAN}Mode:${NC}           packet-up"
-    echo -e "  ${CYAN}Path:${NC}           /media/fragments/  (уникальный для каждого inbound)"
-    echo -e "  ${CYAN}Security:${NC}       reality\n"
-    echo -e "  ${WHITE}Reality:${NC}"
-    echo -e "  ${CYAN}Dest:${NC}           127.0.0.1:${nginx_port}  ${GREEN}← Self-Steal${NC}"
-    echo -e "  ${CYAN}ServerNames:${NC}    ${domain}"
-    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
-    echo -e "  ${WHITE}ExternalProxy:${NC}  ${domain}:25352"
-    echo -e "  ${CYAN}forceTls:${NC}       same\n"
-    echo -e "  ${YELLOW}Важно:${NC}"
-    echo -e "  • Path должен быть уникальным для каждого xHTTP inbound"
-    echo -e "  • Mode=packet-up даёт лучшую производительность"
-    echo -e "  • ExternalProxy нужен если клиент подключается через CDN/домен"
-    read -p "  Enter..." < /dev/tty
+    echo -e "\n${CYAN}━━━ Создание xHTTP inbound ━━━${NC}\n"
+
+    local domain; domain=$(_xui_get_domain)
+    domain="${domain:-your-domain.com}"
+
+    local xhttp_path; xhttp_path=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 10)
+    local client_id; client_id=$(_xui_gen_uuid)
+    local ts; ts=$(date +%s%3N)
+    local flag; flag=$(_xui_get_flag)
+
+    echo -e "  ${WHITE}Домен:${NC} ${CYAN}${domain}${NC}"
+    echo -e "  ${WHITE}Path:${NC}  ${CYAN}/${xhttp_path}${NC}\n"
+    echo -ne "  Email клиента [xhttp-user]: "; read -r email < /dev/tty
+    email="${email:-xhttp-user}"
+
+    local settings='{
+  "clients": [{
+    "id": "'"$client_id"'",
+    "flow": "",
+    "email": "'"$email"'",
+    "limitIp": 0,
+    "totalGB": 0,
+    "expiryTime": 0,
+    "enable": true,
+    "tgId": "",
+    "subId": "first",
+    "reset": 0,
+    "created_at": '"$ts"',
+    "updated_at": '"$ts"'
+  }],
+  "decryption": "none",
+  "fallbacks": []
+}'
+
+    local stream='{
+  "network": "xhttp",
+  "security": "none",
+  "externalProxy": [{"forceTls": "tls", "dest": "'"$domain"'", "port": 443, "remark": ""}],
+  "xhttpSettings": {
+    "path": "/'"$xhttp_path"'",
+    "host": "'"$domain"'",
+    "headers": {},
+    "scMaxBufferedPosts": 30,
+    "scMaxEachPostBytes": "1000000",
+    "noSSEHeader": false,
+    "xPaddingBytes": "100-1000",
+    "mode": "packet-up"
+  },
+  "sockopt": {
+    "acceptProxyProtocol": false,
+    "tcpFastOpen": true,
+    "mark": 0,
+    "tproxy": "off",
+    "tcpMptcp": true,
+    "tcpNoDelay": true,
+    "domainStrategy": "UseIP",
+    "tcpMaxSeg": 1440,
+    "dialerProxy": "",
+    "tcpKeepAliveInterval": 0,
+    "tcpKeepAliveIdle": 300,
+    "tcpUserTimeout": 10000,
+    "tcpcongestion": "bbr",
+    "V6Only": false,
+    "tcpWindowClamp": 600,
+    "interface": ""
+  }
+}'
+
+    local sniffing='{"enabled": true, "destOverride": ["http","tls","quic","fakedns"], "metadataOnly": false, "routeOnly": false}'
+    local sock="/dev/shm/uds2023.sock,0666"
+    local tag="inbound-/dev/shm/uds2023.sock,0666:0|"
+
+    echo -e "  ${CYAN}Создаём xHTTP inbound через Unix socket...${NC}"
+
+    systemctl stop x-ui; sleep 1; rm -f /dev/shm/uds2023.sock 2>/dev/null
+
+    python3 << PYEOF
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+# Удаляем старый xhttp если есть
+conn.execute("DELETE FROM inbounds WHERE listen='/dev/shm/uds2023.sock,0666'")
+conn.execute("""INSERT INTO inbounds
+    (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing)
+    VALUES (1,0,0,0,?,1,0,?,0,'vless',?,?,?,?)""",
+    ('${flag} xhttp', '/dev/shm/uds2023.sock,0666', '''${settings}''', '''${stream}''',
+     'inbound-/dev/shm/uds2023.sock,0666:0|', '''${sniffing}'''))
+conn.commit(); conn.close(); print("OK")
+PYEOF
+
+    systemctl start x-ui; sleep 3
+
+    if [ -S "/dev/shm/uds2023.sock" ]; then
+        echo -e "  ${GREEN}✓ xHTTP inbound создан, Unix socket активен${NC}"
+    else
+        echo -e "  ${YELLOW}Socket не найден — проверь: journalctl -u x-ui -n 20${NC}"
+    fi
+
+    echo -e "\n  ${WHITE}Клиент подключается через:${NC}"
+    echo -e "  ${CYAN}https://${domain}//${xhttp_path}${NC}"
+    echo -e "\n  ${WHITE}VLESS ссылка:${NC}"
+    echo -e "  ${CYAN}vless://${client_id}@${domain}:443?type=xhttp&security=tls&path=/${xhttp_path}&host=${domain}#xhttp${NC}"
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
 }
 
-_show_grpc_template() {
-    local domain="$1" nginx_port="$2"
+# Создать gRPC inbound
+_xui_create_grpc() {
     clear
-    echo -e "\n${CYAN}━━━ gRPC + Reality ━━━${NC}\n"
-    echo -e "  ${WHITE}⚠ gRPC deprecated в новых версиях Xray${NC}"
-    echo -e "  ${WHITE}Рекомендуется: xHTTP mode=stream-up вместо gRPC${NC}\n"
-    echo -e "  ${WHITE}Настройки inbound (если всё же нужен gRPC):${NC}\n"
-    echo -e "  ${CYAN}Protocol:${NC}       vless"
-    echo -e "  ${CYAN}Port:${NC}           25333"
-    echo -e "  ${CYAN}Transport:${NC}      grpc"
-    echo -e "  ${CYAN}serviceName:${NC}    grpc-api-v1  (любое уникальное имя)"
-    echo -e "  ${CYAN}Security:${NC}       reality\n"
-    echo -e "  ${WHITE}Reality (для РФ сервера — чужой SNI):${NC}"
-    echo -e "  ${CYAN}Dest:${NC}           ads.x5.ru:443"
-    echo -e "  ${CYAN}ServerNames:${NC}    ads.x5.ru"
-    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
-    echo -e "  ${WHITE}Reality (для нероссийского — Self-Steal):${NC}"
-    echo -e "  ${CYAN}Dest:${NC}           127.0.0.1:${nginx_port}"
-    echo -e "  ${CYAN}ServerNames:${NC}    ${domain}"
-    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
-    echo -e "  ${YELLOW}Альтернатива — xHTTP stream-up (лучше gRPC):${NC}"
-    echo -e "  ${CYAN}Transport:${NC}      xhttp"
-    echo -e "  ${CYAN}Mode:${NC}           stream-up"
-    echo -e "  ${CYAN}Path:${NC}           /api/v1/stream/"
-    read -p "  Enter..." < /dev/tty
+    echo -e "\n${CYAN}━━━ Создание gRPC inbound ━━━${NC}\n"
+    echo -e "  ${YELLOW}⚠ gRPC deprecated в новых версиях Xray — рекомендуется xHTTP${NC}\n"
+
+    local domain; domain=$(_xui_get_domain)
+    domain="${domain:-your-domain.com}"
+
+    local svc_name; svc_name=$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 8)
+    local client_id; client_id=$(_xui_gen_uuid)
+    local ts; ts=$(date +%s%3N)
+    local flag; flag=$(_xui_get_flag)
+
+    echo -ne "  Порт [$(shuf -i 20000-40000 -n 1)]: "; read -r new_port < /dev/tty
+    new_port="${new_port:-28077}"
+    echo -ne "  Email клиента [grpc-user]: "; read -r email < /dev/tty
+    email="${email:-grpc-user}"
+
+    local settings='{
+  "clients": [{
+    "id": "'"$client_id"'",
+    "flow": "",
+    "email": "'"$email"'",
+    "limitIp": 0,
+    "totalGB": 0,
+    "expiryTime": 0,
+    "enable": true,
+    "tgId": "",
+    "subId": "first",
+    "reset": 0,
+    "created_at": '"$ts"',
+    "updated_at": '"$ts"'
+  }],
+  "decryption": "none",
+  "fallbacks": []
+}'
+
+    local stream='{
+  "network": "grpc",
+  "security": "none",
+  "externalProxy": [{"forceTls": "tls", "dest": "'"$domain"'", "port": 443, "remark": ""}],
+  "grpcSettings": {
+    "serviceName": "/'"$svc_name"'",
+    "multiMode": false,
+    "idle_timeout": 60,
+    "health_check_timeout": 20,
+    "permit_without_stream": false,
+    "initial_windows_size": 0
+  }
+}'
+
+    local sniffing='{"enabled": false, "destOverride": ["http","tls","quic","fakedns"], "metadataOnly": false, "routeOnly": false}'
+
+    echo -e "  ${CYAN}Создаём gRPC inbound...${NC}"
+    systemctl stop x-ui; sleep 1; rm -f /dev/shm/uds2023.sock 2>/dev/null
+
+    python3 << PYEOF
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.execute("DELETE FROM inbounds WHERE port=?", (${new_port},))
+conn.execute("""INSERT INTO inbounds
+    (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing)
+    VALUES (1,0,0,0,?,1,0,'',?,'vless',?,?,?,?)""",
+    ('${flag} grpc', ${new_port}, '''${settings}''', '''${stream}''', 'inbound-${new_port}', '''${sniffing}'''))
+conn.commit(); conn.close(); print("OK")
+PYEOF
+
+    systemctl start x-ui; sleep 3
+
+    if ss -tlnp | grep -q ":${new_port}"; then
+        echo -e "  ${GREEN}✓ gRPC inbound создан, порт ${new_port} слушает${NC}"
+    else
+        echo -e "  ${RED}✗ Порт ${new_port} не поднялся${NC}"
+    fi
+
+    _xui_add_redirect "$new_port"
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
 }
 
-_show_tcp_template() {
-    local domain="$1" nginx_port="$2"
+# Главное меню управления inbound'ами
+_3xui_inbound_templates() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ Управление inbound'ами (x-ui-pro) ━━━${NC}\n"
+
+        # Показываем текущие inbound'ы
+        python3 << 'PYEOF' 2>/dev/null
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute("SELECT id, remark, port, listen, enable FROM inbounds ORDER BY id").fetchall()
+for r in rows:
+    ib_id, remark, port, listen, enable = r
+    status = "✓" if enable else "✗"
+    loc = f":{port}" if port else f"UDS"
+    print(f"  {status} #{ib_id} {remark} {loc}")
+conn.close()
+PYEOF
+
+        echo ""
+        echo -e "  ${WHITE}── Создать ─────────────────────────${NC}"
+        echo -e "  ${YELLOW}[1]${NC}  Reality TCP  ${GREEN}(самый скрытный)${NC}"
+        echo -e "  ${YELLOW}[2]${NC}  xHTTP        ${CYAN}(через Unix socket → nginx)${NC}"
+        echo -e "  ${YELLOW}[3]${NC}  gRPC         ${YELLOW}(deprecated, но работает)${NC}"
+        echo -e "  ${WHITE}── Управление ──────────────────────${NC}"
+        echo -e "  ${CYAN}[4]${NC}  Добавить клиента в inbound"
+        echo -e "  ${CYAN}[5]${NC}  Показать ссылки inbound'а"
+        echo -e "  ${RED}[6]${NC}  Удалить inbound"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+
+        case "$ch" in
+            1) _xui_create_reality_tcp ;;
+            2) _xui_create_xhttp ;;
+            3) _xui_create_grpc ;;
+            4) _xui_add_client_to_existing ;;
+            5) _xui_show_links ;;
+            6) _xui_delete_inbound ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# Добавить клиента в существующий inbound
+_xui_add_client_to_existing() {
     clear
-    echo -e "\n${CYAN}━━━ TCP + Reality Self-Steal ━━━${NC}\n"
-    echo -e "  ${WHITE}Настройки inbound:${NC}\n"
-    echo -e "  ${CYAN}Protocol:${NC}       vless"
-    echo -e "  ${CYAN}Port:${NC}           443"
-    echo -e "  ${CYAN}Transport:${NC}      tcp"
-    echo -e "  ${CYAN}Flow:${NC}           xtls-rprx-vision  ${GREEN}← обязательно для TCP${NC}"
-    echo -e "  ${CYAN}Security:${NC}       reality\n"
-    echo -e "  ${WHITE}Reality Self-Steal:${NC}"
-    echo -e "  ${CYAN}Dest:${NC}           127.0.0.1:${nginx_port}"
-    echo -e "  ${CYAN}ServerNames:${NC}    ${domain}"
-    echo -e "  ${CYAN}uTLS:${NC}           chrome\n"
-    echo -e "  ${YELLOW}Важно:${NC}"
-    echo -e "  • TCP Reality требует Flow = xtls-rprx-vision у клиента"
-    echo -e "  • Занимает порт 443 — Nginx должен быть на 7443/8443"
-    echo -e "  • Самый быстрый вариант для больших объёмов трафика"
-    read -p "  Enter..." < /dev/tty
+    echo -e "\n${CYAN}━━━ Добавить клиента в inbound ━━━${NC}\n"
+
+    # Список inbound'ов
+    local inbounds; inbounds=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id, remark, port FROM inbounds ORDER BY id').fetchall()
+for r in rows:
+    print(f'{r[0]}|{r[1]}|{r[2]}')
+conn.close()
+" 2>/dev/null)
+
+    echo "$inbounds" | while IFS='|' read -r id remark port; do
+        echo -e "  ${YELLOW}[${id}]${NC}  ${remark} :${port}"
+    done
+    echo ""
+    echo -ne "  ID inbound'а: "; read -r ib_id < /dev/tty
+    [[ -z "$ib_id" ]] && return
+
+    echo -ne "  Email нового клиента: "; read -r email < /dev/tty
+    [[ -z "$email" ]] && return
+
+    local client_id; client_id=$(_xui_gen_uuid)
+    local ts; ts=$(date +%s%3N)
+
+    systemctl stop x-ui; sleep 1; rm -f /dev/shm/uds2023.sock 2>/dev/null
+
+    python3 << PYEOF
+import sqlite3, json
+conn = sqlite3.connect('${XUIDB_PATH}', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT settings, stream_settings FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+if not row:
+    print("Inbound не найден"); conn.close(); exit()
+s = json.loads(row[0])
+ss = json.loads(row[1])
+net = ss.get('network', 'tcp')
+flow = 'xtls-rprx-vision' if net == 'tcp' and ss.get('security') == 'reality' else ''
+s['clients'].append({
+    'id': '${client_id}',
+    'flow': flow,
+    'email': '${email}',
+    'limitIp': 0,
+    'totalGB': 0,
+    'expiryTime': 0,
+    'enable': True,
+    'tgId': '',
+    'subId': 'first',
+    'reset': 0,
+    'created_at': ${ts},
+    'updated_at': ${ts}
+})
+conn.execute('UPDATE inbounds SET settings=? WHERE id=?', (json.dumps(s), ${ib_id}))
+conn.commit(); conn.close()
+print(f"OK! UUID: ${client_id}")
+PYEOF
+
+    systemctl start x-ui; sleep 2
+    echo -e "  ${GREEN}✓ Клиент ${email} добавлен${NC}"
+    echo -e "  ${WHITE}UUID: ${CYAN}${client_id}${NC}"
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
+}
+
+# Показать ссылки для inbound'а
+_xui_show_links() {
+    clear
+    echo -e "\n${CYAN}━━━ Ссылки inbound'а ━━━${NC}\n"
+
+    python3 << 'PYEOF'
+import sqlite3, json
+from urllib.parse import urlencode
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute("SELECT id, remark, port FROM inbounds ORDER BY id").fetchall()
+for r in rows:
+    print(f"  [{r[0]}] {r[1]} :{r[2]}")
+conn.close()
+PYEOF
+    echo ""
+    echo -ne "  ID inbound'а: "; read -r ib_id < /dev/tty
+    [[ -z "$ib_id" ]] && return
+
+    python3 << PYEOF
+import sqlite3, json
+from urllib.parse import urlencode
+conn = sqlite3.connect('${XUIDB_PATH}')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT settings, stream_settings FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+if not row:
+    print("Inbound не найден"); conn.close(); exit()
+s = json.loads(row[0])
+ss = json.loads(row[1])
+net = ss.get('network','tcp')
+sec = ss.get('security','none')
+ext = ss.get('externalProxy', [{}])[0]
+host = ext.get('dest','')
+eport = ext.get('port', 443)
+rs = ss.get('realitySettings', {})
+for c in s.get('clients', []):
+    uid = c['id']
+    email = c.get('email','')
+    params = {'type': net, 'security': sec}
+    if sec == 'reality':
+        params['pbk'] = rs.get('settings',{}).get('publicKey','')
+        params['sid'] = rs.get('shortIds',[''])[0]
+        params['sni'] = rs.get('serverNames',[''])[0]
+        params['fp'] = 'chrome'
+    if net == 'tcp':
+        params['flow'] = 'xtls-rprx-vision'
+    if net == 'xhttp':
+        xhs = ss.get('xhttpSettings',{})
+        params['path'] = xhs.get('path','/')
+        params['host'] = xhs.get('host','')
+    link = f"vless://{uid}@{host}:{eport}?{urlencode(params)}#{email}"
+    print(f"\n  [{email}]")
+    print(f"  {link}")
+conn.close()
+PYEOF
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
+}
+
+# Удалить inbound
+_xui_delete_inbound() {
+    clear
+    echo -e "\n${CYAN}━━━ Удалить inbound ━━━${NC}\n"
+
+    python3 << 'PYEOF'
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+for r in conn.execute("SELECT id, remark, port FROM inbounds ORDER BY id"):
+    print(f"  [{r[0]}] {r[1]} :{r[2]}")
+conn.close()
+PYEOF
+    echo ""
+    echo -ne "  ID inbound'а для удаления: "; read -r ib_id < /dev/tty
+    [[ -z "$ib_id" ]] && return
+
+    echo -ne "  ${RED}Удалить inbound #${ib_id}? (y/n): ${NC}"; read -r confirm < /dev/tty
+    [[ "$confirm" != "y" ]] && return
+
+    systemctl stop x-ui; sleep 1; rm -f /dev/shm/uds2023.sock 2>/dev/null
+
+    python3 << PYEOF
+import sqlite3
+conn = sqlite3.connect('${XUIDB_PATH}', timeout=30)
+conn.execute('DELETE FROM inbounds WHERE id=?', (${ib_id},))
+conn.commit(); conn.close()
+print("OK")
+PYEOF
+
+    systemctl start x-ui; sleep 2
+    echo -e "  ${GREEN}✓ Inbound #${ib_id} удалён${NC}"
+    sleep 2
 }
 
 _3xui_geo_menu() {
@@ -6561,16 +7192,13 @@ _3xui_selfsteal_wizard() {
 
     # Пишем Python скрипт во временный файл и запускаем
     cat > /tmp/_govpn_ss.py << 'PYEOF_SS'
-import json, sys, sqlite3
+import json, sys, sqlite3, os
 
 db = sys.argv[1]
 domain = sys.argv[2]
 nginx_port = int(sys.argv[3])
 mode = sys.argv[4] if len(sys.argv) > 4 else 'check'
 
-# Сети которые поддерживают Self-Steal нормально
-SUPPORTED = ('tcp', 'xhttp', 'h2', 'http')
-# gRPC пропускаем - deprecated и Self-Steal работает иначе
 SKIP_NETWORKS = ('grpc',)
 
 conn = sqlite3.connect(db)
@@ -6599,7 +7227,10 @@ for ib_id, remark, stream in rows:
             print(f"  #{ib_id} {remark} ({network})")
             print(f"      target: {cur_target}  {status}")
         else:
-            # Сохраняем бэкап
+            # Пропускаем если уже Self-Steal с правильным доменом
+            if is_self and domain in rs.get('serverNames', []):
+                print(f"  ✓ #{ib_id} {remark}: уже настроен ({cur_target})")
+                continue
             old_target = cur_target
             rs['dest'] = f'127.0.0.1:{nginx_port}'
             rs['target'] = f'127.0.0.1:{nginx_port}'
