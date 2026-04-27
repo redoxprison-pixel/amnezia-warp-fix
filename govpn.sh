@@ -5667,17 +5667,17 @@ _3xui_inbound_templates() {
         clear
         echo -e "\n${CYAN}━━━ Управление inbound'ами (x-ui-pro) ━━━${NC}\n"
 
-        # Показываем текущие inbound'ы
+        # Показываем текущие inbound'ы с порядковой нумерацией
         python3 << 'PYEOF' 2>/dev/null
 import sqlite3, json
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 rows = conn.execute("SELECT id, remark, port, listen, enable FROM inbounds ORDER BY id").fetchall()
-for r in rows:
+for idx, r in enumerate(rows, 1):
     ib_id, remark, port, listen, enable = r
-    status = "✓" if enable else "✗"
-    loc = f":{port}" if port else f"UDS"
-    print(f"  {status} #{ib_id} {remark} {loc}")
+    status = "\033[32m✓\033[0m" if enable else "\033[31m✗\033[0m"
+    loc = f":{port}" if port else "UDS"
+    print(f"  {status} [{idx}] {remark:<30} {loc}")
 conn.close()
 PYEOF
 
@@ -5689,6 +5689,7 @@ PYEOF
         echo -e "  ${WHITE}── Управление ──────────────────────${NC}"
         echo -e "  ${CYAN}[4]${NC}  Добавить клиента в inbound"
         echo -e "  ${CYAN}[5]${NC}  Показать ссылки inbound'а"
+        echo -e "  ${YELLOW}[7]${NC}  Диагностика и починка inbound'а"
         echo -e "  ${RED}[6]${NC}  Удалить inbound"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -5701,6 +5702,7 @@ PYEOF
             4) _xui_add_client_to_existing ;;
             5) _xui_show_links ;;
             6) _xui_delete_inbound ;;
+            7) _xui_diagnose_fix ;;
             0|"") return ;;
         esac
     done
@@ -5711,23 +5713,26 @@ _xui_add_client_to_existing() {
     clear
     echo -e "\n${CYAN}━━━ Добавить клиента в inbound ━━━${NC}\n"
 
-    # Список inbound'ов
-    local inbounds; inbounds=$(python3 -c "
-import sqlite3, json
+    # Список inbound'ов с порядковой нумерацией
+    local inbounds_raw; inbounds_raw=$(python3 -c "
+import sqlite3
 conn = sqlite3.connect('${XUIDB_PATH}')
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 rows = conn.execute('SELECT id, remark, port FROM inbounds ORDER BY id').fetchall()
-for r in rows:
-    print(f'{r[0]}|{r[1]}|{r[2]}')
+for idx, r in enumerate(rows, 1):
+    print(f'{idx}|{r[0]}|{r[1]}|{r[2]}')
 conn.close()
 " 2>/dev/null)
 
-    echo "$inbounds" | while IFS='|' read -r id remark port; do
-        echo -e "  ${YELLOW}[${id}]${NC}  ${remark} :${port}"
+    echo "$inbounds_raw" | while IFS='|' read -r num id remark port; do
+        local loc="${port:-UDS}"
+        echo -e "  ${YELLOW}[${num}]${NC}  ${remark} :${loc}  ${WHITE}(id:${id})${NC}"
     done
     echo ""
-    echo -ne "  ID inbound'а: "; read -r ib_id < /dev/tty
-    [[ -z "$ib_id" ]] && return
+    echo -ne "  Номер inbound'а: "; read -r ib_num < /dev/tty
+    [[ -z "$ib_num" ]] && return
+    local ib_id; ib_id=$(echo "$inbounds_raw" | awk -F'|' -v n="$ib_num" '$1==n{print $2}')
+    [[ -z "$ib_id" ]] && { echo -e "  ${RED}Неверный номер${NC}"; sleep 2; return; }
 
     echo -ne "  Email нового клиента: "; read -r email < /dev/tty
     [[ -z "$email" ]] && return
@@ -5829,6 +5834,252 @@ for c in s.get('clients', []):
     print(f"  {link}")
 conn.close()
 PYEOF
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
+}
+
+
+# Диагностика и автопочинка inbound'а
+_xui_diagnose_fix() {
+    clear
+    echo -e "\n${CYAN}━━━ Диагностика и починка inbound'а ━━━${NC}\n"
+
+    # Список inbound'ов с порядковой нумерацией
+    local rows_data; rows_data=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id, remark, port, listen, enable FROM inbounds ORDER BY id').fetchall()
+for idx, r in enumerate(rows, 1):
+    ib_id, remark, port, listen, enable = r
+    loc = str(port) if port else 'UDS'
+    print(f'{idx}|{ib_id}|{remark}|{loc}|{enable}')
+conn.close()
+" 2>/dev/null)
+
+    local -a ib_ids=() ib_ports=() ib_names=()
+    while IFS='|' read -r idx ib_id remark loc enable; do
+        ib_ids+=("$ib_id")
+        ib_ports+=("$loc")
+        ib_names+=("$remark")
+        local status_icon
+        [ "$enable" = "1" ] && status_icon="${GREEN}✓${NC}" || status_icon="${RED}✗${NC}"
+        echo -e "  ${status_icon} [${idx}] ${remark} :${loc}"
+    done <<< "$rows_data"
+
+    echo ""
+    echo -ne "  Номер inbound для диагностики: "; read -r sel < /dev/tty
+    [[ -z "$sel" || ! "$sel" =~ ^[0-9]+$ ]] && return
+    local idx_real=$(( sel - 1 ))
+    local ib_id="${ib_ids[$idx_real]}"
+    local ib_port="${ib_ports[$idx_real]}"
+    local ib_name="${ib_names[$idx_real]}"
+    [[ -z "$ib_id" ]] && { echo -e "  ${RED}Неверный номер${NC}"; sleep 2; return; }
+
+    clear
+    echo -e "\n${CYAN}━━━ Диагностика: ${ib_name} ━━━${NC}\n"
+
+    # Получаем полные данные inbound'а
+    local ib_data; ib_data=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT port, listen, protocol, settings, stream_settings, enable FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+if row:
+    port, listen, proto, settings, stream, enable = row
+    ss = json.loads(stream)
+    s = json.loads(settings)
+    print(f'PORT={port}')
+    print(f'LISTEN={listen}')
+    print(f'PROTO={proto}')
+    print(f'NETWORK={ss.get(\"network\",\"\")}')
+    print(f'SECURITY={ss.get(\"security\",\"\")}')
+    print(f'ENABLE={enable}')
+    print(f'CLIENTS={len(s.get(\"clients\",[]))}')
+    ext = ss.get(\"externalProxy\",[{}])
+    print(f'EXT_DEST={ext[0].get(\"dest\",\"\") if ext else \"\"}')
+    print(f'EXT_PORT={ext[0].get(\"port\",443) if ext else 443}')
+    rs = ss.get(\"realitySettings\",{})
+    print(f'REALITY_TARGET={rs.get(\"target\",\"\")}')
+    print(f'REALITY_SID_COUNT={len(rs.get(\"shortIds\",[]))}')
+    print(f'HAS_EXTERNAL_PROXY={1 if ext and ext[0].get(\"dest\") else 0}')
+    print(f'HAS_TESTSEED={1 if \"testseed\" in s else 0}')
+    print(f'HAS_FALLBACKS={1 if \"fallbacks\" in s else 0}')
+conn.close()
+" 2>/dev/null)
+
+    local PORT LISTEN PROTO NETWORK SECURITY ENABLE CLIENTS
+    local EXT_DEST EXT_PORT REALITY_TARGET REALITY_SID_COUNT
+    local HAS_EXTERNAL_PROXY HAS_TESTSEED HAS_FALLBACKS
+    eval "$ib_data"
+
+    # ── Результаты проверок ──
+    local issues=0
+    local fixes=()
+
+    echo -e "  ${WHITE}Параметры:${NC}"
+    echo -e "  Протокол:  ${CYAN}${PROTO}${NC}  Сеть: ${CYAN}${NETWORK}${NC}  Безопасность: ${CYAN}${SECURITY}${NC}"
+    echo -e "  Клиентов:  ${CYAN}${CLIENTS}${NC}  Enable: ${CYAN}${ENABLE}${NC}"
+    echo -e "  ExternalProxy: ${CYAN}${EXT_DEST}:${EXT_PORT}${NC}"
+    [ -n "$REALITY_TARGET" ] && echo -e "  Reality target: ${CYAN}${REALITY_TARGET}${NC}"
+    echo ""
+
+    echo -e "  ${WHITE}Проверки:${NC}"
+
+    # 1. Порт слушает?
+    if [ "$LISTEN" = "/dev/shm/uds2023.sock,0666" ]; then
+        if [ -S "/dev/shm/uds2023.sock" ]; then
+            echo -e "  ${GREEN}✓${NC} Unix socket активен"
+        else
+            echo -e "  ${RED}✗${NC} Unix socket не существует"
+            issues=$(( issues + 1 ))
+            fixes+=("socket")
+        fi
+    elif [ -n "$PORT" ] && [ "$PORT" != "0" ]; then
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT}"; then
+            echo -e "  ${GREEN}✓${NC} Порт ${PORT} слушает"
+        else
+            echo -e "  ${RED}✗${NC} Порт ${PORT} не слушает"
+            issues=$(( issues + 1 ))
+            fixes+=("restart")
+        fi
+    fi
+
+    # 2. externalProxy есть?
+    if [ "$HAS_EXTERNAL_PROXY" = "1" ]; then
+        echo -e "  ${GREEN}✓${NC} externalProxy настроен (${EXT_DEST}:${EXT_PORT})"
+    else
+        echo -e "  ${RED}✗${NC} externalProxy отсутствует — клиент не знает куда подключаться"
+        issues=$(( issues + 1 ))
+        fixes+=("ext_proxy")
+    fi
+
+    # 3. Reality shortIds достаточно?
+    if [ "$SECURITY" = "reality" ]; then
+        if [ "${REALITY_SID_COUNT}" -ge 8 ]; then
+            echo -e "  ${GREEN}✓${NC} shortIds: ${REALITY_SID_COUNT} штук"
+        else
+            echo -e "  ${YELLOW}⚠${NC} shortIds: только ${REALITY_SID_COUNT} (рекомендуется 8)"
+            issues=$(( issues + 1 ))
+            fixes+=("shortids")
+        fi
+        # Reality target доступен?
+        if [ -n "$REALITY_TARGET" ]; then
+            local rt_host="${REALITY_TARGET%:*}"
+            local rt_port="${REALITY_TARGET#*:}"
+            if nc -z -w2 "$rt_host" "$rt_port" 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} Reality target ${REALITY_TARGET} доступен"
+            else
+                echo -e "  ${RED}✗${NC} Reality target ${REALITY_TARGET} недоступен"
+                issues=$(( issues + 1 ))
+                fixes+=("target")
+            fi
+        fi
+    fi
+
+    # 4. x-ui запущен?
+    if systemctl is-active x-ui &>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} x-ui запущен"
+    else
+        echo -e "  ${RED}✗${NC} x-ui не запущен"
+        issues=$(( issues + 1 ))
+        fixes+=("restart")
+    fi
+
+    # 5. nginx слушает 443?
+    if ss -tlnp 2>/dev/null | grep -q ":443"; then
+        echo -e "  ${GREEN}✓${NC} nginx слушает :443"
+    else
+        echo -e "  ${RED}✗${NC} nginx не слушает :443"
+        issues=$(( issues + 1 ))
+        fixes+=("nginx")
+    fi
+
+    echo ""
+
+    if [ "$issues" -eq 0 ]; then
+        echo -e "  ${GREEN}✅ Проблем не обнаружено!${NC}"
+        echo ""
+        read -p "  Enter для продолжения..." < /dev/tty
+        return
+    fi
+
+    echo -e "  ${YELLOW}Обнаружено проблем: ${issues}${NC}"
+    echo -e "  Исправить автоматически? ${WHITE}(данные и клиенты сохранятся)${NC}"
+    echo -ne "  (y/n): "; read -r do_fix < /dev/tty
+    [[ "$do_fix" != "y" ]] && return
+
+    echo ""
+    echo -e "  ${CYAN}Исправляем...${NC}"
+
+    for fix in "${fixes[@]}"; do
+        case "$fix" in
+            socket)
+                echo -e "  → Очищаем socket и перезапускаем x-ui..."
+                systemctl stop x-ui 2>/dev/null
+                rm -f /dev/shm/uds2023.sock
+                systemctl start x-ui
+                sleep 3
+                [ -S "/dev/shm/uds2023.sock" ] && \
+                    echo -e "  ${GREEN}✓ Socket восстановлен${NC}" || \
+                    echo -e "  ${RED}✗ Socket всё ещё нет — проверь логи${NC}"
+                ;;
+            restart)
+                echo -e "  → Перезапускаем x-ui..."
+                rm -f /dev/shm/uds2023.sock 2>/dev/null
+                systemctl restart x-ui
+                sleep 3
+                systemctl is-active x-ui &>/dev/null && \
+                    echo -e "  ${GREEN}✓ x-ui запущен${NC}" || \
+                    echo -e "  ${RED}✗ x-ui не запустился: $(journalctl -u x-ui -n 3 --no-pager 2>/dev/null | tail -1)${NC}"
+                ;;
+            ext_proxy)
+                echo -e "  → Добавляем externalProxy..."
+                local domain; domain=$(_xui_get_domain)
+                domain="${domain:-your-domain.com}"
+                python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT stream_settings FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+ss = json.loads(row[0])
+tls = 'tls' if ss.get('network') in ('xhttp','grpc','ws') else 'same'
+ss['externalProxy'] = [{'forceTls': tls, 'dest': '${domain}', 'port': 443, 'remark': ''}]
+conn.execute('UPDATE inbounds SET stream_settings=? WHERE id=?', (json.dumps(ss), ${ib_id}))
+conn.commit(); conn.close(); print('OK')
+" 2>/dev/null && echo -e "  ${GREEN}✓ externalProxy добавлен${NC}"
+                fixes+=("restart")
+                ;;
+            shortids)
+                echo -e "  → Обновляем shortIds (8 штук по 16 символов)..."
+                python3 -c "
+import sqlite3, json, secrets
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT stream_settings FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+ss = json.loads(row[0])
+ss['realitySettings']['shortIds'] = [secrets.token_hex(8) for _ in range(8)]
+conn.execute('UPDATE inbounds SET stream_settings=? WHERE id=?', (json.dumps(ss), ${ib_id}))
+conn.commit(); conn.close(); print('OK')
+" 2>/dev/null && echo -e "  ${GREEN}✓ shortIds обновлены${NC}"
+                fixes+=("restart")
+                ;;
+            nginx)
+                echo -e "  → Перезапускаем nginx..."
+                nginx -t 2>/dev/null && systemctl reload nginx && \
+                    echo -e "  ${GREEN}✓ nginx перезапущен${NC}" || \
+                    echo -e "  ${RED}✗ nginx config error — проверь: nginx -t${NC}"
+                ;;
+            target)
+                echo -e "  ${YELLOW}⚠ Reality target недоступен — возможно nginx не слушает на этом порту${NC}"
+                echo -e "  Текущий target: ${REALITY_TARGET}"
+                echo -e "  Доступные nginx порты: $(ss -tlnp | grep nginx | grep -oP ':\K\d+' | tr '\n' ' ')"
+                ;;
+        esac
+    done
+
+    echo ""
+    echo -e "  ${GREEN}✅ Готово! Проверь подключение.${NC}"
     echo ""
     read -p "  Enter для продолжения..." < /dev/tty
 }
@@ -9278,10 +9529,16 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
     # mtg v2 формат: secret + bind-to в одном файле
     cat > "$conf_file" << TOML
 secret = "${secret}"
-bind-to = "0.0.0.0:${chosen_port}"
+bind-to = "0.0.0.0:3128"
+prefer-ip = "prefer-ipv4"
 
 [network]
-dns = "udp://1.1.1.1:53"
+dns = "https://1.1.1.1"
+
+[defense.anti-replay]
+enabled = true
+max-size = "1mib"
+error-rate = 0.001
 TOML
 
     # Запускаем — через Docker или нативно
@@ -9291,7 +9548,7 @@ TOML
             --name "$name" \
             --restart unless-stopped \
             -v "${conf_file}:/config.toml" \
-            -p "${chosen_port}:${chosen_port}" \
+            -p "0.0.0.0:${chosen_port}:3128" \
             "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
         sleep 3
         if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
@@ -9332,14 +9589,23 @@ SYSTEMD
         echo -e "${GREEN}  ✓ Сервис ${svc_name} запущен${NC}"
     fi
 
-    # Формируем ссылку
-    local link="tg://proxy?server=${MY_IP}&port=${chosen_port}&secret=${secret}"
-    local link_tme="https://t.me/proxy?server=${MY_IP}&port=${chosen_port}&secret=${secret}"
+    # Формируем ссылку — используем домен сервера если настроен
+    local server_addr="$MY_IP"
+    local server_domain_configured=""
+    # Ищем домен в certbot
+    server_domain_configured=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    # Или из govpn конфига
+    [ -z "$server_domain_configured" ] && server_domain_configured=$(grep "^MTG_DOMAIN=" /etc/govpn/config 2>/dev/null | cut -d= -f2 | tr -d '"')
+    [ -n "$server_domain_configured" ] && server_addr="$server_domain_configured"
+
+    local link="tg://proxy?server=${server_addr}&port=${chosen_port}&secret=${secret}"
+    local link_tme="https://t.me/proxy?server=${server_addr}&port=${chosen_port}&secret=${secret}"
 
     # Сохраняем мета-данные
     cat > "${MTG_CONF_DIR}/${name}.meta" << META
 port=${chosen_port}
 domain=${chosen_domain}
+server=${server_addr}
 secret=${secret}
 link=${link}
 link_tme=${link_tme}
@@ -9445,9 +9711,11 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
                     -v "${conf_file}:/config.toml" \
                     -p "${port}:3128" "$MTG_IMAGE" run /config.toml > /dev/null 2>&1
                 sleep 2
-                # Обновляем мета
-                local new_link="tg://proxy?server=${MY_IP}&port=${port}&secret=${new_secret}"
-                local new_link_tme="https://t.me/proxy?server=${MY_IP}&port=${port}&secret=${new_secret}"
+                # Обновляем мета — используем сохранённый server из meta
+                local srv; srv=$(grep "^server=" "$meta_file" 2>/dev/null | cut -d= -f2)
+                [ -z "$srv" ] && srv="$MY_IP"
+                local new_link="tg://proxy?server=${srv}&port=${port}&secret=${new_secret}"
+                local new_link_tme="https://t.me/proxy?server=${srv}&port=${port}&secret=${new_secret}"
                 sed -i "s|^secret=.*|secret=${new_secret}|" "$meta_file"
                 sed -i "s|^link=.*|link=${new_link}|" "$meta_file"
                 sed -i "s|^link_tme=.*|link_tme=${new_link_tme}|" "$meta_file"
