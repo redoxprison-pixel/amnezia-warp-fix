@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.23"
+VERSION="6.25"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -9242,8 +9242,8 @@ MTG_DOMAINS=(
 MTG_PORTS=(443 8443 2053 2083 2087)
 
 _mtg_list_instances() {
-    # Docker контейнеры mtg/mtproto
-    docker ps -a --format '{{.Names}}	{{.Status}}	{{.Ports}}' 2>/dev/null |         grep -iE "^(mtg-|mtproto)" | sort
+    # Docker контейнеры mtg/mtproto (исключаем telemt)
+    docker ps -a --format '{{.Names}}	{{.Status}}	{{.Ports}}' 2>/dev/null |         grep -iE "^(mtg-[0-9]|mtproto)" | sort
     # Telemt — ищем только по meta-файлам
     if [ -d "$MTG_CONF_DIR" ]; then
         for meta in "${MTG_CONF_DIR}"/*.meta; do
@@ -9259,9 +9259,19 @@ _mtg_list_instances() {
 }
 
 _mtg_count_running() {
-    local cnt=0
-    cnt=$(docker ps --format '{{.Names}}' 2>/dev/null |         grep -cE "^(mtg-|mtproto)" 2>/dev/null || echo 0)
-    local tcnt; tcnt=$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null |         grep -cE "telemt-[0-9]+" 2>/dev/null || echo 0)
+    local cnt=0 tcnt=0
+    cnt=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE "^(mtg-|mtproto)" 2>/dev/null) || cnt=0
+    [ -z "$cnt" ] && cnt=0
+    # Telemt через meta-файлы
+    if [ -d "$MTG_CONF_DIR" ]; then
+        for meta in "${MTG_CONF_DIR}"/*.meta; do
+            [ -f "$meta" ] || continue
+            local mengine; mengine=$(grep "^engine=" "$meta" 2>/dev/null | cut -d= -f2)
+            [ "$mengine" = "telemt" ] || continue
+            local mname; mname=$(basename "$meta" .meta)
+            systemctl is-active --quiet "$mname" 2>/dev/null && tcnt=$(( tcnt + 1 ))
+        done
+    fi
     echo $(( cnt + tcnt ))
 }
 
@@ -9882,12 +9892,7 @@ public_host = "${server_addr}"
 public_port = ${port}
 
 [server]
-port = 3128
-
-[server.api]
-enabled = true
-listen = "127.0.0.1:9091"
-whitelist = ["127.0.0.1"]
+port = ${port}
 
 [[server.listeners]]
 ip = "0.0.0.0"
@@ -9901,29 +9906,24 @@ tls_emulation = true
 ${username} = "${user_secret}"
 TOML
 
-    echo -e "\n  ${CYAN}Запускаем Telemt в Docker...${NC}"
-    docker rm -f "$name" 2>/dev/null
-    docker run -d \
-        --name "$name" \
-        --restart unless-stopped \
-        -v "${conf_file}:/app/config.toml" \
-        -p "0.0.0.0:${port}:3128" \
-        "$TELEMT_IMAGE" 2>/dev/null || {
-            # Пробуем нативный запуск
-            cat > "/etc/systemd/system/${name}.service" << SYSTEMD
+    echo -e "\n  ${CYAN}Запускаем Telemt...${NC}"
+    # Systemd сервис
+    cat > "/etc/systemd/system/${name}.service" << SYSTEMD
 [Unit]
 Description=Telemt MTProto proxy ${name}
 After=network.target
+
 [Service]
-ExecStart=/usr/local/bin/telemt ${conf_file}
+ExecStart=/usr/local/bin/telemt run ${conf_file}
 Restart=always
 RestartSec=5
+LimitNOFILE=65536
+
 [Install]
 WantedBy=multi-user.target
 SYSTEMD
-            systemctl daemon-reload
-            systemctl enable --now "$name" 2>/dev/null
-        }
+    systemctl daemon-reload
+    systemctl enable --now "$name" 2>/dev/null
 
     sleep 3
 
