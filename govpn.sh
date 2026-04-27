@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.25"
+VERSION="6.27"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -115,17 +115,30 @@ ru_to_en() {
     esac
 }
 
-# Читает input с поддержкой RU раскладки
 read_choice() {
     local prompt="${1:-Выбор: }"
-    local ch
-    read -p "$prompt" ch < /dev/tty
-    # Если латиница или цифра — возвращаем как есть
-    if [[ "$ch" =~ ^[a-zA-Z0-9+/\.,-]$ ]]; then
-        echo "$ch"
+    local raw
+    read -p "$prompt" raw < /dev/tty
+    [ -z "$raw" ] && echo "" && return
+    # Транслитерация русской раскладки
+    if [[ "$raw" =~ ^[a-zA-Z0-9!+/\.,:@_=-]+$ ]]; then
+        echo "$raw"
     else
-        ru_to_en "$ch"
+        ru_to_en "$raw"
     fi
+}
+
+# Безопасный read для ответов y/n — принимает кириллицу и н→y
+read_yn() {
+    local prompt="$1"
+    local raw
+    read -p "$prompt" raw < /dev/tty
+    # Нижний регистр
+    raw=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+    case "$raw" in
+        y|н|yes|да) echo "y" ;;
+        *) echo "n" ;;
+    esac
 }
 
 prepare_system() {
@@ -6101,8 +6114,8 @@ PYEOF
     echo -ne "  ID inbound'а для удаления: "; read -r ib_id < /dev/tty
     [[ -z "$ib_id" ]] && return
 
-    echo -ne "  ${RED}Удалить inbound #${ib_id}? (y/n): ${NC}"; read -r confirm < /dev/tty
-    [[ "$confirm" != "y" ]] && return
+    local _yn; _yn=$(read_yn "  ${RED}Удалить inbound #${ib_id}? (y/n): ${NC}")
+    [ "$_yn" != "y" ] && return
 
     systemctl stop x-ui; sleep 1; rm -f /dev/shm/uds2023.sock 2>/dev/null
 
@@ -9703,11 +9716,22 @@ _mtg_manage() {
             1)
                 clear
                 echo -e "\n${CYAN}━━━ Ссылки: ${name} ━━━${NC}\n"
+                local dtype; dtype=$(_mtg_detect_type "$name")
+                # Для telemt — читаем актуальную ссылку из journalctl
+                if [ "$dtype" = "telemt" ]; then
+                    local live_link; live_link=$(journalctl -u "$name" --no-pager -n 100 2>/dev/null |                         grep "EE-TLS:" | tail -1 | grep -oP "tg://proxy\S+")
+                    if [ -n "$live_link" ]; then
+                        link="$live_link"
+                        # Обновляем мета
+                        sed -i "s|^link=.*|link=${live_link}|" "$meta_file" 2>/dev/null
+                        sed -i "s|^link_tme=.*|link_tme=https://t.me/proxy${live_link#tg://proxy}|" "$meta_file" 2>/dev/null
+                    fi
+                fi
                 echo -e "${WHITE}tg:// ссылка:${NC}"
                 echo -e "${GREEN}${link}${NC}\n"
                 local link_tme; link_tme=$(grep "^link_tme=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
                 echo -e "${WHITE}t.me ссылка:${NC}"
-                echo -e "${GREEN}${link_tme}${NC}\n"
+                echo -e "${GREEN}${link_tme:-https://t.me/proxy${link#tg://proxy}}${NC}\n"
                 if command -v qrencode &>/dev/null; then
                     echo -e "${WHITE}QR код (tg://):${NC}\n"
                     echo "$link" | qrencode -t ansiutf8 2>/dev/null
@@ -9925,29 +9949,38 @@ SYSTEMD
     systemctl daemon-reload
     systemctl enable --now "$name" 2>/dev/null
 
-    sleep 3
+    # Ждём запуска и читаем ссылку прямо из telemt
+    echo -e "  ${CYAN}Ожидаем запуска Telemt...${NC}"
+    local attempts=0
+    local real_secret=""
+    while [ $attempts -lt 15 ] && [ -z "$real_secret" ]; do
+        sleep 1
+        real_secret=$(journalctl -u "$name" --no-pager -n 50 2>/dev/null |             grep "EE-TLS:" | tail -1 | grep -oP "secret=\K[^ ]+")
+        attempts=$(( attempts + 1 ))
+    done
 
-    # FakeTLS ссылка (ee + random16 + domain_hex)
-    local fake_secret
-    fake_secret=$(python3 -c "
+    # Если не получили из journalctl — генерируем сами
+    if [ -z "$real_secret" ]; then
+        real_secret=$(python3 -c "
 import os, binascii
 rand = os.urandom(16)
 domain = '${tls_domain}'.encode()
 print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode())
 ")
+    fi
 
-    # Сохраняем мета
-    local link="tg://proxy?server=${server_addr}&port=${port}&secret=${fake_secret}"
+    # Сохраняем мета с реальным секретом
+    local link="tg://proxy?server=${server_addr}&port=${port}&secret=${real_secret}"
     cat > "${MTG_CONF_DIR}/${name}.meta" << META
 port=${port}
 domain=${tls_domain}
 server=${server_addr}
-secret=${fake_secret}
+secret=${real_secret}
 user_secret=${user_secret}
 username=${username}
 engine=telemt
 link=${link}
-link_tme=https://t.me/proxy?server=${server_addr}&port=${port}&secret=${fake_secret}
+link_tme=https://t.me/proxy?server=${server_addr}&port=${port}&secret=${real_secret}
 created=$(date '+%Y-%m-%d %H:%M:%S')
 META
 
@@ -9956,6 +9989,7 @@ META
     echo -e "  ${WHITE}Порт:   ${CYAN}${port}${NC}"
     echo -e "  ${WHITE}Домен:  ${CYAN}${tls_domain}${NC}"
     echo -e "  ${WHITE}Ссылка: ${GREEN}${link}${NC}"
+    echo -e "  ${YELLOW}⚠ При перезапуске секрет меняется — используй 'Показать ссылку' в управлении${NC}"
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     read -p "  Нажмите Enter..." < /dev/tty
@@ -9981,8 +10015,8 @@ _telemt_add_user() {
 
 _telemt_remove() {
     local name="$1"
-    echo -ne "  ${RED}Удалить Telemt прокси ${name}? (y/n): ${NC}"; read -r c < /dev/tty
-    [[ "$c" != "y" ]] && return
+    local _yn; _yn=$(read_yn "  ${RED}Удалить Telemt прокси ${name}? (y/n): ${NC}")
+    [ "$_yn" != "y" ] && return
     # Systemd
     systemctl stop "${name}" 2>/dev/null
     systemctl disable "${name}" 2>/dev/null
@@ -10612,28 +10646,36 @@ _stub_setup_full() {
     local ssl_key="/etc/letsencrypt/live/${domain}/privkey.pem"
     local nginx_conf="/etc/nginx/sites-available/${domain}"
 
-    if [ ! -f "$nginx_conf" ]; then
-        mkdir -p "$webroot"
-        if [ -f "$ssl_cert" ]; then
-            cat > "$nginx_conf" << NGINXEOF
+    mkdir -p "$webroot"
+    # Определяем какой порт использовать для HTTPS
+    local https_port=443
+    # Если 443 занят (telemt/mtg) — используем 8443
+    if ss -tlnp | grep -q "0.0.0.0:443" && ! ss -tlnp | grep -q "0.0.0.0:443.*nginx"; then
+        https_port=8443
+    fi
+
+    if [ -f "$ssl_cert" ]; then
+        cat > "$nginx_conf" << NGINXEOF
 server {
     listen 80;
     server_name ${domain};
     return 301 https://\$host\$request_uri;
 }
 server {
-    listen 8443 ssl http2;
+    listen ${https_port} ssl http2;
     server_name ${domain};
     ssl_certificate     ${ssl_cert};
     ssl_certificate_key ${ssl_key};
     ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
     root ${webroot};
     index index.html;
     location / { try_files \$uri \$uri/ =404; }
 }
 NGINXEOF
-        else
-            cat > "$nginx_conf" << NGINXEOF
+        echo -e "  ${CYAN}HTTPS будет на порту ${https_port}${NC}"
+    else
+        cat > "$nginx_conf" << NGINXEOF
 server {
     listen 80;
     server_name ${domain};
@@ -10642,10 +10684,10 @@ server {
     location / { try_files \$uri \$uri/ =404; }
 }
 NGINXEOF
-        fi
-        ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/${domain}"
-        nginx -t && systemctl reload nginx && echo -e "  ${GREEN}✓ nginx настроен${NC}"
     fi
+    ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/${domain}"
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null
+    nginx -t && systemctl reload nginx && echo -e "  ${GREEN}✓ nginx настроен${NC}"
 
     # 3. Выбор шаблона
     _stub_templates "$domain" "$webroot"
