@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.32"
+VERSION="6.33"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -9665,6 +9665,7 @@ SYSTEMD
 
     local link="tg://proxy?server=${server_addr}&port=${chosen_port}&secret=${secret}"
     local link_tme="https://t.me/proxy?server=${server_addr}&port=${chosen_port}&secret=${secret}"
+    local created_mtg; created_mtg=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Сохраняем мета-данные
     cat > "${MTG_CONF_DIR}/${name}.meta" << META
@@ -9674,7 +9675,7 @@ server=${server_addr}
 secret=${secret}
 link=${link}
 link_tme=${link_tme}
-created=$(date '+%Y-%m-%d %H:%M:%S')
+created=${created_mtg}
 META
 
     echo -e "${GREEN}  ✓ MTProto прокси запущен!${NC}\n"
@@ -10031,6 +10032,8 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
         real_link="tg://proxy?server=${server_addr}&port=${port}&secret=${real_secret}"
     fi
     local link="$real_link"
+    local link_tme_val="https://t.me/proxy${link#tg://proxy}"
+    local created_at; created_at=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Сохраняем мета
     cat > "${MTG_CONF_DIR}/${name}.meta" << META
@@ -10043,12 +10046,11 @@ username=${username}
 engine=telemt
 api_port=${api_port}
 link=${link}
-link_tme=https://t.me/proxy${link#tg://proxy}
-created=$(date '+%Y-%m-%d %H:%M:%S')
+link_tme=${link_tme_val}
+created=${created_at}
 META
 
     echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}✓ Telemt запущен!${NC}"
     echo -e "  ${GREEN}✓ Telemt запущен!${NC}"
     echo -e "  ${WHITE}Порт:   ${CYAN}${port}${NC}"
     echo -e "  ${WHITE}Домен:  ${CYAN}${tls_domain}${NC}"
