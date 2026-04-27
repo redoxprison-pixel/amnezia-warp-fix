@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.29"
+VERSION="6.30"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -10662,21 +10662,27 @@ _stub_setup_full() {
     local nginx_conf="/etc/nginx/sites-available/${domain}"
 
     mkdir -p "$webroot"
-    # Определяем какой порт использовать для HTTPS
+    # Определяем свободный порт для HTTPS nginx
     local https_port=443
-    # Если 443 занят (telemt/mtg) — используем 8443
-    if ss -tlnp | grep -q ":443 " && ! ss -tlnp | grep -q ":443.*nginx"; then
-        https_port=8443
-        echo -e "  ${YELLOW}Порт 443 занят — HTTPS будет на порту ${https_port}${NC}"
-    fi
-    # Всегда пересоздаём конфиг (даже если существует)
+    for try_port in 443 8443 7443 17443 9443; do
+        if ! ss -tlnp | grep -q ":${try_port} "; then
+            https_port=$try_port
+            break
+        elif ss -tlnp | grep -q ":${try_port}.*nginx"; then
+            https_port=$try_port
+            break
+        fi
+    done
+    echo -e "  ${CYAN}HTTPS nginx будет на порту ${https_port}${NC}"
+    # Всегда пересоздаём конфиг
 
     if [ -f "$ssl_cert" ]; then
         cat > "$nginx_conf" << NGINXEOF
 server {
     listen 80;
     server_name ${domain};
-    return 301 https://\$host\$request_uri;
+    # Редирект на правильный HTTPS порт
+    return 301 https://\$host:${https_port}\$request_uri;
 }
 server {
     listen ${https_port} ssl http2;
