@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.33"
+VERSION="6.36"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -9704,7 +9704,7 @@ _mtg_manage() {
         local port domain link running_st
         port=$(grep "^port=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
         domain=$(grep "^domain=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
-        link=$(grep "^link=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
+        link=$(grep "^link=" "$meta_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
         local created; created=$(grep "^created=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
 
         if _mtg_is_running "$name"; then
@@ -9736,23 +9736,43 @@ _mtg_manage() {
                 clear
                 echo -e "\n${CYAN}━━━ Ссылки: ${name} ━━━${NC}\n"
                 local dtype; dtype=$(_mtg_detect_type "$name")
-                # Для telemt — читаем актуальную ссылку из journalctl
+                # Для telemt — получаем актуальную ссылку через API
                 if [ "$dtype" = "telemt" ]; then
-                    local live_link; live_link=$(journalctl -u "$name" --no-pager -n 100 2>/dev/null |                         grep "EE-TLS:" | tail -1 | grep -oP "tg://proxy\S+")
-                    if [ -n "$live_link" ]; then
-                        link="$live_link"
-                        # Обновляем мета
-                        sed -i "s|^link=.*|link=${live_link}|" "$meta_file" 2>/dev/null
-                        sed -i "s|^link_tme=.*|link_tme=https://t.me/proxy${live_link#tg://proxy}|" "$meta_file" 2>/dev/null
-                    fi
+                    local api_p; api_p=$(grep "^api_port=" "$meta_file" 2>/dev/null | cut -d= -f2)
+                    [ -z "$api_p" ] && api_p=$(( port + 1 ))
+                    local live_link
+                    live_link=$(curl -s --max-time 2 "http://127.0.0.1:${api_p}/v1/users" 2>/dev/null |                         python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for u in d.get('data',[]):
+        tls=u.get('links',{}).get('tls',[])
+        if tls: print(tls[0]); break
+except: pass
+" 2>/dev/null)
+                    [ -z "$live_link" ] && live_link=$(journalctl -u "$name" --no-pager -n 200 2>/dev/null |                         grep "EE-TLS:" | tail -1 | sed 's/.*EE-TLS:  *//' | tr -d ' 
+')
+                    [ -n "$live_link" ] && link="$live_link"
                 fi
+                # Конвертируем tg:// → t.me через python (безопасно)
+                local tme_link; tme_link=$(python3 -c "
+s='${link}'
+if s.startswith('tg://proxy?'):
+    print('https://t.me/proxy?' + s[len('tg://proxy?'):])
+elif s.startswith('tg://proxy'):
+    print('https://t.me/proxy' + s[len('tg://proxy'):])
+else:
+    print(s)
+" 2>/dev/null || echo "$link")
                 echo -e "${WHITE}tg:// ссылка:${NC}"
-                echo -e "${GREEN}${link}${NC}\n"
-                local link_tme; link_tme=$(grep "^link_tme=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
+                echo -e "${GREEN}${link}${NC}"
+                echo ""
                 echo -e "${WHITE}t.me ссылка:${NC}"
-                echo -e "${GREEN}${link_tme:-https://t.me/proxy${link#tg://proxy}}${NC}\n"
+                echo -e "${GREEN}${tme_link}${NC}"
+                echo ""
                 if command -v qrencode &>/dev/null; then
-                    echo -e "${WHITE}QR код (tg://):${NC}\n"
+                    echo -e "${WHITE}QR код (tg://):${NC}
+"
                     echo "$link" | qrencode -t ansiutf8 2>/dev/null
                 fi
                 read -p "Нажмите Enter..." ;;
@@ -9793,9 +9813,17 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
                 [ -z "$srv" ] && srv="$MY_IP"
                 local new_link="tg://proxy?server=${srv}&port=${port}&secret=${new_secret}"
                 local new_link_tme="https://t.me/proxy?server=${srv}&port=${port}&secret=${new_secret}"
-                sed -i "s|^secret=.*|secret=${new_secret}|" "$meta_file"
-                sed -i "s|^link=.*|link=${new_link}|" "$meta_file"
-                sed -i "s|^link_tme=.*|link_tme=${new_link_tme}|" "$meta_file"
+                # Обновляем мета безопасно через python
+                python3 << PYEOF
+import re
+with open("${meta_file}", "r") as f:
+    meta = f.read()
+meta = re.sub(r"^secret=.*", "secret=${new_secret}", meta, flags=re.M)
+meta = re.sub(r"^link=.*", "link=${new_link}", meta, flags=re.M)
+meta = re.sub(r"^link_tme=.*", "link_tme=${new_link_tme}", meta, flags=re.M)
+with open("${meta_file}", "w") as f:
+    f.write(meta)
+PYEOF
                 echo -e "${GREEN}  ✓ Новый секрет активен${NC}"
                 echo -e "${GREEN}  Новая ссылка: ${new_link}${NC}"
                 log_action "MTG REKEY: ${name}"
@@ -9878,8 +9906,19 @@ _telemt_add() {
     server_domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
     [ -z "$server_domain" ] && server_domain=$(grep "^MTG_DOMAIN=" /etc/govpn/config 2>/dev/null | cut -d= -f2 | tr -d '"')
 
-    echo -ne "  Порт [443]: "; read -r port < /dev/tty
-    port="${port:-443}"
+    # Определяем рекомендуемый порт для текущего сервера
+    local _rec_settings; _rec_settings=$(_mtg_recommend_settings)
+    local _rec_port; _rec_port=$(echo "$_rec_settings" | grep "^REC_PORT=" | cut -d= -f2)
+    local _self_steal; _self_steal=$(echo "$_rec_settings" | grep "^SELF_STEAL=" | cut -d= -f2)
+    local _note; _note=$(echo "$_rec_settings" | grep "^NOTE=" | cut -d= -f2-)
+    _rec_port="${_rec_port:-443}"
+
+    echo -e "  ${CYAN}Рекомендуемый порт для этого сервера: ${WHITE}${_rec_port}${NC}"
+    [ -n "$_note" ] && echo -e "  ${YELLOW}${_note}${NC}"
+    [ "$_self_steal" = "yes" ] && echo -e "  ${GREEN}✓ Self-Steal возможен — трафик маскируется под ваш сайт${NC}"
+    echo ""
+    echo -ne "  Порт [${_rec_port}]: "; read -r port < /dev/tty
+    port="${port:-${_rec_port}}"
 
     # Пинг доменов для выбора FakeTLS
     echo -e "
@@ -10032,7 +10071,13 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
         real_link="tg://proxy?server=${server_addr}&port=${port}&secret=${real_secret}"
     fi
     local link="$real_link"
-    local link_tme_val="https://t.me/proxy${link#tg://proxy}"
+    local link_tme_val; link_tme_val=$(python3 -c "
+s='${link}'
+if s.startswith('tg://proxy?'):
+    print('https://t.me/proxy?' + s[len('tg://proxy?'):])
+else:
+    print(s.replace('tg://proxy','https://t.me/proxy',1))
+" 2>/dev/null || echo "${link}")
     local created_at; created_at=$(date '+%Y-%m-%d %H:%M:%S')
 
     # Сохраняем мета
@@ -10774,6 +10819,70 @@ NGINXEOF
 
     # 3. Выбор шаблона
     _stub_templates "$domain" "$webroot"
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  УМНОЕ ОПРЕДЕЛЕНИЕ ПОРТОВ ДЛЯ TELEMT/MTG
+# ═══════════════════════════════════════════════════════════════
+
+# Возвращает список занятых портов
+_get_busy_ports() {
+    ss -tlnp 2>/dev/null | grep -oP ':\K\d+(?= )' | sort -un
+}
+
+# Находит свободный порт из списка предпочтений
+_find_free_port() {
+    local -a preferred=("$@")
+    local busy; busy=$(_get_busy_ports)
+    for p in "${preferred[@]}"; do
+        echo "$busy" | grep -qx "$p" || { echo "$p"; return 0; }
+    done
+    # Генерируем случайный в диапазоне 20000-50000
+    local rnd=$(( RANDOM % 30000 + 20000 ))
+    while echo "$busy" | grep -qx "$rnd"; do
+        rnd=$(( RANDOM % 30000 + 20000 ))
+    done
+    echo "$rnd"
+}
+
+# Определяет рекомендуемые настройки MTProto для текущего сервера
+_mtg_recommend_settings() {
+    local mode="$MODE"
+    local busy; busy=$(_get_busy_ports)
+
+    echo "MODE=${mode}"
+
+    # Определяем свободный порт
+    if [ "$mode" = "3xui" ] || [ "$mode" = "combo" ]; then
+        # На x-ui серверах 443 и 8443 обычно заняты nginx/xray
+        local rec_port; rec_port=$(_find_free_port 2053 2083 2087 8443 443)
+        echo "REC_PORT=${rec_port}"
+        # Если 443 занят — Self-Steal невозможен напрямую
+        if echo "$busy" | grep -qx "443"; then
+            echo "SELF_STEAL=no"
+            echo "NOTE=Порт 443 занят nginx/xray. Telemt будет на ${rec_port}. Self-Steal через nginx возможен отдельно."
+        else
+            echo "SELF_STEAL=yes"
+            echo "NOTE=Порт 443 свободен — можно Self-Steal"
+        fi
+    elif [ "$mode" = "amnezia" ]; then
+        # На AWG серверах 443 обычно свободен или занят MTG/Telemt
+        local rec_port; rec_port=$(_find_free_port 443 8443 2053)
+        echo "REC_PORT=${rec_port}"
+        if echo "$busy" | grep -qx "443"; then
+            echo "SELF_STEAL=no"
+            echo "NOTE=Порт 443 занят. Используем ${rec_port}."
+        else
+            echo "SELF_STEAL=yes"
+            echo "NOTE=Порт 443 свободен — рекомендуется для лучшей маскировки"
+        fi
+    else
+        local rec_port; rec_port=$(_find_free_port 443 2053 8443)
+        echo "REC_PORT=${rec_port}"
+        echo "SELF_STEAL=unknown"
+        echo "NOTE=Режим сервера не определён"
+    fi
 }
 
 mtproto_menu() {
