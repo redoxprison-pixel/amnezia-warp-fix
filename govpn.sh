@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.30"
+VERSION="6.32"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -7540,27 +7540,45 @@ PYEOF_SS
 
 
 _3xui_install_stub_site() {
-    local webroot="/var/www/html"
-    mkdir -p "$webroot"
     clear
     echo -e "
 ${CYAN}━━━ Установка заглушки сайта ━━━${NC}
 "
-    echo -e "  ${WHITE}[1]${NC}  CinemaLab — видеостудия (объясняет большой трафик)"
-    echo -e "  ${WHITE}[2]${NC}  TechCorp — IT компания (корпоративный стиль)"
-    echo -e "  ${WHITE}[3]${NC}  CloudStorage — облачное хранилище"
-    echo -e "  ${WHITE}[0]${NC}  Назад"
-    echo ""
-    read -p "  Выбор: " stub_ch < /dev/tty
 
-    case "$stub_ch" in
-        1) _stub_cinemalab "$webroot" ;;
-        2) _stub_techcorp "$webroot" ;;
-        3) _stub_cloudstorage "$webroot" ;;
-        0|"") return ;;
-    esac
-    echo -e "  ${GREEN}✓ Заглушка установлена в ${webroot}/index.html${NC}"
-    systemctl reload nginx 2>/dev/null
+    # Определяем домен
+    local domain
+    domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
+    if [ -z "$domain" ]; then
+        domain=$(grep -rh "server_name" /etc/nginx/sites-enabled/ 2>/dev/null |             grep -v "localhost\|_\|#" | grep -oP "server_name\s+\K\S+" | grep "\." | head -1)
+    fi
+
+    if [ -n "$domain" ]; then
+        echo -e "  ${WHITE}Домен:${NC} ${CYAN}${domain}${NC}"
+        local _yn; _yn=$(read_yn "  Использовать этот домен? (y/n): ")
+        if [ "$_yn" != "y" ]; then
+            echo -ne "  Введите домен: "; read -r domain < /dev/tty
+        fi
+    else
+        echo -ne "  Введите домен: "; read -r domain < /dev/tty
+    fi
+
+    [ -z "$domain" ] && return
+
+    local webroot="/var/www/${domain}"
+    mkdir -p "$webroot"
+
+    # Вызываем общее меню шаблонов
+    _stub_templates "$domain" "$webroot"
+
+    # Если nginx конфига нет — создаём базовый
+    local nginx_conf="/etc/nginx/sites-available/${domain}"
+    if [ ! -f "$nginx_conf" ]; then
+        _stub_setup_full "$domain"
+    else
+        nginx -t && systemctl reload nginx 2>/dev/null
+        echo -e "  ${GREEN}✓ Заглушка обновлена${NC}"
+    fi
+    sleep 2
 }
 
 _stub_cinemalab() {
@@ -9927,6 +9945,11 @@ public_port = ${port}
 [server]
 port = ${port}
 
+[server.api]
+enabled = true
+listen = "127.0.0.1:$((port+1))"
+whitelist = ["127.0.0.1"]
+
 [[server.listeners]]
 ip = "0.0.0.0"
 
@@ -9941,16 +9964,29 @@ TOML
 
     echo -e "\n  ${CYAN}Запускаем Telemt...${NC}"
     # Systemd сервис
+    # Создаём пользователя telemt если нет
+    id telemt &>/dev/null 2>&1 || useradd -d /opt/telemt -m -r -U telemt 2>/dev/null
+    mkdir -p "$(dirname "$conf_file")"
+    chown -R telemt:telemt "$(dirname "$conf_file")" 2>/dev/null
+
     cat > "/etc/systemd/system/${name}.service" << SYSTEMD
 [Unit]
 Description=Telemt MTProto proxy ${name}
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
+Type=simple
+User=telemt
+Group=telemt
+WorkingDirectory=/opt/telemt
 ExecStart=/usr/local/bin/telemt run ${conf_file}
-Restart=always
+Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -9958,28 +9994,45 @@ SYSTEMD
     systemctl daemon-reload
     systemctl enable --now "$name" 2>/dev/null
 
-    # Ждём запуска и читаем ссылку прямо из telemt
+
+    # Ждём запуска и получаем ссылку через API (рекомендовано документацией)
     echo -e "  ${CYAN}Ожидаем запуска Telemt...${NC}"
-    local attempts=0
-    local real_secret=""
-    while [ $attempts -lt 15 ] && [ -z "$real_secret" ]; do
+    local api_port=$(( port + 1 ))
+    local attempts=0 real_link="" real_secret=""
+    while [ $attempts -lt 20 ] && [ -z "$real_link" ]; do
         sleep 1
-        real_secret=$(journalctl -u "$name" --no-pager -n 50 2>/dev/null |             grep "EE-TLS:" | tail -1 | grep -oP "secret=\K[^ ]+")
+        # API telemt /v1/users
+        real_link=$(curl -s --max-time 2 "http://127.0.0.1:${api_port}/v1/users" 2>/dev/null | \
+            python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for u in d.get('data',[]):
+        tls=u.get('links',{}).get('tls',[])
+        if tls: print(tls[0]); break
+except: pass
+" 2>/dev/null)
+        # Fallback — journalctl
+        [ -z "$real_link" ] && real_link=$(journalctl -u "$name" --no-pager -n 100 2>/dev/null | \
+            grep "EE-TLS:" | tail -1 | sed 's/.*EE-TLS:  //' | tr -d ' ')
         attempts=$(( attempts + 1 ))
     done
 
-    # Если не получили из journalctl — генерируем сами
-    if [ -z "$real_secret" ]; then
+    # Если не получили — генерируем сами
+    if [ -n "$real_link" ]; then
+        real_secret=$(echo "$real_link" | sed 's/.*secret=//' | cut -d'&' -f1)
+    else
         real_secret=$(python3 -c "
 import os, binascii
 rand = os.urandom(16)
 domain = '${tls_domain}'.encode()
 print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode())
 ")
+        real_link="tg://proxy?server=${server_addr}&port=${port}&secret=${real_secret}"
     fi
+    local link="$real_link"
 
-    # Сохраняем мета с реальным секретом
-    local link="tg://proxy?server=${server_addr}&port=${port}&secret=${real_secret}"
+    # Сохраняем мета
     cat > "${MTG_CONF_DIR}/${name}.meta" << META
 port=${port}
 domain=${tls_domain}
@@ -9988,12 +10041,14 @@ secret=${real_secret}
 user_secret=${user_secret}
 username=${username}
 engine=telemt
+api_port=${api_port}
 link=${link}
-link_tme=https://t.me/proxy?server=${server_addr}&port=${port}&secret=${real_secret}
+link_tme=https://t.me/proxy${link#tg://proxy}
 created=$(date '+%Y-%m-%d %H:%M:%S')
 META
 
     echo -e "\n${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${GREEN}✓ Telemt запущен!${NC}"
     echo -e "  ${GREEN}✓ Telemt запущен!${NC}"
     echo -e "  ${WHITE}Порт:   ${CYAN}${port}${NC}"
     echo -e "  ${WHITE}Домен:  ${CYAN}${tls_domain}${NC}"
