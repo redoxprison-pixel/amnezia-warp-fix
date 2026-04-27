@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.28"
+VERSION="6.29"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -10687,6 +10687,7 @@ server {
     ssl_ciphers         HIGH:!aNULL:!MD5;
     root ${webroot};
     index index.html;
+    location /.well-known/acme-challenge/ { root ${webroot}; }
     location / { try_files \$uri \$uri/ =404; }
 }
 NGINXEOF
@@ -10698,11 +10699,13 @@ server {
     server_name ${domain};
     root ${webroot};
     index index.html;
+    location /.well-known/acme-challenge/ { root ${webroot}; }
     location / { try_files \$uri \$uri/ =404; }
 }
 NGINXEOF
     fi
-    ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/${domain}"
+    ln -sf "$nginx_conf" "/etc/nginx/sites-available/${domain}" 2>/dev/null || true
+    ln -sf "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/${domain}"
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null
     nginx -t && systemctl reload nginx && echo -e "  ${GREEN}✓ nginx настроен${NC}"
 
