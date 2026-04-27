@@ -9165,8 +9165,7 @@ _mtg_add() {
         server_domain_idx=$(( ${#domain_list[@]} + 1 ))
         echo -e "  ${GREEN}[${server_domain_idx}]${NC} ${GREEN}${SERVER_DOMAIN}${NC}  ${CYAN}← ваш домен (Self-Steal)${NC}"
     fi
-    local custom_idx=$(( ${#domain_list[@]} + ([ -n "$SERVER_DOMAIN" ] && echo 2 || echo 1) ))
-    custom_idx=$(( ${#domain_list[@]} + ( [ -n "$SERVER_DOMAIN" ] && echo 2 || echo 1 ) ))
+    local custom_idx
     [ -n "$SERVER_DOMAIN" ] && custom_idx=$(( server_domain_idx + 1 )) || custom_idx=$(( ${#domain_list[@]} + 1 ))
     echo -e "  ${YELLOW}[${custom_idx}]${NC} Свой домен"
     echo ""
@@ -9639,6 +9638,7 @@ show_menu() {
         if is_3xui; then
             echo -e " ${CYAN}── 3X-UI ─────────────────────────────${NC}"
             echo -e "  ${GREEN}3)  Клиенты 3X-UI${NC}"
+            echo -e "  ${CYAN}i)  Inbound'ы (создать/управлять)${NC}"
         fi
         echo -e " ${CYAN}── ПРОКСИ ────────────────────────────${NC}"
         # MTProto только на не-bridge серверах
@@ -9678,6 +9678,7 @@ show_menu() {
                     _3xui_clients_menu
                 fi ;;
             4) is_amnezia && awg_peers_menu ;;
+            i|I|и|И) is_3xui && _3xui_inbound_templates ;;
             5) mtproto_menu ;;
             6) iptables_menu ;;
             7) tools_menu ;;
