@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.18"
+VERSION="6.19"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -9760,8 +9760,14 @@ print('ee' + binascii.hexlify(rand).decode() + binascii.hexlify(domain).decode()
 
 _telemt_install() {
     echo -e "\n${CYAN}Устанавливаем Telemt...${NC}"
-    if curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh; then
-        echo -e "  ${GREEN}✓ Telemt установлен${NC}"
+    local arch; arch=$(uname -m)
+    local libc="gnu"
+    ldd --version 2>&1 | grep -iq musl && libc="musl"
+    local url="https://github.com/telemt/telemt/releases/latest/download/telemt-${arch}-linux-${libc}.tar.gz"
+
+    echo -e "  ${CYAN}Скачиваем бинарник (${arch}-linux-${libc})...${NC}"
+    if wget -qO- "$url" | tar -xz -C /tmp/ 2>/dev/null &&        mv /tmp/telemt /usr/local/bin/telemt 2>/dev/null &&        chmod +x /usr/local/bin/telemt; then
+        echo -e "  ${GREEN}✓ Telemt установлен: $(/usr/local/bin/telemt --version 2>/dev/null | head -1)${NC}"
         return 0
     else
         echo -e "  ${RED}✗ Ошибка установки Telemt${NC}"
@@ -9777,12 +9783,14 @@ _telemt_add() {
     clear
     echo -e "\n${CYAN}━━━ Новый Telemt MTProto прокси ━━━${NC}\n"
 
-    # Проверяем установку
+    # Проверяем установку — ставим автоматически без лишних вопросов
     if ! _telemt_is_installed; then
-        echo -e "  ${YELLOW}Telemt не установлен. Установить?${NC}"
-        echo -ne "  (y/n): "; read -r inst < /dev/tty
-        [[ "$inst" != "y" ]] && return
-        _telemt_install || return
+        echo -e "  ${YELLOW}Telemt не установлен — устанавливаем...${NC}"
+        _telemt_install || {
+            echo -e "  ${RED}Не удалось установить Telemt${NC}"
+            read -p "  Enter..." < /dev/tty
+            return
+        }
     fi
 
     # Получаем домен сервера
@@ -9918,6 +9926,18 @@ _telemt_add_user() {
     docker restart "$name" 2>/dev/null || systemctl restart "$name" 2>/dev/null
     echo -e "  ${GREEN}✓ Пользователь ${uname} добавлен, секрет: ${usecret}${NC}"
     sleep 2
+}
+
+_telemt_remove() {
+    local name="$1"
+    echo -ne "  ${RED}Удалить Telemt прокси ${name}? (y/n): ${NC}"; read -r c < /dev/tty
+    [[ "$c" != "y" ]] && return
+    docker stop "$name" 2>/dev/null; docker rm "$name" 2>/dev/null
+    systemctl stop "$name" 2>/dev/null; systemctl disable "$name" 2>/dev/null
+    rm -f "/etc/systemd/system/${name}.service" 2>/dev/null
+    rm -f "${MTG_CONF_DIR}/${name}.toml" "${MTG_CONF_DIR}/${name}.meta" 2>/dev/null
+    systemctl daemon-reload 2>/dev/null
+    echo -e "  ${GREEN}✓ Удалён${NC}"; sleep 2
 }
 
 # ═══════════════════════════════════════════════════════════════
