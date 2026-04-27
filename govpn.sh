@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.27"
+VERSION="6.28"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -132,8 +132,8 @@ read_choice() {
 read_yn() {
     local prompt="$1"
     local raw
-    read -p "$prompt" raw < /dev/tty
-    # Нижний регистр
+    echo -ne "$prompt" > /dev/tty
+    read raw < /dev/tty
     raw=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
     case "$raw" in
         y|н|yes|да) echo "y" ;;
@@ -9877,6 +9877,13 @@ _telemt_add() {
         echo -e "  ${YELLOW}[$((idx+1))]${NC} ${d}  ${color}${ms}ms${NC}  ${tls_descs[$idx]}"
         idx=$(( idx + 1 ))
     done
+    # Добавляем домен сервера как вариант если есть
+    local srv_dom_idx=0
+    if [ -n "$server_domain" ]; then
+        srv_dom_idx=$(( ${#tls_domains[@]} + 1 ))
+        local srv_ms; srv_ms=$(_mtg_ping_domain "$server_domain")
+        echo -e "  ${GREEN}[${srv_dom_idx}]${NC} ${server_domain}  ${GREEN}${srv_ms}ms${NC}  ${GREEN}← ваш домен (Self-Steal)${NC}"
+    fi
     echo -e "  ${YELLOW}[0]${NC} Свой домен"
     echo ""
     echo -ne "  Выбор [1]: "; read -r tls_choice < /dev/tty
@@ -9885,6 +9892,8 @@ _telemt_add() {
     if [[ "$tls_choice" == "0" ]]; then
         echo -ne "  Введите домен: "; read -r tls_domain < /dev/tty
         tls_domain="${tls_domain:-storage.googleapis.com}"
+    elif [ -n "$server_domain" ] && [[ "$tls_choice" == "$srv_dom_idx" ]]; then
+        tls_domain="$server_domain"
     elif [[ "$tls_choice" =~ ^[0-9]+$ ]] && (( tls_choice >= 1 && tls_choice <= ${#tls_domains[@]} )); then
         tls_domain="${tls_domains[$((tls_choice-1))]}"
     else
@@ -9992,6 +10001,12 @@ META
     echo -e "  ${YELLOW}⚠ При перезапуске секрет меняется — используй 'Показать ссылку' в управлении${NC}"
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
+    # Предлагаем iptables редирект если порт нестандартный
+    if [ "$port" != "443" ] && [ "$port" != "8443" ]; then
+        echo -e "  ${CYAN}Добавить iptables REDIRECT диапазона портов → ${port}?${NC}"
+        local _yn; _yn=$(read_yn "  (y/n): ")
+        [ "$_yn" = "y" ] && _xui_add_redirect "$port"
+    fi
     read -p "  Нажмите Enter..." < /dev/tty
 }
 
@@ -10650,9 +10665,11 @@ _stub_setup_full() {
     # Определяем какой порт использовать для HTTPS
     local https_port=443
     # Если 443 занят (telemt/mtg) — используем 8443
-    if ss -tlnp | grep -q "0.0.0.0:443" && ! ss -tlnp | grep -q "0.0.0.0:443.*nginx"; then
+    if ss -tlnp | grep -q ":443 " && ! ss -tlnp | grep -q ":443.*nginx"; then
         https_port=8443
+        echo -e "  ${YELLOW}Порт 443 занят — HTTPS будет на порту ${https_port}${NC}"
     fi
+    # Всегда пересоздаём конфиг (даже если существует)
 
     if [ -f "$ssl_cert" ]; then
         cat > "$nginx_conf" << NGINXEOF
