@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.36"
+VERSION="6.37"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -9901,10 +9901,40 @@ _telemt_add() {
         }
     fi
 
-    # Получаем домен сервера
-    local server_domain
-    server_domain=$(certbot certificates 2>/dev/null | grep "Domains:" | head -1 | awk '{print $2}')
-    [ -z "$server_domain" ] && server_domain=$(grep "^MTG_DOMAIN=" /etc/govpn/config 2>/dev/null | cut -d= -f2 | tr -d '"')
+    # Получаем домен сервера — показываем все варианты и спрашиваем
+    local server_domain _auto_domain
+    # Собираем все домены с сертификатами
+    local _all_domains; _all_domains=$(certbot certificates 2>/dev/null | grep "Domains:" | awk '{print $2}')
+    [ -z "$_all_domains" ] && _all_domains=$(grep "^MTG_DOMAIN=" /etc/govpn/config 2>/dev/null | cut -d= -f2 | tr -d '"')
+
+    echo -e "
+  ${WHITE}Домен сервера для ссылки подключения:${NC}"
+    if [ -n "$_all_domains" ]; then
+        local _didx=1
+        while IFS= read -r _d; do
+            echo -e "  ${YELLOW}[${_didx}]${NC} ${_d}"
+            _didx=$(( _didx + 1 ))
+        done <<< "$_all_domains"
+        echo -e "  ${YELLOW}[0]${NC} Использовать IP (${MY_IP})"
+        echo -e "  ${YELLOW}[m]${NC} Ввести вручную"
+        echo ""
+        echo -ne "  Выбор [1]: "; read -r _dom_choice < /dev/tty
+        _dom_choice="${_dom_choice:-1}"
+        if [ "$_dom_choice" = "0" ]; then
+            server_domain="$MY_IP"
+        elif [ "$_dom_choice" = "m" ] || [ "$_dom_choice" = "м" ]; then
+            echo -ne "  Введите домен: "; read -r server_domain < /dev/tty
+        else
+            server_domain=$(echo "$_all_domains" | sed -n "${_dom_choice}p")
+            [ -z "$server_domain" ] && server_domain=$(echo "$_all_domains" | head -1)
+        fi
+    else
+        echo -e "  ${YELLOW}Сертификатов не найдено${NC}"
+        echo -ne "  Введите домен или оставьте пустым для IP: "; read -r server_domain < /dev/tty
+        [ -z "$server_domain" ] && server_domain="$MY_IP"
+    fi
+    echo -e "  ${GREEN}✓ Домен для ссылки: ${server_domain}${NC}
+"
 
     # Определяем рекомендуемый порт для текущего сервера
     local _rec_settings; _rec_settings=$(_mtg_recommend_settings)
