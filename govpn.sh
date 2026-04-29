@@ -5318,7 +5318,9 @@ for ib_id, ib in inbounds.items():
             ok_count += 1
 
 # Вывод
-print(f"  {WHITE}Всего клиентов: {total_clients}  |  {GREEN}✓ OK: {ok_count}{NC}  |  {RED}⚠ Проблем: {len(problems)}{NC}
+    total_str = "  Всего клиентов: " + str(total_clients) + "  |  OK: " + str(ok_count) + "  |  Проблем: " + str(len(problems))
+    print(total_str)
+    print()
 ")
 
 if not problems:
