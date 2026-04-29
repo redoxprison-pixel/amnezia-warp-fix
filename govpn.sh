@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.41"
+VERSION="6.42"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5262,7 +5262,7 @@ total_clients = 0
 for ib_id, ib in inbounds.items():
     for client in ib['clients']:
         email     = client.get('email', '?')
-        limit_ip  = int(client.get('limitIp', 0))
+        limit_ip  = int(client.get('limitIp') or 0)
         flow      = client.get('flow', '')
         enable    = client.get('enable', True)
         total_clients += 1
