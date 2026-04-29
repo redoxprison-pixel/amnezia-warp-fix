@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.44"
+VERSION="6.45"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5446,9 +5446,23 @@ FLAGS = {
     'WS':'🇼🇸','YE':'🇾🇪','ZA':'🇿🇦','ZM':'🇿🇲','ZW':'🇿🇼','NL':'🇳🇱','AM':'🇦🇲',
 }
 try:
-    r = urllib.request.urlopen('http://ip-api.com/json/${ip}?fields=countryCode', timeout=5)
-    d = json.loads(r.read())
-    cc = d.get('countryCode','').upper()
+    # Пробуем несколько сервисов для точного определения страны
+    cc = ''
+    services = [
+        ('http://ip-api.com/json/${ip}?fields=countryCode', lambda d: d.get('countryCode','')),
+        ('https://ipwho.is/${ip}', lambda d: d.get('country_code','')),
+        ('https://ipinfo.io/${ip}/json', lambda d: d.get('country','')),
+    ]
+    for url, getter in services:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'curl/7.68.0'})
+            r = urllib.request.urlopen(req, timeout=5)
+            d = json.loads(r.read())
+            cc = getter(d).upper()
+            if cc and len(cc) == 2:
+                break
+        except:
+            continue
     print(FLAGS.get(cc, '🌐'))
 except:
     print('🌐')
