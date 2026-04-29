@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.39"
+VERSION="6.40"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5187,6 +5187,227 @@ _3xui_yukikras_info() {
 }
 
 
+
+# ═══════════════════════════════════════════════════════════════
+#  ПРОВЕРКА КЛИЕНТОВ (IP лимиты + Flow)
+# ═══════════════════════════════════════════════════════════════
+
+_xui_check_clients() {
+    clear
+    echo -e "
+${CYAN}━━━ Проверка клиентов x-ui ━━━${NC}
+"
+    echo -e "  ${YELLOW}Анализирую клиентов...${NC}
+"
+
+    python3 << 'PYEOF'
+import sqlite3, json, sys
+from datetime import datetime
+
+XUIDB = '/etc/x-ui/x-ui.db'
+conn = sqlite3.connect(XUIDB)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+
+GREEN  = '[0;32m'
+RED    = '[0;31m'
+YELLOW = '[1;33m'
+CYAN   = '[0;36m'
+WHITE  = '[1;37m'
+NC     = '[0m'
+MAGENTA= '[0;35m'
+
+# Получаем inbound'ы
+inbounds = {}
+for r in conn.execute("SELECT id, remark, protocol, stream_settings, settings FROM inbounds"):
+    ib_id, remark, protocol, stream_s, settings_s = r
+    try:
+        ss = json.loads(stream_s)
+        s  = json.loads(settings_s)
+    except:
+        continue
+    network  = ss.get('network', 'tcp')
+    security = ss.get('security', 'none')
+    is_reality_tcp = (security == 'reality' and network == 'tcp')
+    inbounds[ib_id] = {
+        'remark':       remark,
+        'protocol':     protocol,
+        'is_reality':   is_reality_tcp,
+        'clients':      s.get('clients', []),
+    }
+
+# IP данные из БД
+client_ips = {}
+for r in conn.execute("SELECT client_email, ips FROM inbound_client_ips"):
+    email, ips_raw = r
+    try:
+        ips = json.loads(ips_raw) if ips_raw else []
+    except:
+        ips = []
+    client_ips[email] = ips if isinstance(ips, list) else [ips]
+
+# Трафик и last_online
+client_stats = {}
+for r in conn.execute("SELECT email, up, down, total, expiry_time, enable, last_online FROM client_traffics"):
+    email, up, down, total, expiry, enable, last_online = r
+    client_stats[email] = {
+        'up': up, 'down': down, 'total': total,
+        'expiry': expiry, 'enable': bool(enable),
+        'last_online': last_online
+    }
+
+problems = []
+ok_count = 0
+total_clients = 0
+
+for ib_id, ib in inbounds.items():
+    for client in ib['clients']:
+        email     = client.get('email', '?')
+        limit_ip  = int(client.get('limitIp', 0))
+        flow      = client.get('flow', '')
+        enable    = client.get('enable', True)
+        total_clients += 1
+
+        if not enable:
+            continue
+
+        ips      = client_ips.get(email, [])
+        ip_count = len(ips)
+        stats    = client_stats.get(email, {})
+
+        issues  = []
+        warns   = []
+
+        # 1. IP лимит превышен
+        if limit_ip > 0 and ip_count > limit_ip:
+            issues.append(f"IP превышен: {ip_count}/{limit_ip} → {', '.join(ips[:5])}")
+
+        # 2. Flow для Reality TCP
+        if ib['is_reality'] and flow != 'xtls-rprx-vision':
+            if flow:
+                issues.append(f"Flow неверный: '{flow}'  нужен xtls-rprx-vision")
+            else:
+                issues.append("Flow не задан!  нужен xtls-rprx-vision")
+
+        # 3. Срок истёк
+        expiry = stats.get('expiry', 0)
+        if expiry and expiry > 0:
+            exp_dt = datetime.fromtimestamp(expiry / 1000)
+            if exp_dt < datetime.now():
+                issues.append(f"Срок истёк: {exp_dt.strftime('%Y-%m-%d')}")
+            elif (exp_dt - datetime.now()).days < 3:
+                warns.append(f"Срок истекает: {exp_dt.strftime('%Y-%m-%d')}")
+
+        # 4. Лимит трафика
+        total_limit = stats.get('total', 0)
+        used = stats.get('up', 0) + stats.get('down', 0)
+        if total_limit > 0 and used >= total_limit:
+            issues.append(f"Трафик исчерпан: {used//1024//1024}МБ / {total_limit//1024//1024}МБ")
+        elif total_limit > 0 and used >= total_limit * 0.9:
+            warns.append(f"Трафик почти исчерпан: {used*100//total_limit}%")
+
+        if issues or warns:
+            problems.append({
+                'inbound': ib['remark'],
+                'email':   email,
+                'issues':  issues,
+                'warns':   warns,
+                'ips':     ips,
+                'limit_ip': limit_ip,
+            })
+        else:
+            ok_count += 1
+
+# Вывод
+print(f"  {WHITE}Всего клиентов: {total_clients}  |  {GREEN}✓ OK: {ok_count}{NC}  |  {RED}⚠ Проблем: {len(problems)}{NC}
+")
+
+if not problems:
+    print(f"  {GREEN}✅ Все клиенты в порядке{NC}")
+else:
+    # Сначала критические (issues), потом предупреждения (warns)
+    critical = [p for p in problems if p['issues']]
+    warnings = [p for p in problems if not p['issues'] and p['warns']]
+
+    if critical:
+        print(f"  {RED}━━━ Критические проблемы ({len(critical)}) ━━━{NC}
+")
+        for p in critical:
+            print(f"  {RED}●{NC} {WHITE}{p['email']}{NC}  {CYAN}[{p['inbound']}]{NC}")
+            for issue in p['issues']:
+                print(f"    {RED}✗{NC} {issue}")
+            if p['warns']:
+                for w in p['warns']:
+                    print(f"    {YELLOW}⚠{NC} {w}")
+            print()
+
+    if warnings:
+        print(f"  {YELLOW}━━━ Предупреждения ({len(warnings)}) ━━━{NC}
+")
+        for p in warnings:
+            print(f"  {YELLOW}●{NC} {WHITE}{p['email']}{NC}  {CYAN}[{p['inbound']}]{NC}")
+            for w in p['warns']:
+                print(f"    {YELLOW}⚠{NC} {w}")
+            print()
+
+conn.close()
+PYEOF
+
+    echo ""
+    echo -e "  ${WHITE}── Действия ─────────────────────────${NC}"
+    echo -e "  ${YELLOW}[f]${NC}  Исправить Flow для Reality клиентов"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    local ch; ch=$(read_choice "Выбор: ")
+
+    case "$ch" in
+        f|F|ф|Ф)
+            echo -e "
+  ${CYAN}Исправляю Flow для Reality клиентов...${NC}"
+            systemctl stop x-ui
+            sleep 1
+            python3 << 'PYEOF'
+import sqlite3, json
+
+XUIDB = '/etc/x-ui/x-ui.db'
+conn = sqlite3.connect(XUIDB, timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+
+fixed = 0
+for r in conn.execute("SELECT id, stream_settings, settings FROM inbounds"):
+    ib_id, stream_s, settings_s = r
+    try:
+        ss = json.loads(stream_s)
+        s  = json.loads(settings_s)
+    except:
+        continue
+    network  = ss.get('network', 'tcp')
+    security = ss.get('security', 'none')
+    if not (security == 'reality' and network == 'tcp'):
+        continue
+    changed = False
+    for client in s.get('clients', []):
+        if client.get('flow') != 'xtls-rprx-vision':
+            client['flow'] = 'xtls-rprx-vision'
+            changed = True
+            fixed += 1
+            print(f"  ✓ {client.get('email','?')} → flow исправлен")
+    if changed:
+        conn.execute("UPDATE inbounds SET settings=? WHERE id=?",
+                     (json.dumps(s), ib_id))
+
+conn.commit()
+conn.close()
+print(f"
+  Исправлено клиентов: {fixed}")
+PYEOF
+            rm -f /dev/shm/uds2023.sock 2>/dev/null
+            systemctl start x-ui
+            sleep 2
+            ;;
+    esac
+    read -p "  Enter для продолжения..." < /dev/tty
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  ПЕРЕИМЕНОВАНИЕ INBOUND'ОВ (авто-флаг по выходному IP)
 # ═══════════════════════════════════════════════════════════════
@@ -6065,6 +6286,7 @@ PYEOF
         echo -e "  ${YELLOW}[7]${NC}  Диагностика и починка inbound'а"
         echo -e "  ${RED}[6]${NC}  Удалить inbound"
         echo -e "  ${YELLOW}[r]${NC}  Переименовать inbound'ы (авто-флаг)"
+        echo -e "  ${CYAN}[c]${NC}  Проверить клиентов (IP лимиты + Flow)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -6078,6 +6300,7 @@ PYEOF
             6) _xui_delete_inbound ;;
             7) _xui_diagnose_fix ;;
             r|R|р|Р) _xui_rename_menu ;;
+            c|C|с|С) _xui_check_clients ;;
             0|"") return ;;
         esac
     done
