@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.42"
+VERSION="6.43"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5365,13 +5365,13 @@ PYEOF
   ${CYAN}Исправляю Flow для Reality клиентов...${NC}"
             systemctl stop x-ui
             sleep 1
-            cat > /tmp/_xui_fix_flow.py << 'PYEOF'
+            systemctl stop x-ui
+            sleep 1
+            python3 << PYEOF2
 import sqlite3, json
-
 XUIDB = "/etc/x-ui/x-ui.db"
 conn = sqlite3.connect(XUIDB, timeout=30)
 conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
-
 fixed = 0
 for r in conn.execute("SELECT id, stream_settings, settings FROM inbounds"):
     ib_id, stream_s, settings_s = r
@@ -5380,28 +5380,24 @@ for r in conn.execute("SELECT id, stream_settings, settings FROM inbounds"):
         s  = json.loads(settings_s)
     except:
         continue
-    network  = ss.get('network', 'tcp')
-    security = ss.get('security', 'none')
-    if not (security == 'reality' and network == 'tcp'):
+    if not (ss.get("security") == "reality" and ss.get("network") == "tcp"):
         continue
     changed = False
-    for client in s.get('clients', []):
-        if client.get('flow') != 'xtls-rprx-vision':
-            client['flow'] = 'xtls-rprx-vision'
+    for client in s.get("clients", []):
+        if client.get("flow") != "xtls-rprx-vision":
+            client["flow"] = "xtls-rprx-vision"
             changed = True
             fixed += 1
-            print(f"  ✓ {client.get('email','?')} → flow исправлен")
+            print("  OK: " + client.get("email","?") + " flow исправлен")
     if changed:
-        conn.execute("UPDATE inbounds SET settings=? WHERE id=?",
-                     (json.dumps(s), ib_id))
-
+        conn.execute("UPDATE inbounds SET settings=? WHERE id=?", (json.dumps(s), ib_id))
 conn.commit()
 conn.close()
-print(f"
-  Исправлено клиентов: {fixed}")
-PYEOF
+print("Исправлено: " + str(fixed))
+PYEOF2
             rm -f /dev/shm/uds2023.sock 2>/dev/null
             systemctl start x-ui
+            sleep 2
             sleep 2
             ;;
     esac
