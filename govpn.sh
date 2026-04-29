@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.47"
+VERSION="6.49"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5408,6 +5408,56 @@ PYEOF2
 #  ПЕРЕИМЕНОВАНИЕ INBOUND'ОВ (авто-флаг по выходному IP)
 # ═══════════════════════════════════════════════════════════════
 
+# Сохранить флаг сервера в конфиг
+_set_server_flag() {
+    local flag="$1"
+    mkdir -p /etc/govpn
+    if grep -q "^SERVER_FLAG=" /etc/govpn/config 2>/dev/null; then
+        sed -i "s|^SERVER_FLAG=.*|SERVER_FLAG=${flag}|" /etc/govpn/config
+    else
+        echo "SERVER_FLAG=${flag}" >> /etc/govpn/config
+    fi
+}
+
+# Получить сохранённый флаг сервера
+_get_server_flag() {
+    grep "^SERVER_FLAG=" /etc/govpn/config 2>/dev/null | cut -d= -f2 | tr -d '"'
+}
+
+# Выбор флага вручную
+_choose_flag_interactive() {
+    echo -e "
+  ${WHITE}Выберите флаг страны сервера:${NC}"
+    echo -e "  ${YELLOW}[1]${NC}  🇵🇹 Португалия"
+    echo -e "  ${YELLOW}[2]${NC}  🇫🇮 Финляндия"
+    echo -e "  ${YELLOW}[3]${NC}  🇳🇱 Нидерланды"
+    echo -e "  ${YELLOW}[4]${NC}  🇩🇪 Германия"
+    echo -e "  ${YELLOW}[5]${NC}  🇸🇪 Швеция"
+    echo -e "  ${YELLOW}[6]${NC}  🇫🇷 Франция"
+    echo -e "  ${YELLOW}[7]${NC}  🇬🇧 Великобритания"
+    echo -e "  ${YELLOW}[8]${NC}  🇺🇸 США"
+    echo -e "  ${YELLOW}[9]${NC}  🇷🇺 Россия"
+    echo -e "  ${YELLOW}[0]${NC}  Другой (ввести вручную)"
+    echo ""
+    local ch; ch=$(read_choice "Выбор: ")
+    local flag
+    case "$ch" in
+        1) flag="🇵🇹" ;;
+        2) flag="🇫🇮" ;;
+        3) flag="🇳🇱" ;;
+        4) flag="🇩🇪" ;;
+        5) flag="🇸🇪" ;;
+        6) flag="🇫🇷" ;;
+        7) flag="🇬🇧" ;;
+        8) flag="🇺🇸" ;;
+        9) flag="🇷🇺" ;;
+        0|*)
+            echo -ne "  Введите emoji флага: "; read -r flag < /dev/tty
+            ;;
+    esac
+    echo "$flag"
+}
+
 # Получить emoji флага по IP через ip-api.com
 _get_flag_by_ip() {
     local ip="$1"
@@ -5609,8 +5659,10 @@ conn.close()
         exit_ip=$(_get_inbound_exit_ip "$tag")
     fi
 
-    local flag; flag=$(_get_flag_by_ip "$exit_ip")
     local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
+    # Используем сохранённый флаг сервера или определяем автоматически
+    local flag; flag=$(_get_server_flag)
+    [ -z "$flag" ] && flag=$(_get_flag_by_ip "$exit_ip")
 
     # Формируем новый remark
     local new_remark
@@ -5638,6 +5690,22 @@ conn.close()
 _xui_rename_all() {
     clear
     echo -e "\n${CYAN}Автопереименование inbound-ов${NC}\n"
+
+    # Проверяем есть ли сохранённый флаг
+    local server_flag; server_flag=$(_get_server_flag)
+    if [ -z "$server_flag" ]; then
+        echo -e "  ${YELLOW}Флаг страны сервера не задан.${NC}"
+        server_flag=$(_choose_flag_interactive)
+        [ -n "$server_flag" ] && _set_server_flag "$server_flag"
+    else
+        echo -e "  ${WHITE}Флаг сервера: ${server_flag}${NC}"
+        local _yn; _yn=$(read_yn "  Использовать этот флаг? (y/n): ")
+        if [ "$_yn" != "y" ]; then
+            server_flag=$(_choose_flag_interactive)
+            [ -n "$server_flag" ] && _set_server_flag "$server_flag"
+        fi
+    fi
+    echo ""
     echo -e "  ${YELLOW}Определяю выходные IP...${NC}\n"
 
     # Получаем список всех inbound ID
@@ -5680,8 +5748,9 @@ conn.close()
         local tag="${info%%|*}"
         local proto="${info##*|}"
         local exit_ip; exit_ip=$(_get_inbound_exit_ip "$tag")
-        local flag; flag=$(_get_flag_by_ip "$exit_ip")
         local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
+        # Используем сохранённый флаг сервера
+        local flag="${server_flag:-🌐}"
 
         local new_remark
         if [ "$is_warp" = "yes" ]; then
@@ -5690,7 +5759,7 @@ conn.close()
             new_remark="${flag} ${proto}-_"
         fi
 
-        echo -e "  ${CYAN}#${ib_id}${NC}: ${new_remark}  ${YELLOW}← ${exit_ip}${NC}"
+        echo -e "  ${CYAN}#${ib_id}${NC}: ${new_remark}"
 
         python3 -c "
 import sqlite3
@@ -5709,6 +5778,162 @@ conn.close()
     read -p "  Enter..." < /dev/tty
 }
 
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ГРУППОВАЯ СМЕНА ФЛАГА INBOUND'ОВ
+# ═══════════════════════════════════════════════════════════════
+
+_xui_bulk_reflag() {
+    clear
+    echo -e "
+${CYAN}━━━ Групповая смена флага ━━━${NC}
+"
+
+    # Показываем текущие inbound'ы
+    echo -e "  ${WHITE}Текущие inbound'ы:${NC}
+"
+    python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id, remark, port FROM inbounds ORDER BY id').fetchall()
+for idx, (ib_id, remark, port) in enumerate(rows, 1):
+    loc = str(port) if port else 'UDS'
+    print(f'  [{idx}] #{ib_id} {remark}  :{loc}')
+conn.close()
+" 2>/dev/null
+
+    echo ""
+    echo -e "  ${WHITE}Выберите inbound'ы для смены флага:${NC}"
+    echo -e "  ${YELLOW}Введите номера через пробел (например: 1 3 5)${NC}"
+    echo -e "  ${YELLOW}или 'all' для всех${NC}"
+    echo ""
+    echo -ne "  Номера: "; read -r selection < /dev/tty
+    [ -z "$selection" ] && return
+
+    # Выбор флага
+    echo -e "
+  ${WHITE}Выберите новый флаг:${NC}"
+    echo -e "  ${YELLOW}[1]${NC}  🇵🇹 Португалия    ${YELLOW}[2]${NC}  🇫🇮 Финляндия"
+    echo -e "  ${YELLOW}[3]${NC}  🇳🇱 Нидерланды    ${YELLOW}[4]${NC}  🇩🇪 Германия"
+    echo -e "  ${YELLOW}[5]${NC}  🇸🇪 Швеция        ${YELLOW}[6]${NC}  🇫🇷 Франция"
+    echo -e "  ${YELLOW}[7]${NC}  🇬🇧 Великобритания ${YELLOW}[8]${NC}  🇺🇸 США"
+    echo -e "  ${YELLOW}[9]${NC}  🇷🇺 Россия        ${YELLOW}[10]${NC} 🇸🇪 Швеция"
+    echo -e "  ${YELLOW}[11]${NC} 🇨🇿 Чехия         ${YELLOW}[12]${NC} 🇵🇱 Польша"
+    echo -e "  ${YELLOW}[13]${NC} 🇦🇹 Австрия       ${YELLOW}[14]${NC} 🇨🇭 Швейцария"
+    echo -e "  ${YELLOW}[15]${NC} 🇱🇹 Литва         ${YELLOW}[16]${NC} 🇱🇻 Латвия"
+    echo -e "  ${YELLOW}[17]${NC} 🇪🇪 Эстония       ${YELLOW}[18]${NC} 🇷🇴 Румыния"
+    echo -e "  ${YELLOW}[19]${NC} 🇧🇬 Болгария      ${YELLOW}[20]${NC} 🇺🇦 Украина"
+    echo -e "  ${YELLOW}[0]${NC}  Ввести вручную"
+    echo ""
+    local fch; fch=$(read_choice "Выбор флага: ")
+
+    local new_flag
+    case "$fch" in
+        1)  new_flag="🇵🇹" ;;
+        2)  new_flag="🇫🇮" ;;
+        3)  new_flag="🇳🇱" ;;
+        4)  new_flag="🇩🇪" ;;
+        5)  new_flag="🇸🇪" ;;
+        6)  new_flag="🇫🇷" ;;
+        7)  new_flag="🇬🇧" ;;
+        8)  new_flag="🇺🇸" ;;
+        9)  new_flag="🇷🇺" ;;
+        10) new_flag="🇸🇪" ;;
+        11) new_flag="🇨🇿" ;;
+        12) new_flag="🇵🇱" ;;
+        13) new_flag="🇦🇹" ;;
+        14) new_flag="🇨🇭" ;;
+        15) new_flag="🇱🇹" ;;
+        16) new_flag="🇱🇻" ;;
+        17) new_flag="🇪🇪" ;;
+        18) new_flag="🇷🇴" ;;
+        19) new_flag="🇧🇬" ;;
+        20) new_flag="🇺🇦" ;;
+        0|*)
+            echo -ne "  Введите emoji флага: "; read -r new_flag < /dev/tty
+            ;;
+    esac
+
+    [ -z "$new_flag" ] && return
+
+    # Получаем ID для обновления
+    local ids_to_update
+    if [ "$selection" = "all" ] || [ "$selection" = "все" ]; then
+        ids_to_update=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+for r in conn.execute('SELECT id FROM inbounds ORDER BY id'):
+    print(r[0])
+conn.close()
+" 2>/dev/null)
+    else
+        # Конвертируем порядковые номера в ID
+        ids_to_update=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id FROM inbounds ORDER BY id').fetchall()
+selected = [int(x)-1 for x in '${selection}'.split() if x.isdigit()]
+for i in selected:
+    if 0 <= i < len(rows):
+        print(rows[i][0])
+conn.close()
+" 2>/dev/null)
+    fi
+
+    [ -z "$ids_to_update" ] && { echo -e "  ${RED}Нет inbound'ов для обновления${NC}"; return; }
+
+    # Подтверждение
+    echo -e "
+  ${WHITE}Будет изменён флаг на ${new_flag} для inbound'ов:${NC}"
+    for ib_id in $ids_to_update; do
+        local remark; remark=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+r = conn.execute('SELECT remark FROM inbounds WHERE id=?', ($ib_id,)).fetchone()
+print(r[0] if r else '?')
+conn.close()
+" 2>/dev/null)
+        echo -e "  ${CYAN}#${ib_id}${NC} ${remark}"
+    done
+
+    echo ""
+    local _yn; _yn=$(read_yn "  Подтвердить? (y/n): ")
+    [ "$_yn" != "y" ] && return
+
+    # Применяем
+    systemctl stop x-ui 2>/dev/null
+    sleep 1
+
+    for ib_id in $ids_to_update; do
+        python3 -c "
+import sqlite3, re
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+r = conn.execute('SELECT remark FROM inbounds WHERE id=?', ($ib_id,)).fetchone()
+if not r: conn.close(); exit()
+remark = r[0]
+# Заменяем флаг в начале remark (любой emoji флаг)
+# Флаг = два региональных индикатора или обычный emoji
+new_remark = re.sub(r'^[🇠-🇿]{2}|^[^\s]+', '${new_flag}', remark, count=1)
+conn.execute('UPDATE inbounds SET remark=? WHERE id=?', (new_remark, $ib_id))
+conn.commit()
+print(f'  #{$ib_id}: {remark} -> {new_remark}')
+conn.close()
+" 2>/dev/null
+    done
+
+    rm -f /dev/shm/uds2023.sock 2>/dev/null
+    systemctl start x-ui
+    sleep 2
+    echo -e "
+  ${GREEN}✓ Флаги обновлены${NC}"
+    read -p "  Enter..." < /dev/tty
+}
 
 # Меню переименования
 _xui_rename_menu() {
@@ -5729,6 +5954,7 @@ RNEOF
         python3 /tmp/_xui_rename_list.py 2>/dev/null
         echo ""
         echo -e "  ${YELLOW}[a]${NC}  Переименовать все автоматически"
+        echo -e "  ${YELLOW}[f]${NC}  Сменить флаг группой ${CYAN}(если авто неверно)${NC}"
         echo -e "  ${YELLOW}[номер]${NC}  Переименовать один inbound"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -5737,6 +5963,7 @@ RNEOF
         case "$ch" in
             0|"") return ;;
             a|A|а|А) _xui_rename_all ;;
+            f|F|ф|Ф) _xui_bulk_reflag ;;
             *)
                 # Выбор по порядковому номеру
                 # Выбор по порядковому номеру
