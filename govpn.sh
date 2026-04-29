@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.46"
+VERSION="6.47"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5449,9 +5449,10 @@ try:
     # Пробуем несколько сервисов для точного определения страны
     cc = ''
     services = [
-        ('http://ip-api.com/json/${ip}?fields=countryCode', lambda d: d.get('countryCode','')),
         ('https://ipwho.is/${ip}', lambda d: d.get('country_code','')),
+        ('http://ip-api.com/json/${ip}?fields=countryCode', lambda d: d.get('countryCode','')),
         ('https://ipinfo.io/${ip}/json', lambda d: d.get('country','')),
+        ('https://freeipapi.com/api/json/${ip}', lambda d: d.get('countryCode','')),
     ]
     for url, getter in services:
         try:
@@ -5574,78 +5575,42 @@ except: print('no')
 # Переименовать один inbound
 _xui_rename_one() {
     local ib_id="$1"
-    local exit_ip="$2"  # если пустой — определяем автоматически
+    local exit_ip="$2"
 
-    python3 << PYEOF
-import sqlite3, json, subprocess, sys
-
-XUIDB = '/etc/x-ui/x-ui.db'
-conn = sqlite3.connect(XUIDB, timeout=30)
-conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-
-row = conn.execute('SELECT id, remark, port, protocol, stream_settings, tag FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
-if not row:
-    print("Inbound не найден"); conn.close(); exit(1)
-
-ib_id, remark, port, protocol, stream_s, tag = row
-ss = json.loads(stream_s)
-network = ss.get('network', 'tcp')
-
-# Протокол
-if network == 'tcp' and protocol == 'trojan':
-    proto = 'TCP(trojan)'
-elif network == 'tcp':
-    proto = 'TCP'
-elif network == 'xhttp':
-    proto = 'xHTTP'
-elif network == 'grpc':
-    proto = 'gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP'
-elif network == 'ws':
-    proto = 'WS'
-else:
-    proto = network.upper()
-
-print(f"id={ib_id} proto={proto} network={network} tag={tag}")
-conn.close()
-PYEOF
-
-    if [ $? -ne 0 ]; then return 1; fi
-
-    # Получаем exit IP
-    local tag; tag=$(python3 -c "
+    # Получаем данные об inbound
+    local tag proto
+    tag=$(python3 -c "
 import sqlite3, json
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-r = conn.execute('SELECT tag FROM inbounds WHERE id=${ib_id}').fetchone()
-print(r[0] if r else '')
+r = conn.execute('SELECT tag, protocol, stream_settings FROM inbounds WHERE id=?', ($ib_id,)).fetchone()
+if not r: conn.close(); exit(1)
+tag, protocol, stream_s = r
+ss = json.loads(stream_s)
+network = ss.get('network','tcp')
+remark = conn.execute('SELECT remark FROM inbounds WHERE id=?', ($ib_id,)).fetchone()[0]
+if network == 'tcp' and protocol == 'trojan': proto = 'TCP(trojan)'
+elif network == 'tcp': proto = 'TCP'
+elif network == 'xhttp': proto = 'xHTTP'
+elif network == 'grpc': proto = 'gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP'
+elif network == 'ws': proto = 'WS'
+else: proto = network.upper()
+print(tag + '|' + proto)
 conn.close()
 " 2>/dev/null)
 
+    [ -z "$tag" ] && { echo -e "  ${RED}Inbound не найден${NC}"; return 1; }
+
+    proto="${tag##*|}"
+    tag="${tag%%|*}"
+
+    # Определяем exit IP
     if [ -z "$exit_ip" ]; then
         exit_ip=$(_get_inbound_exit_ip "$tag")
     fi
 
     local flag; flag=$(_get_flag_by_ip "$exit_ip")
     local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
-
-    # Получаем протокол
-    local proto; proto=$(python3 -c "
-import sqlite3, json
-conn = sqlite3.connect('/etc/x-ui/x-ui.db')
-conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-row = conn.execute('SELECT remark, protocol, stream_settings FROM inbounds WHERE id=${ib_id}').fetchone()
-if not row: conn.close(); exit()
-remark, protocol, stream_s = row
-ss = json.loads(stream_s)
-network = ss.get('network','tcp')
-if network == 'tcp' and protocol == 'trojan': print('TCP(trojan)')
-elif network == 'tcp': print('TCP')
-elif network == 'xhttp': print('xHTTP')
-elif network == 'grpc': print('gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP')
-elif network == 'ws': print('WS')
-else: print(network.upper())
-conn.close()
-" 2>/dev/null)
 
     # Формируем новый remark
     local new_remark
@@ -5658,31 +5623,24 @@ conn.close()
     echo -e "  ${CYAN}#${ib_id}${NC}: ${WHITE}→${NC} ${GREEN}${new_remark}${NC}  ${YELLOW}(exit: ${exit_ip})${NC}"
 
     # Обновляем в БД
-    systemctl stop x-ui
-    sleep 1
     python3 -c "
 import sqlite3
 conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-conn.execute('UPDATE inbounds SET remark=? WHERE id=?', ('${new_remark}', ${ib_id}))
+conn.execute('UPDATE inbounds SET remark=? WHERE id=?', ('$new_remark', $ib_id))
 conn.commit()
 conn.close()
-print('OK')
 " 2>/dev/null
-    rm -f /dev/shm/uds2023.sock 2>/dev/null
-    systemctl start x-ui
 }
+
 
 # Переименовать все inbound'ы
 _xui_rename_all() {
     clear
-    echo -e "
-${CYAN}━━━ Автопереименование inbound'ов ━━━${NC}
-"
-    echo -e "  ${YELLOW}Определяю выходные IP для каждого inbound...${NC}
-"
+    echo -e "\n${CYAN}Автопереименование inbound-ов${NC}\n"
+    echo -e "  ${YELLOW}Определяю выходные IP...${NC}\n"
 
-    # Получаем список всех inbound'ов
+    # Получаем список всех inbound ID
     local ids; ids=$(python3 -c "
 import sqlite3
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
@@ -5692,37 +5650,38 @@ for r in conn.execute('SELECT id FROM inbounds ORDER BY id'):
 conn.close()
 " 2>/dev/null)
 
-    local first_restart=true
-    for ib_id in $ids; do
-        local tag; tag=$(python3 -c "
-import sqlite3
-conn = sqlite3.connect('/etc/x-ui/x-ui.db')
-conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-r = conn.execute('SELECT tag FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
-print(r[0] if r else '')
-conn.close()
-" 2>/dev/null)
-        local exit_ip; exit_ip=$(_get_inbound_exit_ip "$tag")
-        local flag; flag=$(_get_flag_by_ip "$exit_ip")
-        local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
+    # Останавливаем x-ui для обновления БД
+    systemctl stop x-ui 2>/dev/null
+    sleep 1
 
-        local proto; proto=$(python3 -c "
+    for ib_id in $ids; do
+        # Получаем данные через отдельный скрипт
+        local info; info=$(python3 -c "
 import sqlite3, json
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-row = conn.execute('SELECT remark, protocol, stream_settings FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
-if not row: conn.close(); exit()
-remark, protocol, stream_s = row
+r = conn.execute('SELECT tag, protocol, stream_settings, remark FROM inbounds WHERE id=?', ($ib_id,)).fetchone()
+if not r: conn.close(); exit()
+tag, protocol, stream_s, remark = r
 ss = json.loads(stream_s)
 network = ss.get('network','tcp')
-if network == 'tcp' and protocol == 'trojan': print('TCP(trojan)')
-elif network == 'tcp': print('TCP')
-elif network == 'xhttp': print('xHTTP')
-elif network == 'grpc': print('gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP')
-elif network == 'ws': print('WS')
-else: print(network.upper())
+if network == 'tcp' and protocol == 'trojan': proto = 'TCP(trojan)'
+elif network == 'tcp': proto = 'TCP'
+elif network == 'xhttp': proto = 'xHTTP'
+elif network == 'grpc': proto = 'gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP'
+elif network == 'ws': proto = 'WS'
+else: proto = network.upper()
+print(tag + '|' + proto)
 conn.close()
 " 2>/dev/null)
+
+        [ -z "$info" ] && continue
+
+        local tag="${info%%|*}"
+        local proto="${info##*|}"
+        local exit_ip; exit_ip=$(_get_inbound_exit_ip "$tag")
+        local flag; flag=$(_get_flag_by_ip "$exit_ip")
+        local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
 
         local new_remark
         if [ "$is_warp" = "yes" ]; then
@@ -5737,40 +5696,37 @@ conn.close()
 import sqlite3
 conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-conn.execute('UPDATE inbounds SET remark=? WHERE id=?', ('${new_remark}', ${ib_id}))
+conn.execute('UPDATE inbounds SET remark=? WHERE id=?', ('$new_remark', $ib_id))
 conn.commit()
 conn.close()
 " 2>/dev/null
     done
 
-    echo ""
     rm -f /dev/shm/uds2023.sock 2>/dev/null
-    systemctl restart x-ui
+    systemctl start x-ui
     sleep 2
-    echo -e "  ${GREEN}✓ Все inbound'ы переименованы${NC}"
-    read -p "  Enter для продолжения..." < /dev/tty
+    echo -e "\n  ${GREEN}OK — все inbound-ы переименованы${NC}"
+    read -p "  Enter..." < /dev/tty
 }
+
 
 # Меню переименования
 _xui_rename_menu() {
     while true; do
         clear
-        echo -e "
-${CYAN}━━━ Переименование inbound'ов ━━━${NC}
-"
-
+        echo -e "\n${CYAN}━━━ Переименование inbound-ов ━━━${NC}\n"
         # Показываем текущие
-        python3 << 'PYEOF' 2>/dev/null
+        cat > /tmp/_xui_rename_list.py << 'RNEOF'
 import sqlite3, json
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
 conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 rows = conn.execute("SELECT id, remark, port, listen FROM inbounds ORDER BY id").fetchall()
 for idx, (ib_id, remark, port, listen) in enumerate(rows, 1):
-    loc = f":{port}" if port else "UDS"
-    print(f"  [{idx}] #{ib_id} {remark}  {loc}")
+    loc = str(port) if port else "UDS"
+    print("  [" + str(idx) + "] #" + str(ib_id) + " " + remark + "  :" + loc)
 conn.close()
-PYEOF
-
+RNEOF
+        python3 /tmp/_xui_rename_list.py 2>/dev/null
         echo ""
         echo -e "  ${YELLOW}[a]${NC}  Переименовать все автоматически"
         echo -e "  ${YELLOW}[номер]${NC}  Переименовать один inbound"
@@ -5783,13 +5739,14 @@ PYEOF
             a|A|а|А) _xui_rename_all ;;
             *)
                 # Выбор по порядковому номеру
+                # Выбор по порядковому номеру
                 local ib_id; ib_id=$(python3 -c "
 import sqlite3
-conn = sqlite3.connect('/etc/x-ui/x-ui.db')
-conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
-rows = conn.execute('SELECT id FROM inbounds ORDER BY id').fetchall()
+conn = sqlite3.connect(\"/etc/x-ui/x-ui.db\")
+conn.text_factory = lambda b: b.decode(\"utf-8\", errors=\"surrogateescape\")
+rows = conn.execute(\"SELECT id FROM inbounds ORDER BY id\").fetchall()
 idx = ${ch} - 1
-print(rows[idx][0] if 0 <= idx < len(rows) else '')
+print(rows[idx][0] if 0 <= idx < len(rows) else \"\")
 conn.close()
 " 2>/dev/null)
                 [ -n "$ib_id" ] && _xui_rename_one "$ib_id" ""
