@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.45"
+VERSION="6.46"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6317,17 +6317,18 @@ conn.close()
 PYEOF
 
         echo ""
-        echo -e "  ${WHITE}── Создать ─────────────────────────${NC}"
-        echo -e "  ${YELLOW}[1]${NC}  Reality TCP  ${GREEN}(самый скрытный)${NC}"
-        echo -e "  ${YELLOW}[2]${NC}  xHTTP        ${CYAN}(через Unix socket → nginx)${NC}"
-        echo -e "  ${YELLOW}[3]${NC}  gRPC         ${YELLOW}(deprecated, но работает)${NC}"
-        echo -e "  ${WHITE}── Управление ──────────────────────${NC}"
-        echo -e "  ${CYAN}[4]${NC}  Добавить клиента в inbound"
-        echo -e "  ${CYAN}[5]${NC}  Показать ссылки inbound'а"
-        echo -e "  ${YELLOW}[7]${NC}  Диагностика и починка inbound'а"
-        echo -e "  ${RED}[6]${NC}  Удалить inbound"
-        echo -e "  ${YELLOW}[r]${NC}  Переименовать inbound'ы (авто-флаг)"
-        echo -e "  ${CYAN}[c]${NC}  Проверить клиентов (IP лимиты + Flow)"
+        echo -e "  ${WHITE}── 📡 Создать inbound ───────────────${NC}"
+        echo -e "  ${YELLOW}[1]${NC}  Reality TCP     ${GREEN}★ самый скрытный${NC}"
+        echo -e "  ${YELLOW}[2]${NC}  xHTTP           ${CYAN}Unix socket → nginx${NC}"
+        echo -e "  ${YELLOW}[3]${NC}  gRPC            ${YELLOW}(deprecated)${NC}"
+        echo -e "  ${WHITE}── 👤 Клиенты ───────────────────────${NC}"
+        echo -e "  ${CYAN}[4]${NC}  Добавить клиента"
+        echo -e "  ${CYAN}[5]${NC}  Показать ссылки"
+        echo -e "  ${CYAN}[6]${NC}  Проверить клиентов ${YELLOW}(IP лимиты + Flow)${NC}"
+        echo -e "  ${WHITE}── 🔧 Управление ────────────────────${NC}"
+        echo -e "  ${YELLOW}[7]${NC}  Диагностика и починка"
+        echo -e "  ${YELLOW}[8]${NC}  Переименовать ${CYAN}(авто-флаг по IP)${NC}"
+        echo -e "  ${RED}[9]${NC}  Удалить inbound"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -6338,10 +6339,10 @@ PYEOF
             3) _xui_create_grpc ;;
             4) _xui_add_client_to_existing ;;
             5) _xui_show_links ;;
-            6) _xui_delete_inbound ;;
+            6) _xui_check_clients ;;
             7) _xui_diagnose_fix ;;
-            r|R|р|Р) _xui_rename_menu ;;
-            c|C|с|С) _xui_check_clients ;;
+            8) _xui_rename_menu ;;
+            9) _xui_delete_inbound ;;
             0|"") return ;;
         esac
     done
