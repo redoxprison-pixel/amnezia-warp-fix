@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.40"
+VERSION="6.41"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5200,13 +5200,13 @@ ${CYAN}━━━ Проверка клиентов x-ui ━━━${NC}
     echo -e "  ${YELLOW}Анализирую клиентов...${NC}
 "
 
-    python3 << 'PYEOF'
+    cat > /tmp/_xui_check.py << 'PYEOF'
 import sqlite3, json, sys
 from datetime import datetime
 
-XUIDB = '/etc/x-ui/x-ui.db'
+XUIDB = "/etc/x-ui/x-ui.db"
 conn = sqlite3.connect(XUIDB)
-conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
 
 GREEN  = '[0;32m'
 RED    = '[0;31m'
@@ -5318,41 +5318,39 @@ for ib_id, ib in inbounds.items():
             ok_count += 1
 
 # Вывод
-    total_str = "  Всего клиентов: " + str(total_clients) + "  |  OK: " + str(ok_count) + "  |  Проблем: " + str(len(problems))
-    print(total_str)
+    print("  Всего клиентов: " + str(total_clients) + "  |  OK: " + str(ok_count) + "  |  Проблем: " + str(len(problems)))
     print()
-")
 
-if not problems:
-    print(f"  {GREEN}✅ Все клиенты в порядке{NC}")
-else:
-    # Сначала критические (issues), потом предупреждения (warns)
-    critical = [p for p in problems if p['issues']]
-    warnings = [p for p in problems if not p['issues'] and p['warns']]
+    if not problems:
+        print("  " + GREEN + "OK — нарушений не найдено" + NC)
+    else:
+        critical = [p for p in problems if p['issues']]
+        warnings = [p for p in problems if not p['issues'] and p['warns']]
 
-    if critical:
-        print(f"  {RED}━━━ Критические проблемы ({len(critical)}) ━━━{NC}
-")
-        for p in critical:
-            print(f"  {RED}●{NC} {WHITE}{p['email']}{NC}  {CYAN}[{p['inbound']}]{NC}")
-            for issue in p['issues']:
-                print(f"    {RED}✗{NC} {issue}")
-            if p['warns']:
+        if critical:
+            print("  " + RED + "Критические проблемы (" + str(len(critical)) + "):" + NC)
+            print()
+            for p in critical:
+                print("  " + RED + "●" + NC + " " + WHITE + p['email'] + NC + "  " + CYAN + "[" + p['inbound'] + "]" + NC)
+                for issue in p['issues']:
+                    print("    " + RED + "x" + NC + " " + issue)
+                if p['warns']:
+                    for w in p['warns']:
+                        print("    " + YELLOW + "!" + NC + " " + w)
+                print()
+
+        if warnings:
+            print("  " + YELLOW + "Предупреждения (" + str(len(warnings)) + "):" + NC)
+            print()
+            for p in warnings:
+                print("  " + YELLOW + "!" + NC + " " + WHITE + p['email'] + NC + "  " + CYAN + "[" + p['inbound'] + "]" + NC)
                 for w in p['warns']:
-                    print(f"    {YELLOW}⚠{NC} {w}")
-            print()
+                    print("    " + YELLOW + "!" + NC + " " + w)
+                print()
 
-    if warnings:
-        print(f"  {YELLOW}━━━ Предупреждения ({len(warnings)}) ━━━{NC}
-")
-        for p in warnings:
-            print(f"  {YELLOW}●{NC} {WHITE}{p['email']}{NC}  {CYAN}[{p['inbound']}]{NC}")
-            for w in p['warns']:
-                print(f"    {YELLOW}⚠{NC} {w}")
-            print()
-
-conn.close()
+    conn.close()
 PYEOF
+    python3 /tmp/_xui_check.py
 
     echo ""
     echo -e "  ${WHITE}── Действия ─────────────────────────${NC}"
@@ -5367,12 +5365,12 @@ PYEOF
   ${CYAN}Исправляю Flow для Reality клиентов...${NC}"
             systemctl stop x-ui
             sleep 1
-            python3 << 'PYEOF'
+            cat > /tmp/_xui_fix_flow.py << 'PYEOF'
 import sqlite3, json
 
-XUIDB = '/etc/x-ui/x-ui.db'
+XUIDB = "/etc/x-ui/x-ui.db"
 conn = sqlite3.connect(XUIDB, timeout=30)
-conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
 
 fixed = 0
 for r in conn.execute("SELECT id, stream_settings, settings FROM inbounds"):
