@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.37"
+VERSION="6.39"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5186,6 +5186,357 @@ _3xui_yukikras_info() {
     read -p "  Enter..." < /dev/tty
 }
 
+
+# ═══════════════════════════════════════════════════════════════
+#  ПЕРЕИМЕНОВАНИЕ INBOUND'ОВ (авто-флаг по выходному IP)
+# ═══════════════════════════════════════════════════════════════
+
+# Получить emoji флага по IP через ip-api.com
+_get_flag_by_ip() {
+    local ip="$1"
+    python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('http://ip-api.com/json/${ip}?fields=countryCode', timeout=5)
+    d = json.loads(r.read())
+    cc = d.get('countryCode','')
+    # Конвертируем код страны в emoji флага
+    flag = ''.join(chr(0x1F1E0 + ord(c) - ord('A')) for c in cc.upper()) if len(cc)==2 else '🌐'
+    print(flag)
+except: print('🌐')
+" 2>/dev/null
+}
+
+# Определить протокол inbound по network/protocol
+_get_proto_label() {
+    local protocol="$1"
+    local network="$2"
+    local remark="$3"
+
+    case "$network" in
+        tcp)
+            if [[ "$protocol" == "trojan" ]]; then
+                echo "TCP(trojan)"
+            else
+                echo "TCP"
+            fi
+            ;;
+        xhttp) echo "xHTTP" ;;
+        grpc)
+            if echo "$remark" | grep -qi "trojan"; then
+                echo "gRCP(trojan)"
+            else
+                echo "gRCP"
+            fi
+            ;;
+        ws)   echo "WS" ;;
+        h2)   echo "H2" ;;
+        quic) echo "QUIC" ;;
+        *)    echo "$network" ;;
+    esac
+}
+
+# Определить выходной IP для inbound через xray outbound
+_get_inbound_exit_ip() {
+    local inbound_tag="$1"
+    # Смотрим routing правила
+    local outbound_tag
+    outbound_tag=$(python3 -c "
+import json
+try:
+    d = json.load(open('/usr/local/x-ui/bin/config.json'))
+    for r in d.get('routing',{}).get('rules',[]):
+        tags = r.get('inboundTag', [])
+        if '${inbound_tag}' in tags:
+            print(r.get('outboundTag','direct'))
+            break
+    else:
+        print('direct')
+except: print('direct')
+" 2>/dev/null)
+
+    # Определяем IP для каждого outbound
+    case "$outbound_tag" in
+        direct|"")
+            # Прямой выход — IP сервера
+            echo "$MY_IP"
+            ;;
+        *[Ww][Aa][Rr][Pp]*|*warp*)
+            # WARP — Cloudflare IP
+            curl -s --max-time 5 --interface warp https://ifconfig.me 2>/dev/null ||             curl -s --max-time 5 --proxy socks5://127.0.0.1:40000 https://ifconfig.me 2>/dev/null ||             echo "104.28.0.1"
+            ;;
+        *[Bb]ridge*|*bridge*)
+            # Bridge — IP удалённого сервера
+            python3 -c "
+import json
+try:
+    d = json.load(open('/usr/local/x-ui/bin/config.json'))
+    for o in d.get('outbounds',[]):
+        if o.get('tag','') == '${outbound_tag}':
+            addr = o.get('settings',{}).get('address','')
+            # Резолвим домен если нужно
+            import socket
+            try:
+                ip = socket.gethostbyname(addr)
+                print(ip)
+            except:
+                print(addr)
+            break
+except: print('')
+" 2>/dev/null
+            ;;
+        *)
+            echo "$MY_IP"
+            ;;
+    esac
+}
+
+# Проверить является ли IP адресом WARP/Cloudflare
+_is_warp_ip() {
+    local ip="$1"
+    # Cloudflare диапазоны: 104.16.0.0/12, 172.64.0.0/13, 162.158.0.0/15
+    python3 -c "
+import ipaddress
+try:
+    ip = ipaddress.ip_address('${ip}')
+    warp_ranges = ['104.16.0.0/12', '172.64.0.0/13', '162.158.0.0/15',
+                   '104.24.0.0/14', '198.41.128.0/17']
+    for r in warp_ranges:
+        if ip in ipaddress.ip_network(r):
+            print('yes'); exit()
+    print('no')
+except: print('no')
+" 2>/dev/null
+}
+
+# Переименовать один inbound
+_xui_rename_one() {
+    local ib_id="$1"
+    local exit_ip="$2"  # если пустой — определяем автоматически
+
+    python3 << PYEOF
+import sqlite3, json, subprocess, sys
+
+XUIDB = '/etc/x-ui/x-ui.db'
+conn = sqlite3.connect(XUIDB, timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+
+row = conn.execute('SELECT id, remark, port, protocol, stream_settings, tag FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+if not row:
+    print("Inbound не найден"); conn.close(); exit(1)
+
+ib_id, remark, port, protocol, stream_s, tag = row
+ss = json.loads(stream_s)
+network = ss.get('network', 'tcp')
+
+# Протокол
+if network == 'tcp' and protocol == 'trojan':
+    proto = 'TCP(trojan)'
+elif network == 'tcp':
+    proto = 'TCP'
+elif network == 'xhttp':
+    proto = 'xHTTP'
+elif network == 'grpc':
+    proto = 'gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP'
+elif network == 'ws':
+    proto = 'WS'
+else:
+    proto = network.upper()
+
+print(f"id={ib_id} proto={proto} network={network} tag={tag}")
+conn.close()
+PYEOF
+
+    if [ $? -ne 0 ]; then return 1; fi
+
+    # Получаем exit IP
+    local tag; tag=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+r = conn.execute('SELECT tag FROM inbounds WHERE id=${ib_id}').fetchone()
+print(r[0] if r else '')
+conn.close()
+" 2>/dev/null)
+
+    if [ -z "$exit_ip" ]; then
+        exit_ip=$(_get_inbound_exit_ip "$tag")
+    fi
+
+    local flag; flag=$(_get_flag_by_ip "$exit_ip")
+    local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
+
+    # Получаем протокол
+    local proto; proto=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT remark, protocol, stream_settings FROM inbounds WHERE id=${ib_id}').fetchone()
+if not row: conn.close(); exit()
+remark, protocol, stream_s = row
+ss = json.loads(stream_s)
+network = ss.get('network','tcp')
+if network == 'tcp' and protocol == 'trojan': print('TCP(trojan)')
+elif network == 'tcp': print('TCP')
+elif network == 'xhttp': print('xHTTP')
+elif network == 'grpc': print('gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP')
+elif network == 'ws': print('WS')
+else: print(network.upper())
+conn.close()
+" 2>/dev/null)
+
+    # Формируем новый remark
+    local new_remark
+    if [ "$is_warp" = "yes" ]; then
+        new_remark="${flag} ${proto}(warp)-_"
+    else
+        new_remark="${flag} ${proto}-_"
+    fi
+
+    echo -e "  ${CYAN}#${ib_id}${NC}: ${WHITE}→${NC} ${GREEN}${new_remark}${NC}  ${YELLOW}(exit: ${exit_ip})${NC}"
+
+    # Обновляем в БД
+    systemctl stop x-ui
+    sleep 1
+    python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.execute('UPDATE inbounds SET remark=? WHERE id=?', ('${new_remark}', ${ib_id}))
+conn.commit()
+conn.close()
+print('OK')
+" 2>/dev/null
+    rm -f /dev/shm/uds2023.sock 2>/dev/null
+    systemctl start x-ui
+}
+
+# Переименовать все inbound'ы
+_xui_rename_all() {
+    clear
+    echo -e "
+${CYAN}━━━ Автопереименование inbound'ов ━━━${NC}
+"
+    echo -e "  ${YELLOW}Определяю выходные IP для каждого inbound...${NC}
+"
+
+    # Получаем список всех inbound'ов
+    local ids; ids=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+for r in conn.execute('SELECT id FROM inbounds ORDER BY id'):
+    print(r[0])
+conn.close()
+" 2>/dev/null)
+
+    local first_restart=true
+    for ib_id in $ids; do
+        local tag; tag=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+r = conn.execute('SELECT tag FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+print(r[0] if r else '')
+conn.close()
+" 2>/dev/null)
+        local exit_ip; exit_ip=$(_get_inbound_exit_ip "$tag")
+        local flag; flag=$(_get_flag_by_ip "$exit_ip")
+        local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
+
+        local proto; proto=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT remark, protocol, stream_settings FROM inbounds WHERE id=?', (${ib_id},)).fetchone()
+if not row: conn.close(); exit()
+remark, protocol, stream_s = row
+ss = json.loads(stream_s)
+network = ss.get('network','tcp')
+if network == 'tcp' and protocol == 'trojan': print('TCP(trojan)')
+elif network == 'tcp': print('TCP')
+elif network == 'xhttp': print('xHTTP')
+elif network == 'grpc': print('gRCP(trojan)' if 'trojan' in remark.lower() else 'gRCP')
+elif network == 'ws': print('WS')
+else: print(network.upper())
+conn.close()
+" 2>/dev/null)
+
+        local new_remark
+        if [ "$is_warp" = "yes" ]; then
+            new_remark="${flag} ${proto}(warp)-_"
+        else
+            new_remark="${flag} ${proto}-_"
+        fi
+
+        echo -e "  ${CYAN}#${ib_id}${NC}: ${new_remark}  ${YELLOW}← ${exit_ip}${NC}"
+
+        python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+conn.execute('UPDATE inbounds SET remark=? WHERE id=?', ('${new_remark}', ${ib_id}))
+conn.commit()
+conn.close()
+" 2>/dev/null
+    done
+
+    echo ""
+    rm -f /dev/shm/uds2023.sock 2>/dev/null
+    systemctl restart x-ui
+    sleep 2
+    echo -e "  ${GREEN}✓ Все inbound'ы переименованы${NC}"
+    read -p "  Enter для продолжения..." < /dev/tty
+}
+
+# Меню переименования
+_xui_rename_menu() {
+    while true; do
+        clear
+        echo -e "
+${CYAN}━━━ Переименование inbound'ов ━━━${NC}
+"
+
+        # Показываем текущие
+        python3 << 'PYEOF' 2>/dev/null
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute("SELECT id, remark, port, listen FROM inbounds ORDER BY id").fetchall()
+for idx, (ib_id, remark, port, listen) in enumerate(rows, 1):
+    loc = f":{port}" if port else "UDS"
+    print(f"  [{idx}] #{ib_id} {remark}  {loc}")
+conn.close()
+PYEOF
+
+        echo ""
+        echo -e "  ${YELLOW}[a]${NC}  Переименовать все автоматически"
+        echo -e "  ${YELLOW}[номер]${NC}  Переименовать один inbound"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+
+        case "$ch" in
+            0|"") return ;;
+            a|A|а|А) _xui_rename_all ;;
+            *)
+                # Выбор по порядковому номеру
+                local ib_id; ib_id=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id FROM inbounds ORDER BY id').fetchall()
+idx = ${ch} - 1
+print(rows[idx][0] if 0 <= idx < len(rows) else '')
+conn.close()
+" 2>/dev/null)
+                [ -n "$ib_id" ] && _xui_rename_one "$ib_id" ""
+                sleep 2
+                ;;
+        esac
+    done
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  СОЗДАНИЕ INBOUND'ОВ (x-ui-pro структура)
 # ═══════════════════════════════════════════════════════════════
@@ -5491,7 +5842,16 @@ _xui_create_xhttp() {
     local domain; domain=$(_xui_get_domain)
     domain="${domain:-your-domain.com}"
 
-    local xhttp_path; xhttp_path=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 10)
+    # Проверяем nginx конфиг — есть ли уже настроенный path для xHTTP
+    local xhttp_path
+    local nginx_xhttp_path
+    nginx_xhttp_path=$(grep -r "grpc_pass.*uds2023\|proxy_pass.*uds2023" /etc/nginx/ 2>/dev/null |         grep -oP "location \K/[a-zA-Z0-9]+" | head -1)
+    if [ -n "$nginx_xhttp_path" ]; then
+        xhttp_path="${nginx_xhttp_path#/}"
+        echo -e "  ${GREEN}✓ Найден path из nginx: ${nginx_xhttp_path}${NC}"
+    else
+        xhttp_path=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 10)
+    fi
     local client_id; client_id=$(_xui_gen_uuid)
     local ts; ts=$(date +%s%3N)
     local flag; flag=$(_xui_get_flag)
@@ -5704,6 +6064,7 @@ PYEOF
         echo -e "  ${CYAN}[5]${NC}  Показать ссылки inbound'а"
         echo -e "  ${YELLOW}[7]${NC}  Диагностика и починка inbound'а"
         echo -e "  ${RED}[6]${NC}  Удалить inbound"
+        echo -e "  ${YELLOW}[r]${NC}  Переименовать inbound'ы (авто-флаг)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -5716,6 +6077,7 @@ PYEOF
             5) _xui_show_links ;;
             6) _xui_delete_inbound ;;
             7) _xui_diagnose_fix ;;
+            r|R|р|Р) _xui_rename_menu ;;
             0|"") return ;;
         esac
     done
