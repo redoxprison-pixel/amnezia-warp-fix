@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.50"
+VERSION="6.51"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5800,7 +5800,7 @@ conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 rows = conn.execute('SELECT id, remark, port FROM inbounds ORDER BY id').fetchall()
 for idx, (ib_id, remark, port) in enumerate(rows, 1):
     loc = str(port) if port else 'UDS'
-    print(f'  [{idx}] #{ib_id} {remark}  :{loc}')
+    print(f'  [{idx}] {remark}  :{loc}')
 conn.close()
 " 2>/dev/null
 
@@ -5948,7 +5948,7 @@ conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 rows = conn.execute("SELECT id, remark, port, listen FROM inbounds ORDER BY id").fetchall()
 for idx, (ib_id, remark, port, listen) in enumerate(rows, 1):
     loc = str(port) if port else "UDS"
-    print("  [" + str(idx) + "] #" + str(ib_id) + " " + remark + "  :" + loc)
+    print("  [" + str(idx) + "] " + remark + "  :" + loc)
 conn.close()
 RNEOF
         python3 /tmp/_xui_rename_list.py 2>/dev/null
@@ -6679,7 +6679,7 @@ conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
 rows = conn.execute('SELECT id, remark, port FROM inbounds ORDER BY id').fetchall()
 for idx, (ib_id, remark, port) in enumerate(rows, 1):
     loc = str(port) if port else 'UDS'
-    print(f'  [{idx}] #{ib_id} {remark}  :{loc}')
+    print(f'  [{idx}] {remark}  :{loc}')
 conn.close()
 " 2>/dev/null
     echo ""
