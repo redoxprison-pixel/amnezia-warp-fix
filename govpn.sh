@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.51"
+VERSION="6.53"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -5660,9 +5660,7 @@ conn.close()
     fi
 
     local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
-    # Используем сохранённый флаг сервера или определяем автоматически
-    local flag; flag=$(_get_server_flag)
-    [ -z "$flag" ] && flag=$(_get_flag_by_ip "$exit_ip")
+    local flag; flag=$(_get_flag_by_ip "$exit_ip")
 
     # Формируем новый remark
     local new_remark
@@ -5690,23 +5688,7 @@ conn.close()
 _xui_rename_all() {
     clear
     echo -e "\n${CYAN}Автопереименование inbound-ов${NC}\n"
-
-    # Проверяем есть ли сохранённый флаг
-    local server_flag; server_flag=$(_get_server_flag)
-    if [ -z "$server_flag" ]; then
-        echo -e "  ${YELLOW}Флаг страны сервера не задан.${NC}"
-        server_flag=$(_choose_flag_interactive)
-        [ -n "$server_flag" ] && _set_server_flag "$server_flag"
-    else
-        echo -e "  ${WHITE}Флаг сервера: ${server_flag}${NC}"
-        local _yn; _yn=$(read_yn "  Использовать этот флаг? (y/n): ")
-        if [ "$_yn" != "y" ]; then
-            server_flag=$(_choose_flag_interactive)
-            [ -n "$server_flag" ] && _set_server_flag "$server_flag"
-        fi
-    fi
-    echo ""
-    echo -e "  ${YELLOW}Определяю выходные IP...${NC}\n"
+    echo -e "  ${YELLOW}Определяю выходные IP и флаги...${NC}\n"
 
     # Получаем список всех inbound ID
     local ids; ids=$(python3 -c "
@@ -5749,8 +5731,8 @@ conn.close()
         local proto="${info##*|}"
         local exit_ip; exit_ip=$(_get_inbound_exit_ip "$tag")
         local is_warp; is_warp=$(_is_warp_ip "$exit_ip")
-        # Используем сохранённый флаг сервера
-        local flag="${server_flag:-🌐}"
+        # Определяем флаг по выходному IP автоматически
+        local flag; flag=$(_get_flag_by_ip "$exit_ip")
 
         local new_remark
         if [ "$is_warp" = "yes" ]; then
@@ -6833,6 +6815,16 @@ AEOF
             echo -e "  ${YELLOW}⚠${NC} shortIds: ${SID_COUNT} (рекомендуется 8)"
             warns=$(( warns + 1 )); score=$(( score - 5 ))
         fi
+
+        echo -e "\n  ${WHITE}── Reality target ──────────────────${NC}"
+        if [[ "$REALITY_TARGET" == 127.0.0.1:* ]]; then
+            echo -e "  ${GREEN}✓${NC} Target локальный: ${REALITY_TARGET} (Self-Steal)"
+        elif [ -n "$REALITY_TARGET" ]; then
+            echo -e "  ${RED}✗${NC} Target внешний: ${REALITY_TARGET}"
+            echo -e "    ${CYAN}→ Должен быть 127.0.0.1:9443 (локальный nginx)${NC}"
+            echo -e "    ${CYAN}→ Внешний target работает хуже и нестабильно${NC}"
+            issues=$(( issues + 1 )); score=$(( score - 20 ))
+        fi
     fi
 
     echo -e "\n  ${WHITE}── x-ui-pro совместимость ──────────${NC}"
@@ -6855,6 +6847,9 @@ AEOF
         echo -e "  ${CYAN}→ Добавить Reality TCP inbound параллельно${NC}"
     fi
     [ "$NETWORK" = "grpc" ] && echo -e "  ${CYAN}→ Заменить gRPC на xHTTP${NC}"
+    if [ "$SECURITY" = "reality" ] && [[ "$REALITY_TARGET" != 127.0.0.1:* ]] && [ -n "$REALITY_TARGET" ]; then
+        echo -e "  ${CYAN}→ Исправить target на 127.0.0.1:9443 (Self-Steal через nginx)${NC}"
+    fi
     [ "$NETWORK" = "ws" ]   && echo -e "  ${CYAN}→ Заменить WebSocket на xHTTP${NC}"
     [ "${BAD_FLOW_COUNT:-0}" != "0" ] && \
         echo -e "  ${CYAN}→ Исправить Flow (меню [c] → [f])${NC}"
@@ -6864,8 +6859,10 @@ AEOF
     if [ "$NETWORK" != "tcp" ] || [ "$SECURITY" != "reality" ]; then
         echo -e "  ${YELLOW}[r]${NC}  Добавить Reality TCP inbound параллельно"
     fi
-    [ "${BAD_FLOW_COUNT:-0}" != "0" ] && \
-        echo -e "  ${YELLOW}[f]${NC}  Исправить Flow у ${BAD_FLOW_COUNT} клиентов"
+    [ "${BAD_FLOW_COUNT:-0}" != "0" ] &&         echo -e "  ${YELLOW}[f]${NC}  Исправить Flow у ${BAD_FLOW_COUNT} клиентов"
+    if [ "$SECURITY" = "reality" ] && [[ "$REALITY_TARGET" != 127.0.0.1:* ]] && [ -n "$REALITY_TARGET" ]; then
+        echo -e "  ${YELLOW}[t]${NC}  Исправить target → 127.0.0.1:9443"
+    fi
     echo -e "  ${YELLOW}[0]${NC}  Назад"
     echo ""
     local act; act=$(read_choice "Действие: ")
@@ -6890,6 +6887,31 @@ print('Исправлено: ' + str(fixed))
 " 2>/dev/null
             rm -f /dev/shm/uds2023.sock 2>/dev/null
             systemctl start x-ui; sleep 2 ;;
+        t|T|т|Т)
+            echo -e "  ${CYAN}Исправляем target...${NC}"
+            systemctl stop x-ui; sleep 1
+            python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+# Берём target от рабочего Reality inbound (8443)
+ref = conn.execute('SELECT stream_settings FROM inbounds WHERE port=8443').fetchone()
+if not ref: ref = conn.execute("SELECT stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%' AND port!=? ORDER BY id LIMIT 1", ($ib_id,)).fetchone()
+row = conn.execute('SELECT stream_settings FROM inbounds WHERE id=?', ($ib_id,)).fetchone()
+if row and ref:
+    ss = json.loads(row[0])
+    ss_ref = json.loads(ref[0])
+    ss['realitySettings']['target'] = ss_ref['realitySettings'].get('target','127.0.0.1:9443')
+    ss['realitySettings']['serverNames'] = ss_ref['realitySettings'].get('serverNames',[''])
+    ss['externalProxy'] = ss_ref.get('externalProxy', [])
+    conn.execute('UPDATE inbounds SET stream_settings=? WHERE id=?', (json.dumps(ss), $ib_id))
+    conn.commit()
+    print('OK — target: ' + ss['realitySettings']['target'])
+conn.close()
+" 2>/dev/null
+            rm -f /dev/shm/uds2023.sock 2>/dev/null
+            systemctl start x-ui; sleep 2
+            echo -e "  ${GREEN}✓ Target исправлен${NC}" ;;
     esac
     read -p "  Enter..." < /dev/tty
 }
