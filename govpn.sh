@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.49"
+VERSION="6.50"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6524,7 +6524,7 @@ PYEOF
             4) _xui_add_client_to_existing ;;
             5) _xui_show_links ;;
             6) _xui_check_clients ;;
-            7) _xui_diagnose_fix ;;
+            7) _xui_select_for_analyze ;;
             8) _xui_rename_menu ;;
             9) _xui_delete_inbound ;;
             0|"") return ;;
@@ -6664,6 +6664,392 @@ PYEOF
 
 
 # Диагностика и автопочинка inbound'а
+
+# ═══════════════════════════════════════════════════════════════
+#  АНАЛИЗ БЕЗОПАСНОСТИ INBOUND'А
+# ═══════════════════════════════════════════════════════════════
+
+_xui_select_for_analyze() {
+    clear
+    echo -e "\n${CYAN}━━━ Анализ inbound-а ━━━${NC}\n"
+    python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id, remark, port FROM inbounds ORDER BY id').fetchall()
+for idx, (ib_id, remark, port) in enumerate(rows, 1):
+    loc = str(port) if port else 'UDS'
+    print(f'  [{idx}] #{ib_id} {remark}  :{loc}')
+conn.close()
+" 2>/dev/null
+    echo ""
+    echo -ne "  Номер для анализа: "; read -r sel < /dev/tty
+    [[ -z "$sel" ]] && return
+    local ib_id; ib_id=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+rows = conn.execute('SELECT id FROM inbounds ORDER BY id').fetchall()
+try:
+    idx = int('$sel') - 1
+    print(rows[idx][0] if 0 <= idx < len(rows) else '')
+except: print('')
+conn.close()
+" 2>/dev/null)
+    [ -n "$ib_id" ] && _xui_analyze_security "$ib_id"
+}
+
+_xui_analyze_security() {
+    local ib_id="$1"
+    clear
+    echo -e "\n${CYAN}━━━ Анализ безопасности ━━━${NC}\n"
+
+    cat > /tmp/_xui_analyze.py << 'AEOF'
+import sqlite3, json, sys
+
+ib_id = int(sys.argv[1])
+XUIDB = "/etc/x-ui/x-ui.db"
+conn = sqlite3.connect(XUIDB)
+conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
+
+row = conn.execute("SELECT remark, protocol, settings, stream_settings FROM inbounds WHERE id=?", (ib_id,)).fetchone()
+if not row:
+    print("NOT_FOUND"); conn.close(); exit()
+
+remark, protocol, settings_s, stream_s = row
+ss = json.loads(stream_s)
+s  = json.loads(settings_s)
+network  = ss.get("network","tcp")
+security = ss.get("security","none")
+clients  = s.get("clients",[])
+rs = ss.get("realitySettings",{})
+ext = ss.get("externalProxy",[{}])
+tcp_s = ss.get("tcpSettings",{})
+
+bad_flow = [c.get("email","?") for c in clients
+            if security=="reality" and network=="tcp"
+            and c.get("flow","") != "xtls-rprx-vision"]
+
+print(f"REMARK={remark}")
+print(f"PROTOCOL={protocol}")
+print(f"NETWORK={network}")
+print(f"SECURITY={security}")
+print(f"CLIENTS={len(clients)}")
+print(f"HAS_TESTSEED={int('testseed' in s)}")
+print(f"HAS_FALLBACKS={int('fallbacks' in s)}")
+print(f"HAS_EXT_PROXY={int(bool(ext and ext[0].get('dest')))}")
+print(f"ACCEPT_PP={int(tcp_s.get('acceptProxyProtocol',False))}")
+print(f"SID_COUNT={len(rs.get('shortIds',[]))}")
+print(f"REALITY_TARGET={rs.get('target','')}")
+print(f"BAD_FLOW_COUNT={len(bad_flow)}")
+print(f"BAD_FLOW_LIST={' '.join(bad_flow[:5])}")
+conn.close()
+AEOF
+
+    local result; result=$(python3 /tmp/_xui_analyze.py "$ib_id" 2>/dev/null)
+    [ -z "$result" ] && { echo -e "  ${RED}Inbound не найден${NC}"; read -p "  Enter..." < /dev/tty; return; }
+
+    local REMARK PROTOCOL NETWORK SECURITY CLIENTS
+    local HAS_TESTSEED HAS_FALLBACKS HAS_EXT_PROXY ACCEPT_PP SID_COUNT
+    local REALITY_TARGET BAD_FLOW_COUNT BAD_FLOW_LIST
+    eval "$result"
+
+    echo -e "  ${WHITE}Inbound:${NC} ${CYAN}${REMARK}${NC}"
+    echo -e "  ${WHITE}Тип:${NC} ${PROTOCOL}/${NETWORK}  ${WHITE}Безопасность:${NC} ${SECURITY}"
+    echo -e "  ${WHITE}Клиентов:${NC} ${CLIENTS}"
+    echo ""
+
+    local score=100 issues=0 warns=0
+
+    echo -e "  ${WHITE}── Маскировка трафика ──────────────${NC}"
+    case "$SECURITY" in
+        reality)
+            echo -e "  ${GREEN}✓${NC} Reality — отличная маскировка под TLS" ;;
+        tls)
+            echo -e "  ${YELLOW}⚠${NC} TLS — хорошо, но IP сервера виден"
+            warns=$(( warns + 1 )); score=$(( score - 10 )) ;;
+        none)
+            if [ "$NETWORK" = "xhttp" ] || [ "$NETWORK" = "grpc" ] || [ "$NETWORK" = "ws" ]; then
+                echo -e "  ${CYAN}✓${NC} Нет TLS на xray — нормально (nginx терминирует TLS)"
+            else
+                echo -e "  ${RED}✗${NC} Нет шифрования — трафик виден провайдеру!"
+                issues=$(( issues + 1 )); score=$(( score - 30 ))
+            fi ;;
+    esac
+
+    echo -e "\n  ${WHITE}── Транспортный протокол ───────────${NC}"
+    case "$NETWORK" in
+        tcp)
+            if [ "$SECURITY" = "reality" ]; then
+                echo -e "  ${GREEN}✓${NC} TCP + Reality — оптимальная комбинация"
+            else
+                echo -e "  ${YELLOW}⚠${NC} TCP без Reality — рекомендуется добавить Reality"
+                warns=$(( warns + 1 )); score=$(( score - 15 ))
+            fi ;;
+        xhttp)
+            echo -e "  ${GREEN}✓${NC} xHTTP — современный протокол (рекомендован)" ;;
+        grpc)
+            echo -e "  ${YELLOW}⚠${NC} gRPC — deprecated, рекомендуется xHTTP"
+            warns=$(( warns + 1 )); score=$(( score - 10 )) ;;
+        ws)
+            echo -e "  ${YELLOW}⚠${NC} WebSocket — deprecated, рекомендуется xHTTP"
+            warns=$(( warns + 1 )); score=$(( score - 10 )) ;;
+    esac
+
+    if [ "$SECURITY" = "reality" ] && [ "$NETWORK" = "tcp" ]; then
+        echo -e "\n  ${WHITE}── Flow клиентов ───────────────────${NC}"
+        if [ "${BAD_FLOW_COUNT:-0}" = "0" ]; then
+            echo -e "  ${GREEN}✓${NC} Все клиенты имеют xtls-rprx-vision"
+        else
+            echo -e "  ${RED}✗${NC} ${BAD_FLOW_COUNT} клиентов без xtls-rprx-vision"
+            echo -e "    ${BAD_FLOW_LIST}"
+            issues=$(( issues + 1 )); score=$(( score - 20 ))
+        fi
+    fi
+
+    if [ "$NETWORK" = "tcp" ]; then
+        echo -e "\n  ${WHITE}── Proxy Protocol ──────────────────${NC}"
+        if [ "$ACCEPT_PP" = "1" ]; then
+            echo -e "  ${GREEN}✓${NC} acceptProxyProtocol — работает через nginx stream"
+        else
+            echo -e "  ${YELLOW}⚠${NC} acceptProxyProtocol выключен"
+            echo -e "    ${CYAN}→ Нужен если трафик идёт через nginx stream${NC}"
+        fi
+    fi
+
+    echo -e "\n  ${WHITE}── ExternalProxy ───────────────────${NC}"
+    if [ "$HAS_EXT_PROXY" = "1" ]; then
+        echo -e "  ${GREEN}✓${NC} ExternalProxy настроен"
+    else
+        echo -e "  ${RED}✗${NC} ExternalProxy отсутствует"
+        issues=$(( issues + 1 )); score=$(( score - 15 ))
+    fi
+
+    if [ "$SECURITY" = "reality" ]; then
+        echo -e "\n  ${WHITE}── Reality shortIds ────────────────${NC}"
+        if [ "${SID_COUNT:-0}" -ge 8 ]; then
+            echo -e "  ${GREEN}✓${NC} shortIds: ${SID_COUNT} штук"
+        else
+            echo -e "  ${YELLOW}⚠${NC} shortIds: ${SID_COUNT} (рекомендуется 8)"
+            warns=$(( warns + 1 )); score=$(( score - 5 ))
+        fi
+    fi
+
+    echo -e "\n  ${WHITE}── x-ui-pro совместимость ──────────${NC}"
+    [ "$HAS_TESTSEED" = "1" ] && echo -e "  ${GREEN}✓${NC} testseed" || \
+        echo -e "  ${YELLOW}⚠${NC} testseed отсутствует"
+    [ "$HAS_FALLBACKS" = "1" ] && echo -e "  ${GREEN}✓${NC} fallbacks" || \
+        echo -e "  ${YELLOW}⚠${NC} fallbacks отсутствует"
+
+    # Итог
+    echo ""
+    echo -e "  ${WHITE}━━━ Итого ━━━${NC}"
+    local sc="${GREEN}"
+    [ "$score" -lt 80 ] && sc="${YELLOW}"
+    [ "$score" -lt 60 ] && sc="${RED}"
+    echo -e "  Оценка: ${sc}${score}/100${NC}  Проблем: ${RED}${issues}${NC}  Предупреждений: ${YELLOW}${warns}${NC}"
+
+    # Рекомендации
+    echo -e "\n  ${WHITE}━━━ Рекомендации ━━━${NC}"
+    if [ "$NETWORK" != "tcp" ] || [ "$SECURITY" != "reality" ]; then
+        echo -e "  ${CYAN}→ Добавить Reality TCP inbound параллельно${NC}"
+    fi
+    [ "$NETWORK" = "grpc" ] && echo -e "  ${CYAN}→ Заменить gRPC на xHTTP${NC}"
+    [ "$NETWORK" = "ws" ]   && echo -e "  ${CYAN}→ Заменить WebSocket на xHTTP${NC}"
+    [ "${BAD_FLOW_COUNT:-0}" != "0" ] && \
+        echo -e "  ${CYAN}→ Исправить Flow (меню [c] → [f])${NC}"
+
+    echo ""
+    echo -e "  ${WHITE}── Действия ─────────────────────────${NC}"
+    if [ "$NETWORK" != "tcp" ] || [ "$SECURITY" != "reality" ]; then
+        echo -e "  ${YELLOW}[r]${NC}  Добавить Reality TCP inbound параллельно"
+    fi
+    [ "${BAD_FLOW_COUNT:-0}" != "0" ] && \
+        echo -e "  ${YELLOW}[f]${NC}  Исправить Flow у ${BAD_FLOW_COUNT} клиентов"
+    echo -e "  ${YELLOW}[0]${NC}  Назад"
+    echo ""
+    local act; act=$(read_choice "Действие: ")
+
+    case "$act" in
+        r|R|р|Р) _xui_add_reality_parallel "$ib_id" ;;
+        f|F|ф|Ф)
+            systemctl stop x-ui; sleep 1
+            python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute('SELECT settings FROM inbounds WHERE id=?', ($ib_id,)).fetchone()
+s = json.loads(row[0])
+fixed = 0
+for c in s.get('clients',[]):
+    if c.get('flow','') != 'xtls-rprx-vision':
+        c['flow'] = 'xtls-rprx-vision'; fixed += 1
+conn.execute('UPDATE inbounds SET settings=? WHERE id=?', (json.dumps(s), $ib_id))
+conn.commit(); conn.close()
+print('Исправлено: ' + str(fixed))
+" 2>/dev/null
+            rm -f /dev/shm/uds2023.sock 2>/dev/null
+            systemctl start x-ui; sleep 2 ;;
+    esac
+    read -p "  Enter..." < /dev/tty
+}
+
+_xui_add_reality_parallel() {
+    local source_ib_id="$1"
+    clear
+    echo -e "\n${CYAN}━━━ Добавить Reality TCP inbound ━━━${NC}\n"
+
+    # Берём ключи от существующего Reality
+    cat > /tmp/_xui_get_keys.py << 'KEOF'
+import sqlite3, json
+conn = sqlite3.connect("/etc/x-ui/x-ui.db")
+conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
+row = conn.execute(
+    "SELECT stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%' AND stream_settings LIKE '%tcp%' ORDER BY id LIMIT 1"
+).fetchone()
+if row:
+    ss = json.loads(row[0])
+    rs = ss.get("realitySettings",{})
+    ext = ss.get("externalProxy",[{}])
+    print("HAVE_KEYS=1")
+    print(f"PRIV_KEY={rs.get('privateKey','')}")
+    print(f"PUB_KEY={rs.get('settings',{}).get('publicKey','')}")
+    print(f"SNI={rs.get('serverNames',[''])[0]}")
+    print(f"TARGET={rs.get('target','127.0.0.1:9443')}")
+    print(f"EXT_DEST={ext[0].get('dest','') if ext else ''}")
+else:
+    print("HAVE_KEYS=0")
+conn.close()
+KEOF
+
+    local HAVE_KEYS PRIV_KEY PUB_KEY SNI TARGET EXT_DEST
+    eval "$(python3 /tmp/_xui_get_keys.py 2>/dev/null)"
+
+    echo -ne "  Порт для нового Reality inbound [14444]: "; read -r new_port < /dev/tty
+    new_port="${new_port:-14444}"
+
+    if [ "$HAVE_KEYS" = "1" ]; then
+        echo -e "  ${WHITE}Найден Reality: SNI=${SNI}  Target=${TARGET}${NC}"
+        local _yn; _yn=$(read_yn "  Использовать те же ключи? (y/n): ")
+        if [ "$_yn" != "y" ]; then HAVE_KEYS="0"; fi
+    fi
+
+    if [ "$HAVE_KEYS" != "1" ]; then
+        local xray_out; xray_out=$("${XRAY_BIN}" x25519 2>/dev/null)
+        PRIV_KEY=$(echo "$xray_out" | grep "^PrivateKey:" | awk '{print $2}')
+        PUB_KEY=$(echo "$xray_out" | grep "^Password" | awk '{print $3}')
+        echo -ne "  SNI домен [microsoft.com]: "; read -r SNI < /dev/tty
+        SNI="${SNI:-microsoft.com}"
+        TARGET="127.0.0.1:9443"
+        EXT_DEST=$(_xui_get_domain)
+    fi
+
+    local domain; domain="${EXT_DEST:-$(_xui_get_domain)}"
+    local ts; ts=$(date +%s%3N)
+    local client_id; client_id=$("${XRAY_BIN}" uuid 2>/dev/null | tr -d '[:space:]')
+
+    echo -e "  ${CYAN}Создаём inbound...${NC}"
+    systemctl stop x-ui; sleep 1
+
+    cat > /tmp/_xui_create_reality.py << CEOF
+import sqlite3, json, secrets
+
+XUIDB = "/etc/x-ui/x-ui.db"
+conn = sqlite3.connect(XUIDB, timeout=30)
+conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
+
+client_id = "${client_id}"
+ts = ${ts}
+new_port = ${new_port}
+priv_key = "${PRIV_KEY}"
+pub_key  = "${PUB_KEY}"
+sni      = "${SNI}"
+target   = "${TARGET}"
+ext_dest = "${domain}"
+
+short_ids = [secrets.token_hex(8) for _ in range(8)]
+
+settings_d = {
+    "clients": [{
+        "id": client_id, "flow": "xtls-rprx-vision",
+        "email": "reality-new", "limitIp": 0, "totalGB": 0,
+        "expiryTime": 0, "enable": True, "tgId": "", "subId": "first",
+        "reset": 0, "created_at": ts, "updated_at": ts
+    }],
+    "decryption": "none", "fallbacks": []
+}
+
+stream_d = {
+    "network": "tcp", "security": "reality",
+    "externalProxy": [{"forceTls": "same", "dest": ext_dest, "port": 443, "remark": ""}],
+    "realitySettings": {
+        "show": False, "xver": 0, "target": target,
+        "serverNames": [sni], "privateKey": priv_key,
+        "minClient": "", "maxClient": "", "maxTimediff": 0,
+        "shortIds": short_ids,
+        "settings": {"publicKey": pub_key, "fingerprint": "chrome", "serverName": "", "spiderX": "/"}
+    },
+    "tcpSettings": {"acceptProxyProtocol": True, "header": {"type": "none"}}
+}
+
+sniffing_d = {"enabled": False, "destOverride": ["http","tls","quic","fakedns"], "metadataOnly": False, "routeOnly": False}
+
+conn.execute("DELETE FROM inbounds WHERE port=?", (new_port,))
+sql = "INSERT INTO inbounds (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing) VALUES (1,0,0,0,'Reality-parallel',1,0,'',?,'vless',?,?,?,?)"
+conn.execute(sql, (new_port, json.dumps(settings_d), json.dumps(stream_d), f"inbound-{new_port}", json.dumps(sniffing_d)))
+conn.commit()
+
+# Выводим данные для ссылки
+print("PORT=" + str(new_port))
+print("CLIENT_ID=" + client_id)
+print("PUB_KEY=" + pub_key)
+print("SNI=" + sni)
+print("SID=" + short_ids[0])
+print("EXT_DEST=" + ext_dest)
+conn.close()
+CEOF
+
+    local create_result; create_result=$(python3 /tmp/_xui_create_reality.py 2>/dev/null)
+    rm -f /dev/shm/uds2023.sock 2>/dev/null
+    systemctl start x-ui; sleep 3
+
+    local PORT CLIENT_ID PUB_KEY SNI SID EXT_DEST
+    eval "$create_result"
+
+    if ss -tlnp | grep -q ":${PORT}"; then
+        echo -e "  ${GREEN}✓ Reality inbound создан на порту ${PORT}${NC}"
+    else
+        echo -e "  ${RED}✗ Порт ${PORT} не поднялся${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    # Роутинг
+    echo -e "\n  ${WHITE}Как подключаться?${NC}"
+    echo -e "  ${YELLOW}[1]${NC}  Добавить в nginx upstream"
+    echo -e "  ${YELLOW}[2]${NC}  iptables REDIRECT"
+    echo -e "  ${YELLOW}[3]${NC}  Прямой порт (открыть firewall)"
+    echo -e "  ${YELLOW}[0]${NC}  Пропустить"
+    local rch; rch=$(read_choice "Выбор: ")
+    case "$rch" in
+        1)
+            local sc="/etc/nginx/stream-enabled/stream.conf"
+            if [ -f "$sc" ] && ! grep -q "127.0.0.1:${PORT}" "$sc"; then
+                sed -i "s|server 127.0.0.1:8443;|server 127.0.0.1:8443;\n    server 127.0.0.1:${PORT};|" "$sc"
+                nginx -t && systemctl reload nginx && \
+                    echo -e "  ${GREEN}✓ Добавлен в nginx upstream${NC}"
+            fi ;;
+        2) _xui_add_redirect "$PORT" ;;
+        3) iptables -I INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null
+           echo -e "  ${GREEN}✓ Порт ${PORT} открыт${NC}" ;;
+    esac
+
+    local link="vless://${CLIENT_ID}@${EXT_DEST}:443?type=tcp&security=reality&pbk=${PUB_KEY}&sid=${SID}&sni=${SNI}&fp=chrome&flow=xtls-rprx-vision#reality-new"
+    echo -e "\n  ${WHITE}Ссылка:${NC}"
+    echo -e "  ${GREEN}${link}${NC}"
+    echo ""
+    read -p "  Enter..." < /dev/tty
+}
+
 _xui_diagnose_fix() {
     clear
     echo -e "\n${CYAN}━━━ Диагностика и починка inbound'а ━━━${NC}\n"
