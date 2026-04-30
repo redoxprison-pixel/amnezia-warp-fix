@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.53"
+VERSION="6.55"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6422,6 +6422,7 @@ _xui_create_grpc() {
   "network": "grpc",
   "security": "none",
   "externalProxy": [{"forceTls": "tls", "dest": "'"$domain"'", "port": 443, "remark": ""}],
+  "tlsSettings": {"serverName": "'"$domain"'", "fingerprint": "chrome"},
   "grpcSettings": {
     "serviceName": "/'"$svc_name"'",
     "multiMode": false,
