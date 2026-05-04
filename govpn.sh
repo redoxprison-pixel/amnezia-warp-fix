@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.57"
+VERSION="6.58"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6488,6 +6488,7 @@ PYEOF
         echo -e "  ${YELLOW}[1]${NC}  Reality TCP     ${GREEN}★ самый скрытный${NC}"
         echo -e "  ${YELLOW}[2]${NC}  xHTTP           ${CYAN}Unix socket → nginx${NC}"
         echo -e "  ${YELLOW}[3]${NC}  gRPC            ${YELLOW}(deprecated)${NC}"
+        echo -e "  ${YELLOW}[w]${NC}  TCP+Reality     ${CYAN}через WARP outbound${NC}"
         echo -e "  ${WHITE}── 👤 Клиенты ───────────────────────${NC}"
         echo -e "  ${CYAN}[4]${NC}  Добавить клиента"
         echo -e "  ${CYAN}[5]${NC}  Показать ссылки"
@@ -6502,6 +6503,7 @@ PYEOF
 
         case "$ch" in
             1) _xui_create_reality_tcp ;;
+            w|W|в|В) _xui_create_warp_inbound ;;
             2) _xui_create_xhttp ;;
             3) _xui_create_grpc ;;
             4) _xui_add_client_to_existing ;;
@@ -7322,6 +7324,155 @@ conn.commit(); conn.close(); print('OK')
     echo -e "  ${GREEN}✅ Готово! Проверь подключение.${NC}"
     echo ""
     read -p "  Enter для продолжения..." < /dev/tty
+}
+
+
+_xui_create_warp_inbound() {
+    clear
+    echo -e "
+${CYAN}━━━ TCP+Reality inbound через WARP ━━━${NC}
+"
+    echo -e "  ${WHITE}Схема:${NC} Клиент → этот inbound → WARP outbound → интернет"
+    echo -e "  ${WHITE}Выходной IP:${NC} Cloudflare (маскировка + обход блокировок)
+"
+
+    # Проверяем WARP
+    if ! ss -tlnp | grep -q ":40000"; then
+        echo -e "  ${RED}✗ WARP не запущен на порту 40000${NC}"
+        echo -e "  ${CYAN}→ Запусти WARP сначала: меню [8] → [6]${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+    echo -e "  ${GREEN}✓ WARP доступен на 127.0.0.1:40000${NC}
+"
+
+    # Берём ключи от основного Reality inbound
+    local PRIV_KEY PUB_KEY SNI TARGET domain
+    local keys; keys=$(python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute("SELECT stream_settings FROM inbounds WHERE stream_settings LIKE '%reality%' ORDER BY id LIMIT 1").fetchone()
+if row:
+    ss = json.loads(row[0])
+    rs = ss.get('realitySettings',{})
+    ext = ss.get('externalProxy',[{}])
+    print(rs.get('privateKey',''))
+    print(rs.get('settings',{}).get('publicKey',''))
+    print(rs.get('serverNames',[''])[0])
+    print(rs.get('target','127.0.0.1:9443'))
+    print(ext[0].get('dest','') if ext else '')
+" 2>/dev/null)
+
+    PRIV_KEY=$(echo "$keys" | sed -n '1p')
+    PUB_KEY=$(echo "$keys"  | sed -n '2p')
+    SNI=$(echo "$keys"      | sed -n '3p')
+    TARGET=$(echo "$keys"   | sed -n '4p')
+    domain=$(echo "$keys"   | sed -n '5p')
+    domain="${domain:-$(_xui_get_domain)}"
+
+    echo -ne "  Порт для WARP inbound [14444]: "; read -r warp_port < /dev/tty
+    warp_port="${warp_port:-14444}"
+
+    local ts; ts=$(date +%s%3N)
+    local client_id; client_id=$("${XRAY_BIN}" uuid 2>/dev/null | tr -d '[:space:]')
+    local short_ids; short_ids=$(python3 -c "
+import secrets; print(' '.join(secrets.token_hex(8) for _ in range(8)))" 2>/dev/null)
+    local sids_json; sids_json=$(python3 -c "
+import json; print(json.dumps('${short_ids}'.split()))" 2>/dev/null)
+
+    echo -e "  ${CYAN}Создаём inbound...${NC}"
+    systemctl stop x-ui; sleep 1
+
+    cat > /tmp/_create_warp_ib.py << WEOF
+import sqlite3, json, secrets
+conn = sqlite3.connect("/etc/x-ui/x-ui.db", timeout=30)
+conn.text_factory = lambda b: b.decode("utf-8", errors="surrogateescape")
+
+ts = ${ts}
+port = ${warp_port}
+
+settings_d = {
+    "clients": [{"id": "${client_id}", "flow": "xtls-rprx-vision",
+        "email": "warp-user", "limitIp": 0, "totalGB": 0,
+        "expiryTime": 0, "enable": True, "tgId": "", "subId": "first",
+        "reset": 0, "created_at": ts, "updated_at": ts}],
+    "decryption": "none", "fallbacks": []
+}
+
+stream_d = {
+    "network": "tcp", "security": "reality",
+    "externalProxy": [{"forceTls": "same", "dest": "${domain}", "port": 443, "remark": ""}],
+    "realitySettings": {
+        "show": False, "xver": 0, "target": "${TARGET}",
+        "serverNames": ["${SNI}"],
+        "privateKey": "${PRIV_KEY}",
+        "minClient": "", "maxClient": "", "maxTimediff": 0,
+        "shortIds": ${sids_json},
+        "settings": {"publicKey": "${PUB_KEY}", "fingerprint": "chrome",
+                     "serverName": "", "spiderX": "/"}
+    },
+    "tcpSettings": {"acceptProxyProtocol": True, "header": {"type": "none"}}
+}
+
+sniffing_d = {"enabled": False, "destOverride": ["http","tls","quic","fakedns"],
+              "metadataOnly": False, "routeOnly": False}
+
+conn.execute("DELETE FROM inbounds WHERE port=?", (port,))
+sql = "INSERT INTO inbounds (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing) VALUES (1,0,0,0,?,1,0,'',?,'vless',?,?,?,?)"
+conn.execute(sql, ("TCP(warp)-_", port, json.dumps(settings_d),
+             json.dumps(stream_d), "inbound-" + str(port), json.dumps(sniffing_d)))
+conn.commit()
+conn.close()
+print("OK port=" + str(port))
+WEOF
+
+    python3 /tmp/_create_warp_ib.py 2>/dev/null
+
+    # Добавляем routing правило: новый inbound → WARP outbound
+    python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db', timeout=30)
+conn.text_factory = lambda b: b.decode('utf-8', errors='surrogateescape')
+row = conn.execute("SELECT value FROM settings WHERE key='xrayTemplateConfig'").fetchone()
+d = json.loads(row[0])
+
+# Добавляем WARP outbound если нет
+tags = [o.get('tag') for o in d.get('outbounds',[])]
+if 'WARP' not in tags:
+    d['outbounds'].append({
+        'tag': 'WARP', 'protocol': 'socks',
+        'settings': {'servers': [{'address': '127.0.0.1', 'port': 40000}]}
+    })
+
+# Добавляем routing
+tag = 'inbound-${warp_port}'
+rules = d.get('routing',{}).get('rules',[])
+rules = [r for r in rules if tag not in str(r.get('inboundTag',[]))]
+rules.insert(-2, {'type': 'field', 'inboundTag': [tag], 'outboundTag': 'WARP'})
+d['routing']['rules'] = rules
+
+conn.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'",
+             (json.dumps(d, ensure_ascii=False),))
+conn.commit()
+conn.close()
+print('Routing OK')
+" 2>/dev/null
+
+    rm -f /dev/shm/uds2023.sock 2>/dev/null
+    systemctl start x-ui; sleep 3
+
+    if ss -tlnp | grep -q ":${warp_port}"; then
+        echo -e "  ${GREEN}✓ WARP inbound создан на порту ${warp_port}${NC}"
+        local first_sid; first_sid=$(echo "$short_ids" | awk '{print $1}')
+        local link="vless://${client_id}@${domain}:443?type=tcp&security=reality&pbk=${PUB_KEY}&sid=${first_sid}&sni=${SNI}&fp=chrome&flow=xtls-rprx-vision#TCP(warp)"
+        echo -e "
+  ${WHITE}Ссылка:${NC}"
+        echo -e "  ${GREEN}${link}${NC}"
+    else
+        echo -e "  ${RED}✗ Порт ${warp_port} не поднялся${NC}"
+    fi
+    echo ""
+    read -p "  Enter..." < /dev/tty
 }
 
 # Удалить inbound
@@ -8532,7 +8683,7 @@ for line in ss_out.splitlines():
             nginx_ports.append(int(m.group(1)))
 
 print(f"  Домены с SSL: {local_domains}")
-print(f"  Nginx порты (не 80/443): {nginx_ports}
+    print("  Nginx порты (не 80/443): " + str(nginx_ports))
 ")
 
 rows = conn.execute("SELECT id, remark, port, enable, stream_settings FROM inbounds").fetchall()
