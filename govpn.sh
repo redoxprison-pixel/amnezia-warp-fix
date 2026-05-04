@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.55"
+VERSION="6.57"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -6860,6 +6860,9 @@ AEOF
     if [ "$NETWORK" != "tcp" ] || [ "$SECURITY" != "reality" ]; then
         echo -e "  ${YELLOW}[r]${NC}  Добавить Reality TCP inbound параллельно"
     fi
+    if [ "$NETWORK" = "grpc" ] || [ "$NETWORK" = "ws" ]; then
+        echo -e "  ${YELLOW}[x]${NC}  Создать xHTTP inbound вместо ${NETWORK} ${CYAN}(не удаляет старый)${NC}"
+    fi
     [ "${BAD_FLOW_COUNT:-0}" != "0" ] &&         echo -e "  ${YELLOW}[f]${NC}  Исправить Flow у ${BAD_FLOW_COUNT} клиентов"
     if [ "$SECURITY" = "reality" ] && [[ "$REALITY_TARGET" != 127.0.0.1:* ]] && [ -n "$REALITY_TARGET" ]; then
         echo -e "  ${YELLOW}[t]${NC}  Исправить target → 127.0.0.1:9443"
@@ -6888,6 +6891,10 @@ print('Исправлено: ' + str(fixed))
 " 2>/dev/null
             rm -f /dev/shm/uds2023.sock 2>/dev/null
             systemctl start x-ui; sleep 2 ;;
+        x|X|х|Х)
+            echo -e "  ${CYAN}Создаём xHTTP inbound...${NC}"
+            _xui_create_xhttp
+            ;;
         t|T|т|Т)
             echo -e "  ${CYAN}Исправляем target...${NC}"
             systemctl stop x-ui; sleep 1
@@ -7609,35 +7616,19 @@ CRONEOF
 
 _install_3xui() {
     clear
-    echo -e "\n${CYAN}━━━ Установка 3X-UI ━━━${NC}\n"
+    echo -e "\n${CYAN}━━━ Установка 3X-UI Pro (mozaroc) ━━━${NC}\n"
+    echo -e "  ${WHITE}Репозиторий:${NC} ${CYAN}github.com/mozaroc/x-ui-pro${NC}"
+    echo -e "  ${WHITE}Схема:${NC} Reality + gRPC + xHTTP на порту 443 с nginx"
+    echo -e "  ${WHITE}Требования:${NC} 2 домена указывающих на этот сервер\n"
 
     if systemctl is-active x-ui &>/dev/null 2>&1 || [ -f "/etc/x-ui/x-ui.db" ]; then
         echo -e "  ${YELLOW}3X-UI уже установлен${NC}"
-        echo -ne "  Переустановить/обновить? (y/n): "; read -r c
-        [[ "$c" != "y" ]] && return
+        local _yn; _yn=$(read_yn "  Переустановить/обновить? (y/n): ")
+        [[ "$_yn" != "y" ]] && return
     fi
 
-    echo -e "  ${WHITE}Варианты:${NC}"
-    echo -e "  ${YELLOW}[1]${NC}  3X-UI (стандартный)  — github.com/MHSanaei/3x-ui"
-    echo -e "  ${YELLOW}[2]${NC}  3X-UI Pro             — github.com/mozaroc/x-ui-pro"
-    echo ""
-    local ch; ch=$(read_choice "Выбор [1]: ")
-    ch="${ch:-1}"
-
-    echo ""
-    case "$ch" in
-        1)
-            echo -e "  ${CYAN}→ Установка 3X-UI...${NC}\n"
-            bash <(curl -fsSL https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) 2>&1
-            ;;
-        2)
-            echo -e "  ${CYAN}→ Установка 3X-UI Pro...${NC}\n"
-            bash <(curl -fsSL https://raw.githubusercontent.com/mozaroc/x-ui-pro/master/install.sh) 2>&1
-            ;;
-        *)
-            echo -e "  ${YELLOW}Отмена${NC}"; read -p "  Enter..."; return
-            ;;
-    esac
+    echo -e "  ${CYAN}→ Установка 3X-UI Pro...${NC}\n"
+    sudo su -c "bash <(wget -qO- https://raw.githubusercontent.com/mozaroc/x-ui-pro/refs/heads/master/x-ui-pro.sh) -install yes" 2>&1
 
     if systemctl is-active x-ui &>/dev/null 2>&1; then
         echo -e "\n  ${GREEN}✅ 3X-UI установлен и запущен${NC}"
@@ -8023,8 +8014,6 @@ install_wizard() {
         echo -e "  ${YELLOW}[2]${NC}  3X-UI / 3X-UI Pro      ${status_xui}"
         is_3xui && echo -e "  ${YELLOW}[3]${NC}  GeoIP/GeoSite (roscomvpn)"
         is_3xui && echo -e "  ${CYAN}[4]${NC}  Шаблоны inbound (xHTTP/gRPC/TCP)"
-        echo -e "  ${WHITE}── Внешние скрипты ───────────────────${NC}"
-        echo -e "  ${CYAN}[y]${NC}  YukiKras/vless-scripts (3X-UI + fakesite)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         local ch; ch=$(read_choice "Выбор: ")
@@ -8034,7 +8023,6 @@ install_wizard() {
             2) _install_3xui ;;
             3) is_3xui && _3xui_geo_menu ;;
             4) is_3xui && _3xui_inbound_templates ;;
-            [yY]) _3xui_yukikras_info ;;
             0|"") return ;;
         esac
     done
