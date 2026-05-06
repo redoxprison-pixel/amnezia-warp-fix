@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.58"
+VERSION="6.60"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -4102,6 +4102,7 @@ tools_menu() {
         echo -e "  ${YELLOW}[3]${NC}  Проверить сайт"
         echo -e "  ${YELLOW}[4]${NC}  Серверы (добавить/переименовать)"
         echo -e "  ${YELLOW}[5]${NC}  Reality SNI Scanner"
+        echo -e "  ${YELLOW}[6]${NC}  Проверка сервисов ${CYAN}(Google/YouTube/ChatGPT/Gemini/Netflix...)${NC}"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
@@ -4111,9 +4112,63 @@ tools_menu() {
             3) _site_check ;;
             4) _servers_menu ;;
             5) _reality_scanner ;;
+            6) _run_ipregion ;;
             0|"") return ;;
         esac
     done
+}
+
+
+_run_ipregion() {
+    clear
+    echo -e "
+${CYAN}━━━ Проверка доступности сервисов ━━━${NC}
+"
+    echo -e "  ${WHITE}Проверяет:${NC} Google, YouTube, ChatGPT, Gemini, Netflix, Spotify..."
+    echo -e "  ${WHITE}Источник:${NC} github.com/Davoyan/ipregion
+"
+
+    command -v jq &>/dev/null || apt-get install -y jq -qq &>/dev/null
+
+    local script_path="/tmp/ipregion.sh"
+    local cache_age=$(( $(date +%s) - $(stat -c %Y "$script_path" 2>/dev/null || echo 0) ))
+    if [ ! -f "$script_path" ] || [ "$cache_age" -gt 3600 ]; then
+        echo -e "  ${CYAN}Загружаем ipregion...${NC}"
+        curl -fsSL "https://raw.githubusercontent.com/Davoyan/ipregion/main/ipregion.sh"             -o "$script_path" 2>/dev/null && chmod +x "$script_path"
+    fi
+
+    if [ ! -f "$script_path" ]; then
+        echo -e "  ${RED}✗ Не удалось загрузить ipregion${NC}"
+        read -p "  Enter..." < /dev/tty; return
+    fi
+
+    echo -e "  ${WHITE}Режим проверки:${NC}"
+    echo -e "  ${YELLOW}[1]${NC}  Все сервисы"
+    echo -e "  ${YELLOW}[2]${NC}  Только геолокация"
+    echo -e "  ${YELLOW}[3]${NC}  Только сервисы (Google/YouTube/ChatGPT/Gemini/Netflix...)"
+    echo -e "  ${YELLOW}[4]${NC}  Через WARP ${CYAN}(127.0.0.1:40000)${NC}"
+    echo ""
+    local ch; ch=$(read_choice "Выбор [3]: ")
+    ch="${ch:-3}"
+    echo ""
+
+    case "$ch" in
+        1) bash "$script_path" ;;
+        2) bash "$script_path" -g primary ;;
+        3) bash "$script_path" -g custom ;;
+        4)
+            if ss -tlnp | grep -q ":40000"; then
+                echo -e "  ${CYAN}Проверка через WARP...${NC}
+"
+                bash "$script_path" -g custom -p 127.0.0.1:40000
+            else
+                echo -e "  ${RED}✗ WARP не запущен на порту 40000${NC}"
+                sleep 2
+            fi ;;
+        *) bash "$script_path" -g custom ;;
+    esac
+    echo ""
+    read -p "  Enter для продолжения..." < /dev/tty
 }
 
 _reality_scanner() {
@@ -7417,7 +7472,18 @@ stream_d = {
 sniffing_d = {"enabled": False, "destOverride": ["http","tls","quic","fakedns"],
               "metadataOnly": False, "routeOnly": False}
 
-conn.execute("DELETE FROM inbounds WHERE port=?", (port,))
+# Проверяем что порт не занят inbound с клиентами
+existing = conn.execute("SELECT id, remark, settings FROM inbounds WHERE port=?", (port,)).fetchone()
+if existing:
+    s = json.loads(existing[2])
+    clients = s.get("clients", [])
+    if clients:
+        print(f"ERROR: порт {port} занят inbound #{existing[0]} ({existing[1]}) с {len(clients)} клиентами!")
+        print("Выберите другой порт")
+        conn.close()
+        exit(1)
+    else:
+        conn.execute("DELETE FROM inbounds WHERE port=?", (port,))
 sql = "INSERT INTO inbounds (user_id,up,down,total,remark,enable,expiry_time,listen,port,protocol,settings,stream_settings,tag,sniffing) VALUES (1,0,0,0,?,1,0,'',?,'vless',?,?,?,?)"
 conn.execute(sql, ("TCP(warp)-_", port, json.dumps(settings_d),
              json.dumps(stream_d), "inbound-" + str(port), json.dumps(sniffing_d)))
