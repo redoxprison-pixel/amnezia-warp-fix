@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.60"
+VERSION="6.61"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -10669,6 +10669,9 @@ MTG_CONF_DIR="${CONF_DIR}/mtproto"
 MTG_IMAGE="nineseconds/mtg:2"
 TELEMT_IMAGE="ghcr.io/telemt/telemt:latest"
 MTG_ENGINE="mtg"   # mtg | telemt — выбор движка
+MTG_WARP_CHAIN="GOVPN_MTG_WARP"
+MTG_WARP_REDSOCKS_PORT="12346"
+MTG_WARP_REDSOCKS_CONF="/etc/redsocks-mtg.conf"
 
 # Список доменов для FakeTLS с описаниями
 MTG_DOMAINS=(
@@ -10696,6 +10699,204 @@ MTG_DOMAINS=(
 
 # Популярные порты для MTProto
 MTG_PORTS=(443 8443 2053 2083 2087)
+
+_mtg_warp_socks_addr() {
+    local p="${WARP_SOCKS_PORT:-40000}"
+    ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${p}" || return 1
+    echo "127.0.0.1:${p}"
+}
+
+_mtg_warp_container_ip() {
+    local name="$1"
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" 2>/dev/null | tr -d '[:space:]'
+}
+
+_mtg_warp_ensure_redsocks() {
+    command -v redsocks &>/dev/null || {
+        apt-get install -y redsocks > /dev/null 2>&1 || return 1
+    }
+
+    local socks_addr="$1"
+    local shost="${socks_addr%%:*}"
+    local sport="${socks_addr##*:}"
+
+    cat > "${MTG_WARP_REDSOCKS_CONF}" << REDSOCKS_MTG_EOF
+base {
+    log_debug = off;
+    log_info = on;
+    log = "syslog:daemon";
+    daemon = on;
+    redirector = iptables;
+}
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = ${MTG_WARP_REDSOCKS_PORT};
+    ip = ${shost};
+    port = ${sport};
+    type = socks5;
+}
+REDSOCKS_MTG_EOF
+
+    pkill -f "redsocks.*${MTG_WARP_REDSOCKS_CONF}" 2>/dev/null || true
+    redsocks -c "${MTG_WARP_REDSOCKS_CONF}" > /dev/null 2>&1 &
+    sleep 1
+    ss -tlnp 2>/dev/null | grep -q ":${MTG_WARP_REDSOCKS_PORT} " || return 1
+    return 0
+}
+
+_mtg_warp_apply_rules() {
+    iptables -t nat -N "${MTG_WARP_CHAIN}" 2>/dev/null || true
+    iptables -t nat -F "${MTG_WARP_CHAIN}" 2>/dev/null || true
+    iptables -t nat -D PREROUTING -i docker0 -j "${MTG_WARP_CHAIN}" 2>/dev/null || true
+    iptables -t nat -I PREROUTING 1 -i docker0 -j "${MTG_WARP_CHAIN}"
+
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 0.0.0.0/8 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 169.254.0.0/16 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 224.0.0.0/4 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 240.0.0.0/4 -j RETURN
+    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 162.159.192.0/24 -j RETURN
+
+    local meta
+    for meta in "${MTG_CONF_DIR}"/*.meta; do
+        [ -f "$meta" ] || continue
+        local mname; mname=$(basename "$meta" .meta)
+        local mw; mw=$(grep "^mtg_warp=" "$meta" 2>/dev/null | cut -d= -f2)
+        [ "$mw" = "1" ] || continue
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${mname}$" || continue
+        local cip; cip=$(_mtg_warp_container_ip "$mname")
+        [ -n "$cip" ] || continue
+        iptables -t nat -A "${MTG_WARP_CHAIN}" -s "${cip}/32" -p tcp -j REDIRECT --to-ports "${MTG_WARP_REDSOCKS_PORT}"
+    done
+}
+
+_mtg_warp_enable() {
+    local name="$1"
+    local meta_file="${MTG_CONF_DIR}/${name}.meta"
+    [ -f "$meta_file" ] || return 1
+
+    local dtype; dtype=$(_mtg_detect_type "$name")
+    if [ "$dtype" != "govpn" ]; then
+        echo -e "${YELLOW}  Для ${dtype} сейчас доступен только режим mtg(Docker).${NC}"
+        return 1
+    fi
+
+    local socks_addr
+    socks_addr=$(_mtg_warp_socks_addr) || {
+        echo -e "${RED}  ✗ WARP SOCKS5 не найден на 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        return 1
+    }
+
+    _mtg_warp_ensure_redsocks "$socks_addr" || {
+        echo -e "${RED}  ✗ Не удалось запустить redsocks для MTProto${NC}"
+        return 1
+    }
+
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+        echo -e "${YELLOW}  ⚠ Прокси не запущен, включаю после старта контейнера${NC}"
+    fi
+
+    if grep -q "^mtg_warp=" "$meta_file" 2>/dev/null; then
+        sed -i 's/^mtg_warp=.*/mtg_warp=1/' "$meta_file"
+    else
+        echo "mtg_warp=1" >> "$meta_file"
+    fi
+
+    _mtg_warp_apply_rules
+    log_action "MTG WARP ON: ${name}"
+    echo -e "${GREEN}  ✓ MTProto ${name} направлен через WARP${NC}"
+    return 0
+}
+
+_mtg_warp_disable() {
+    local name="$1"
+    local meta_file="${MTG_CONF_DIR}/${name}.meta"
+    [ -f "$meta_file" ] || return 1
+
+    if grep -q "^mtg_warp=" "$meta_file" 2>/dev/null; then
+        sed -i 's/^mtg_warp=.*/mtg_warp=0/' "$meta_file"
+    else
+        echo "mtg_warp=0" >> "$meta_file"
+    fi
+
+    _mtg_warp_apply_rules
+    log_action "MTG WARP OFF: ${name}"
+    echo -e "${GREEN}  ✓ MTProto ${name} отключён от WARP${NC}"
+    return 0
+}
+
+_mtg_warp_live_test() {
+    clear
+    echo -e "\n${CYAN}━━━ MTProto → WARP: Live-тест ━━━${NC}\n"
+
+    local socks_addr
+    socks_addr=$(_mtg_warp_socks_addr) || {
+        echo -e "  ${RED}✗ WARP SOCKS5 не найден на 127.0.0.1:${WARP_SOCKS_PORT}${NC}"
+        echo -e "  ${YELLOW}Сначала включите/проверьте WARP (п.1 в главном меню).${NC}"
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    }
+
+    local host_wip
+    host_wip=$(curl -s4 --max-time 8 --proxy "socks5://${socks_addr}" https://api4.ipify.org 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$host_wip" ]; then
+        echo -e "  ${RED}✗ Не удалось получить WARP IP через SOCKS ${socks_addr}${NC}"
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    fi
+
+    echo -e "  ${WHITE}WARP SOCKS:${NC} ${CYAN}${socks_addr}${NC}"
+    echo -e "  ${WHITE}WARP IP (host):${NC} ${GREEN}${host_wip}${NC}\n"
+
+    local tested=0 matched=0
+    for meta in "${MTG_CONF_DIR}"/*.meta; do
+        [ -f "$meta" ] || continue
+        local name; name=$(basename "$meta" .meta)
+        local flag; flag=$(grep "^mtg_warp=" "$meta" 2>/dev/null | cut -d= -f2)
+        [ "$flag" = "1" ] || continue
+
+        local dtype; dtype=$(_mtg_detect_type "$name")
+        [ "$dtype" = "govpn" ] || continue
+
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+            echo -e "  ${YELLOW}${name}:${NC} пропуск (контейнер не запущен)"
+            continue
+        fi
+
+        local cip
+        cip=$(_mtg_warp_container_ip "$name")
+        if [ -z "$cip" ]; then
+            echo -e "  ${YELLOW}${name}:${NC} пропуск (нет IP контейнера)"
+            continue
+        fi
+
+        local ip_out
+        ip_out=$(docker exec "$name" sh -c "curl -s4 --max-time 8 https://api4.ipify.org 2>/dev/null || true" | tr -d '[:space:]')
+        tested=$((tested + 1))
+
+        if [ -n "$ip_out" ] && [ "$ip_out" = "$host_wip" ]; then
+            matched=$((matched + 1))
+            echo -e "  ${GREEN}✓ ${name}${NC}  (${cip})  выход: ${GREEN}${ip_out}${NC}"
+        else
+            echo -e "  ${RED}✗ ${name}${NC}  (${cip})  выход: ${YELLOW}${ip_out:-N/A}${NC}"
+        fi
+    done
+
+    echo ""
+    if [ "$tested" -eq 0 ]; then
+        echo -e "  ${YELLOW}Нет запущенных MTProto (mtg) с включённым mtg_warp=1.${NC}"
+    elif [ "$matched" -eq "$tested" ]; then
+        echo -e "  ${GREEN}Итог: ${matched}/${tested} прокси выходят через WARP.${NC}"
+    else
+        echo -e "  ${YELLOW}Итог: ${matched}/${tested} прокси подтверждены через WARP.${NC}"
+        echo -e "  ${WHITE}Проверьте правила: ${CYAN}iptables -t nat -S ${MTG_WARP_CHAIN}${NC}"
+    fi
+
+    read -p "Нажмите Enter..." < /dev/tty
+}
 
 _mtg_list_instances() {
     # Docker контейнеры mtg/mtproto (исключаем telemt)
@@ -11131,6 +11332,8 @@ _mtg_manage() {
         domain=$(grep "^domain=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
         link=$(grep "^link=" "$meta_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
         local created; created=$(grep "^created=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
+        local warp_flag; warp_flag=$(grep "^mtg_warp=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
+        [ -z "$warp_flag" ] && warp_flag="0"
 
         if _mtg_is_running "$name"; then
             running_st="${GREEN}● активен${NC}"
@@ -11143,9 +11346,19 @@ _mtg_manage() {
         echo -e "  ${WHITE}Порт:    ${CYAN}${port}${NC}"
         echo -e "  ${WHITE}Домен:   ${CYAN}${domain} (FakeTLS)${NC}"
         echo -e "  ${WHITE}Создан:  ${WHITE}${created}${NC}"
+        if [ "$warp_flag" = "1" ]; then
+            echo -e "  ${WHITE}WARP:    ${GREEN}● включён${NC}"
+        else
+            echo -e "  ${WHITE}WARP:    ${YELLOW}○ выключен${NC}"
+        fi
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Показать ссылку и QR"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить секрет"
+        if [ "$warp_flag" = "1" ]; then
+            echo -e "  ${YELLOW}[w]${NC}  Отключить MTProto → WARP"
+        else
+            echo -e "  ${YELLOW}[w]${NC}  Включить MTProto → WARP"
+        fi
         if _mtg_is_running "$name"; then
             echo -e "  ${YELLOW}[3]${NC}  Остановить"
         else
@@ -11267,6 +11480,13 @@ PYEOF
                     _mtg_is_running "$name" && echo -e "${GREEN}Запущен.${NC}" || echo -e "${RED}Не удалось запустить.${NC}"
                 fi
                 sleep 1 ;;
+            w|W|ц|Ц)
+                if [ "$warp_flag" = "1" ]; then
+                    _mtg_warp_disable "$name"
+                else
+                    _mtg_warp_enable "$name"
+                fi
+                read -p "Нажмите Enter..." ;;
             4)
                 local del_type; del_type=$(_mtg_detect_type "$name")
                 if [ "$del_type" = "telemt" ]; then
@@ -12417,6 +12637,7 @@ except:
         [ ${#names[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Управление прокси"
         echo -e "  ${WHITE}── Сайт ──────────────────────────────${NC}"
         echo -e "  ${CYAN}[s]${NC}  Настроить сайт-заглушку (SSL + шаблон)"
+        echo -e "  ${CYAN}[w]${NC}  Проверка MTProto → WARP (live IP тест)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
@@ -12425,6 +12646,7 @@ except:
         [ "$ch" = "+" ] && { _mtg_add; continue; }
         [ "$ch" = "t" ] || [ "$ch" = "T" ] && { _telemt_add; continue; }
         [ "$ch" = "s" ] || [ "$ch" = "S" ] && { _stub_setup_full; continue; }
+        [ "$ch" = "w" ] || [ "$ch" = "W" ] && { _mtg_warp_live_test; continue; }
 
         if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#names[@]} )); then
             _mtg_manage "${names[$((ch-1))]}"
@@ -12580,6 +12802,9 @@ run_startup() {
 
     ((s++)); printf "  ${CYAN}[%d/%d]${NC}  Определение режима...\n" "$s" "$total"
     detect_mode
+
+    # Восстановление MTProto→WARP правил (если были включены ранее)
+    _mtg_warp_apply_rules 2>/dev/null || true
 
     # Автодобавление IP этого сервера в список серверов
     if [ -n "$MY_IP" ] && ! grep -q "^${MY_IP}=" "$ALIASES_FILE" 2>/dev/null; then
