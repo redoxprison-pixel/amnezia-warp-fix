@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.67"
+VERSION="6.68"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -10922,30 +10922,50 @@ fi
 exit 1
 '
     if ! docker exec "$AWG_CONTAINER" sh -c "$install_cmd" 2>/dev/null; then
-        echo -e "  ${YELLOW}⚠ Установка через пакетный менеджер не удалась, пробую fallback через docker cp...${NC}"
-        local tmp_bin tmp_name
-        tmp_bin=$(mktemp)
-        tmp_name="govpn_microsocks_${RANDOM}_$$"
-        if docker run --name "$tmp_name" --rm alpine:3.20 sh -c \
-            "apk add --no-cache microsocks >/dev/null 2>&1 && cat /usr/bin/microsocks" > "$tmp_bin" 2>/dev/null; then
-            chmod +x "$tmp_bin" 2>/dev/null || true
-            if docker cp "$tmp_bin" "${AWG_CONTAINER}:/usr/local/bin/microsocks" 2>/dev/null && \
+        echo -e "  ${YELLOW}⚠ Установка в контейнере не удалась, пробую через хост + docker cp...${NC}"
+        local host_bin=""
+        if command -v microsocks >/dev/null 2>&1; then
+            host_bin="$(command -v microsocks)"
+        else
+            apt-get update -y >/dev/null 2>&1 || true
+            apt-get install -y microsocks >/dev/null 2>&1 || true
+            command -v microsocks >/dev/null 2>&1 && host_bin="$(command -v microsocks)"
+        fi
+
+        if [ -n "$host_bin" ] && [ -x "$host_bin" ]; then
+            if docker cp "$host_bin" "${AWG_CONTAINER}:/usr/local/bin/microsocks" 2>/dev/null && \
                docker exec "$AWG_CONTAINER" sh -c "chmod +x /usr/local/bin/microsocks && /usr/local/bin/microsocks -h >/dev/null 2>&1"; then
-                echo -e "  ${GREEN}✓ microsocks доставлен в контейнер через fallback${NC}"
+                echo -e "  ${GREEN}✓ microsocks скопирован из хоста в контейнер${NC}"
             else
-                rm -f "$tmp_bin"
-                echo -e "  ${RED}✗ Fallback через docker cp не удался${NC}"
+                echo -e "  ${RED}✗ Не удалось скопировать host microsocks в контейнер${NC}"
                 read -p "Нажмите Enter..." < /dev/tty
                 return
             fi
         else
+            echo -e "  ${YELLOW}⚠ microsocks не найден на хосте, пробую helper-контейнер...${NC}"
+            local tmp_bin tmp_name
+            tmp_bin=$(mktemp)
+            tmp_name="govpn_microsocks_${RANDOM}_$$"
+            if docker run --name "$tmp_name" --rm alpine:3.20 sh -c \
+                "apk add --no-cache microsocks >/dev/null 2>&1 && cat /usr/bin/microsocks" > "$tmp_bin" 2>/dev/null; then
+                chmod +x "$tmp_bin" 2>/dev/null || true
+                if docker cp "$tmp_bin" "${AWG_CONTAINER}:/usr/local/bin/microsocks" 2>/dev/null && \
+                   docker exec "$AWG_CONTAINER" sh -c "chmod +x /usr/local/bin/microsocks && /usr/local/bin/microsocks -h >/dev/null 2>&1"; then
+                    echo -e "  ${GREEN}✓ microsocks доставлен через helper-контейнер${NC}"
+                else
+                    rm -f "$tmp_bin"
+                    echo -e "  ${RED}✗ Fallback helper-контейнера не удался${NC}"
+                    read -p "Нажмите Enter..." < /dev/tty
+                    return
+                fi
+            else
+                rm -f "$tmp_bin"
+                echo -e "  ${RED}✗ Не удалось получить microsocks ни с хоста, ни из helper-контейнера${NC}"
+                read -p "Нажмите Enter..." < /dev/tty
+                return
+            fi
             rm -f "$tmp_bin"
-            echo -e "  ${RED}✗ Не удалось получить бинарник microsocks из helper-контейнера${NC}"
-            echo -e "  ${YELLOW}Проверьте доступ Docker к alpine:3.20 (pull) и DNS внутри Docker.${NC}"
-            read -p "Нажмите Enter..." < /dev/tty
-            return
         fi
-        rm -f "$tmp_bin"
     fi
 
     local bridge_port="40080"
