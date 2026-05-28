@@ -7,7 +7,7 @@ set -o pipefail
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.68"
+VERSION="6.60"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
@@ -30,7 +30,6 @@ IFACE=""
 MODE=""           # 3xui | amnezia | combo | bridge
 MODE_LABEL=""
 WARP_SOCKS_PORT="40000"
-MTG_UPSTREAM_SOCKS=""
 AWG_CONTAINER=""  # активный amnezia контейнер
 HY2_RUNNING=0     # 1 если hysteria-server активен
 
@@ -10670,10 +10669,6 @@ MTG_CONF_DIR="${CONF_DIR}/mtproto"
 MTG_IMAGE="nineseconds/mtg:2"
 TELEMT_IMAGE="ghcr.io/telemt/telemt:latest"
 MTG_ENGINE="mtg"   # mtg | telemt — выбор движка
-MTG_WARP_CHAIN="GOVPN_MTG_WARP"
-MTG_WARP_CHAIN_OUT="GOVPN_MTG_WARP_OUT"
-MTG_WARP_REDSOCKS_PORT="12346"
-MTG_WARP_REDSOCKS_CONF="/etc/redsocks-mtg.conf"
 
 # Список доменов для FakeTLS с описаниями
 MTG_DOMAINS=(
@@ -10701,548 +10696,6 @@ MTG_DOMAINS=(
 
 # Популярные порты для MTProto
 MTG_PORTS=(443 8443 2053 2083 2087)
-
-_mtg_warp_socks_addr() {
-    # Приоритет: явно заданный upstream SOCKS
-    if [ -n "${MTG_UPSTREAM_SOCKS:-}" ]; then
-        local h="${MTG_UPSTREAM_SOCKS%%:*}"
-        local p="${MTG_UPSTREAM_SOCKS##*:}"
-        if [[ "$p" =~ ^[0-9]{2,5}$ ]] && ss -tlnp 2>/dev/null | grep -q "${h}:${p}"; then
-            echo "${h}:${p}"
-            return 0
-        fi
-    fi
-
-    local p="${WARP_SOCKS_PORT:-40000}"
-    if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${p}"; then
-        echo "127.0.0.1:${p}"
-        return 0
-    fi
-
-    # Попытка определить порт через warp-cli settings
-    if command -v warp-cli &>/dev/null; then
-        local guessed
-        guessed=$(warp-cli --accept-tos settings 2>/dev/null | \
-            grep -Eio '([Pp]ort[^0-9]*[0-9]{2,5}|[0-9]{2,5})' | \
-            grep -Eo '[0-9]{2,5}' | tail -1)
-        if [[ "$guessed" =~ ^[0-9]{2,5}$ ]] && ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${guessed}"; then
-            WARP_SOCKS_PORT="$guessed"
-            save_config WARP_SOCKS_PORT "$WARP_SOCKS_PORT"
-            echo "127.0.0.1:${WARP_SOCKS_PORT}"
-            return 0
-        fi
-    fi
-
-    # Скан типовых портов
-    local -a cands=(40000 40001 1080 10808 2080 3080)
-    local cp
-    for cp in "${cands[@]}"; do
-        if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${cp}"; then
-            WARP_SOCKS_PORT="$cp"
-            save_config WARP_SOCKS_PORT "$WARP_SOCKS_PORT"
-            echo "127.0.0.1:${WARP_SOCKS_PORT}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-_mtg_set_upstream_socks() {
-    clear
-    echo -e "\n${CYAN}━━━ MTProto Upstream SOCKS ━━━${NC}\n"
-    echo -e "  ${WHITE}Текущее значение:${NC} ${CYAN}${MTG_UPSTREAM_SOCKS:-не задано}${NC}"
-    echo -e "  ${WHITE}Пример:${NC} 127.0.0.1:40000"
-    echo -e "  ${WHITE}Пустой ввод:${NC} авто-поиск\n"
-    echo -ne "  Введите SOCKS host:port: "
-    local v
-    read -r v < /dev/tty
-    v=$(echo "$v" | tr -d '[:space:]')
-    if [ -z "$v" ]; then
-        MTG_UPSTREAM_SOCKS=""
-        save_config MTG_UPSTREAM_SOCKS ""
-        echo -e "\n  ${GREEN}✓ Установлен авто-поиск SOCKS${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    local h="${v%%:*}" p="${v##*:}"
-    if [[ ! "$p" =~ ^[0-9]{2,5}$ ]]; then
-        echo -e "\n  ${RED}✗ Неверный формат порта${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-    if ! ss -tlnp 2>/dev/null | grep -q "${h}:${p}"; then
-        echo -e "\n  ${YELLOW}⚠ ${h}:${p} сейчас не слушает. Сохранить всё равно? (y/n)${NC}"
-        local c; read -r c < /dev/tty
-        [ "$c" != "y" ] && return
-    fi
-    MTG_UPSTREAM_SOCKS="${h}:${p}"
-    save_config MTG_UPSTREAM_SOCKS "$MTG_UPSTREAM_SOCKS"
-    echo -e "\n  ${GREEN}✓ Upstream SOCKS сохранён: ${MTG_UPSTREAM_SOCKS}${NC}"
-    read -p "Нажмите Enter..." < /dev/tty
-}
-
-_mtg_list_socks_candidates() {
-    ss -tlnp 2>/dev/null | awk '
-        /LISTEN/ {
-            addr=$4; proc=$0
-            if (addr ~ /:1080$/ || addr ~ /:10808$/ || addr ~ /:2080$/ || addr ~ /:3080$/ || addr ~ /:40000$/ || addr ~ /:40001$/ || addr ~ /:9050$/ || addr ~ /:3128$/ || addr ~ /:7890$/) {
-                gsub(/.*users:\(\("/, "", proc); gsub(/".*/, "", proc)
-                n=split(addr,a,":"); port=a[n]
-                host=addr; sub(/:[0-9]+$/, "", host)
-                if (host=="*" || host=="0.0.0.0" || host=="::") host="127.0.0.1"
-                print host ":" port "|" proc
-            }
-        }
-    ' | awk -F'|' '!seen[$1]++'
-}
-
-_mtg_select_socks_candidate() {
-    local list
-    list=$(_mtg_list_socks_candidates)
-    if [ -z "$list" ]; then
-        echo -e "\n  ${YELLOW}Кандидаты SOCKS не найдены по listening портам.${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-    local -a eps=() procs=()
-    while IFS='|' read -r ep pr; do
-        [ -n "$ep" ] || continue
-        eps+=("$ep"); procs+=("$pr")
-    done <<< "$list"
-    echo -e "\n${CYAN}Найденные SOCKS-кандидаты:${NC}\n"
-    local i=1
-    for ep in "${eps[@]}"; do
-        echo -e "  ${YELLOW}[${i}]${NC} ${CYAN}${ep}${NC}  ${WHITE}${procs[$((i-1))]}${NC}"
-        i=$((i+1))
-    done
-    echo -e "  ${YELLOW}[0]${NC} Назад\n"
-    echo -ne "  Выбор: "
-    local ch
-    read -r ch < /dev/tty
-    [[ "$ch" =~ ^[0-9]+$ ]] || return
-    [ "$ch" = "0" ] && return
-    if (( ch >= 1 && ch <= ${#eps[@]} )); then
-        MTG_UPSTREAM_SOCKS="${eps[$((ch-1))]}"
-        save_config MTG_UPSTREAM_SOCKS "$MTG_UPSTREAM_SOCKS"
-        echo -e "\n  ${GREEN}✓ Выбран upstream SOCKS: ${MTG_UPSTREAM_SOCKS}${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-    fi
-}
-
-_mtg_warp_diagnostics() {
-    clear
-    echo -e "\n${CYAN}━━━ Диагностика MTProto → WARP/SOCKS ━━━${NC}\n"
-    echo -e "  ${WHITE}Сборка:${NC} ${CYAN}${VERSION}${NC}"
-
-    local ok=1
-    for c in curl ss iptables python3; do
-        if command -v "$c" >/dev/null 2>&1; then
-            echo -e "  ${GREEN}✓${NC} ${c}"
-        else
-            echo -e "  ${RED}✗${NC} ${c} (не найден)"
-            ok=0
-        fi
-    done
-
-    if command -v redsocks >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} redsocks установлен"
-    else
-        echo -e "  ${YELLOW}⚠${NC} redsocks не установлен (поставится при включении маршрутизации)"
-    fi
-
-    if command -v warp-cli >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} warp-cli найден"
-    else
-        echo -e "  ${YELLOW}⚠${NC} warp-cli не найден (это нормально при CUSTOM_SOCKS режиме)"
-    fi
-
-    echo -e "\n  ${WHITE}MTG_UPSTREAM_SOCKS:${NC} ${CYAN}${MTG_UPSTREAM_SOCKS:-auto}${NC}"
-    local detected
-    detected=$(_mtg_warp_socks_addr)
-    if [ -n "$detected" ]; then
-        echo -e "  ${GREEN}✓${NC} Рабочий upstream SOCKS: ${CYAN}${detected}${NC}"
-    else
-        echo -e "  ${RED}✗${NC} Рабочий upstream SOCKS не найден"
-        ok=0
-    fi
-
-    echo -e "\n  ${WHITE}Кандидаты SOCKS из ss:${NC}"
-    local list; list=$(_mtg_list_socks_candidates)
-    if [ -n "$list" ]; then
-        while IFS='|' read -r ep pr; do
-            echo -e "    ${CYAN}${ep}${NC}  ${WHITE}${pr}${NC}"
-        done <<< "$list"
-    else
-        echo -e "    ${YELLOW}нет кандидатов${NC}"
-    fi
-
-    echo -e "\n  ${WHITE}Итог:${NC} $( [ "$ok" -eq 1 ] && echo -e "${GREEN}готово к MTProto→WARP${NC}" || echo -e "${RED}не готово${NC}" )"
-    echo ""
-    read -p "Нажмите Enter..." < /dev/tty
-}
-
-_mtg_setup_awg_socks_bridge() {
-    clear
-    echo -e "\n${CYAN}━━━ AWG/WARP → SOCKS bridge ━━━${NC}\n"
-
-    if ! is_amnezia || [ -z "${AWG_CONTAINER:-}" ]; then
-        echo -e "  ${RED}✗ Amnezia контейнер не обнаружен${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${AWG_CONTAINER}$"; then
-        echo -e "  ${RED}✗ Контейнер ${AWG_CONTAINER} не запущен${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    if ! docker exec "$AWG_CONTAINER" sh -c "ip link show warp >/dev/null 2>&1" 2>/dev/null; then
-        echo -e "  ${RED}✗ WARP интерфейс в ${AWG_CONTAINER} не активен${NC}"
-        echo -e "  ${YELLOW}Сначала включите WARP для Amnezia.${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    echo -e "  ${CYAN}Проверяю/устанавливаю SOCKS5 сервер (microsocks) внутри контейнера...${NC}"
-    local install_cmd='
-if command -v microsocks >/dev/null 2>&1; then
-  exit 0
-fi
-if command -v apk >/dev/null 2>&1; then
-  apk add --no-cache microsocks >/dev/null 2>&1 && exit 0
-fi
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -y >/dev/null 2>&1 && apt-get install -y microsocks >/dev/null 2>&1 && exit 0
-fi
-if command -v yum >/dev/null 2>&1; then
-  yum install -y microsocks >/dev/null 2>&1 && exit 0
-fi
-exit 1
-'
-    if ! docker exec "$AWG_CONTAINER" sh -c "$install_cmd" 2>/dev/null; then
-        echo -e "  ${YELLOW}⚠ Установка в контейнере не удалась, пробую через хост + docker cp...${NC}"
-        local host_bin=""
-        if command -v microsocks >/dev/null 2>&1; then
-            host_bin="$(command -v microsocks)"
-        else
-            apt-get update -y >/dev/null 2>&1 || true
-            apt-get install -y microsocks >/dev/null 2>&1 || true
-            command -v microsocks >/dev/null 2>&1 && host_bin="$(command -v microsocks)"
-        fi
-
-        if [ -n "$host_bin" ] && [ -x "$host_bin" ]; then
-            if docker cp "$host_bin" "${AWG_CONTAINER}:/usr/local/bin/microsocks" 2>/dev/null && \
-               docker exec "$AWG_CONTAINER" sh -c "chmod +x /usr/local/bin/microsocks && /usr/local/bin/microsocks -h >/dev/null 2>&1"; then
-                echo -e "  ${GREEN}✓ microsocks скопирован из хоста в контейнер${NC}"
-            else
-                echo -e "  ${RED}✗ Не удалось скопировать host microsocks в контейнер${NC}"
-                read -p "Нажмите Enter..." < /dev/tty
-                return
-            fi
-        else
-            echo -e "  ${YELLOW}⚠ microsocks не найден на хосте, пробую helper-контейнер...${NC}"
-            local tmp_bin tmp_name
-            tmp_bin=$(mktemp)
-            tmp_name="govpn_microsocks_${RANDOM}_$$"
-            if docker run --name "$tmp_name" --rm alpine:3.20 sh -c \
-                "apk add --no-cache microsocks >/dev/null 2>&1 && cat /usr/bin/microsocks" > "$tmp_bin" 2>/dev/null; then
-                chmod +x "$tmp_bin" 2>/dev/null || true
-                if docker cp "$tmp_bin" "${AWG_CONTAINER}:/usr/local/bin/microsocks" 2>/dev/null && \
-                   docker exec "$AWG_CONTAINER" sh -c "chmod +x /usr/local/bin/microsocks && /usr/local/bin/microsocks -h >/dev/null 2>&1"; then
-                    echo -e "  ${GREEN}✓ microsocks доставлен через helper-контейнер${NC}"
-                else
-                    rm -f "$tmp_bin"
-                    echo -e "  ${RED}✗ Fallback helper-контейнера не удался${NC}"
-                    read -p "Нажмите Enter..." < /dev/tty
-                    return
-                fi
-            else
-                rm -f "$tmp_bin"
-                echo -e "  ${RED}✗ Не удалось получить microsocks ни с хоста, ни из helper-контейнера${NC}"
-                read -p "Нажмите Enter..." < /dev/tty
-                return
-            fi
-            rm -f "$tmp_bin"
-        fi
-    fi
-
-    local bridge_port="40080"
-    docker exec "$AWG_CONTAINER" sh -c "
-        pkill -f 'microsocks.*-p ${bridge_port}' 2>/dev/null || true
-        nohup microsocks -i 0.0.0.0 -p ${bridge_port} >/tmp/microsocks.log 2>&1 &
-        sleep 1
-        ss -tln 2>/dev/null | grep -q ':${bridge_port} ' || netstat -tln 2>/dev/null | grep -q ':${bridge_port} '
-    " 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo -e "  ${RED}✗ microsocks не поднялся на порту ${bridge_port}${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    local cip
-    cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$AWG_CONTAINER" 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$cip" ]; then
-        echo -e "  ${RED}✗ Не удалось получить IP контейнера ${AWG_CONTAINER}${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    echo -e "  ${CYAN}Тестирую SOCKS bridge ${cip}:${bridge_port}...${NC}"
-    local out_ip
-    out_ip=$(curl -s4 --max-time 10 --proxy "socks5://${cip}:${bridge_port}" https://api4.ipify.org 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$out_ip" ]; then
-        echo -e "  ${RED}✗ SOCKS bridge поднят, но тест выхода не прошёл${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    MTG_UPSTREAM_SOCKS="${cip}:${bridge_port}"
-    save_config MTG_UPSTREAM_SOCKS "$MTG_UPSTREAM_SOCKS"
-    echo -e "  ${GREEN}✓ Upstream SOCKS настроен: ${MTG_UPSTREAM_SOCKS}${NC}"
-    echo -e "  ${GREEN}✓ Тестовый внешний IP: ${out_ip}${NC}"
-    log_action "MTG AWG SOCKS BRIDGE: ${MTG_UPSTREAM_SOCKS} ip=${out_ip}"
-    echo ""
-    read -p "Нажмите Enter..." < /dev/tty
-}
-
-_mtg_warp_container_ip() {
-    local name="$1"
-    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" 2>/dev/null | tr -d '[:space:]'
-}
-
-_mtg_warp_ensure_redsocks() {
-    command -v redsocks &>/dev/null || {
-        apt-get install -y redsocks > /dev/null 2>&1 || return 1
-    }
-
-    local socks_addr="$1"
-    local shost="${socks_addr%%:*}"
-    local sport="${socks_addr##*:}"
-
-    cat > "${MTG_WARP_REDSOCKS_CONF}" << REDSOCKS_MTG_EOF
-base {
-    log_debug = off;
-    log_info = on;
-    log = "syslog:daemon";
-    daemon = on;
-    redirector = iptables;
-}
-redsocks {
-    local_ip = 127.0.0.1;
-    local_port = ${MTG_WARP_REDSOCKS_PORT};
-    ip = ${shost};
-    port = ${sport};
-    type = socks5;
-}
-REDSOCKS_MTG_EOF
-
-    pkill -f "redsocks.*${MTG_WARP_REDSOCKS_CONF}" 2>/dev/null || true
-    redsocks -c "${MTG_WARP_REDSOCKS_CONF}" > /dev/null 2>&1 &
-    sleep 1
-    ss -tlnp 2>/dev/null | grep -q ":${MTG_WARP_REDSOCKS_PORT} " || return 1
-    return 0
-}
-
-_mtg_warp_apply_rules() {
-    iptables -t nat -N "${MTG_WARP_CHAIN}" 2>/dev/null || true
-    iptables -t nat -F "${MTG_WARP_CHAIN}" 2>/dev/null || true
-    iptables -t nat -D PREROUTING -i docker0 -j "${MTG_WARP_CHAIN}" 2>/dev/null || true
-    iptables -t nat -I PREROUTING 1 -i docker0 -j "${MTG_WARP_CHAIN}"
-
-    iptables -t nat -N "${MTG_WARP_CHAIN_OUT}" 2>/dev/null || true
-    iptables -t nat -F "${MTG_WARP_CHAIN_OUT}" 2>/dev/null || true
-    iptables -t nat -D OUTPUT -j "${MTG_WARP_CHAIN_OUT}" 2>/dev/null || true
-    iptables -t nat -I OUTPUT 1 -j "${MTG_WARP_CHAIN_OUT}"
-
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 0.0.0.0/8 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 10.0.0.0/8 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 127.0.0.0/8 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 169.254.0.0/16 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 172.16.0.0/12 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 192.168.0.0/16 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 224.0.0.0/4 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 240.0.0.0/4 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN}" -d 162.159.192.0/24 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 0.0.0.0/8 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 10.0.0.0/8 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 127.0.0.0/8 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 169.254.0.0/16 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 172.16.0.0/12 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 192.168.0.0/16 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 224.0.0.0/4 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 240.0.0.0/4 -j RETURN
-    iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -d 162.159.192.0/24 -j RETURN
-
-    local meta
-    for meta in "${MTG_CONF_DIR}"/*.meta; do
-        [ -f "$meta" ] || continue
-        local mname; mname=$(basename "$meta" .meta)
-        local mw; mw=$(grep "^mtg_warp=" "$meta" 2>/dev/null | cut -d= -f2)
-        [ "$mw" = "1" ] || continue
-        local mtype; mtype=$(_mtg_detect_type "$mname")
-        if [ "$mtype" = "govpn" ]; then
-            docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${mname}$" || continue
-            local cip; cip=$(_mtg_warp_container_ip "$mname")
-            [ -n "$cip" ] || continue
-            iptables -t nat -A "${MTG_WARP_CHAIN}" -s "${cip}/32" -p tcp -j REDIRECT --to-ports "${MTG_WARP_REDSOCKS_PORT}"
-        elif [ "$mtype" = "telemt" ]; then
-            local svc_user svc_uid
-            svc_user=$(grep "^User=" "/etc/systemd/system/${mname}.service" 2>/dev/null | head -1 | cut -d= -f2)
-            [ -z "$svc_user" ] && svc_user="telemt"
-            svc_uid=$(id -u "$svc_user" 2>/dev/null || true)
-            [ -n "$svc_uid" ] || continue
-            iptables -t nat -A "${MTG_WARP_CHAIN_OUT}" -p tcp -m owner --uid-owner "${svc_uid}" -j REDIRECT --to-ports "${MTG_WARP_REDSOCKS_PORT}"
-        fi
-    done
-}
-
-_mtg_warp_enable() {
-    local name="$1"
-    local meta_file="${MTG_CONF_DIR}/${name}.meta"
-    [ -f "$meta_file" ] || return 1
-
-    local dtype; dtype=$(_mtg_detect_type "$name")
-
-    local socks_addr
-    socks_addr=$(_mtg_warp_socks_addr) || {
-        echo -e "${RED}  ✗ Upstream SOCKS не найден (MTG_UPSTREAM_SOCKS='${MTG_UPSTREAM_SOCKS:-auto}', fallback 127.0.0.1:${WARP_SOCKS_PORT})${NC}"
-        return 1
-    }
-
-    _mtg_warp_ensure_redsocks "$socks_addr" || {
-        echo -e "${RED}  ✗ Не удалось запустить redsocks для MTProto${NC}"
-        return 1
-    }
-
-    if [ "$dtype" = "govpn" ]; then
-        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
-            echo -e "${YELLOW}  ⚠ Прокси не запущен, включаю после старта контейнера${NC}"
-        fi
-    elif [ "$dtype" = "telemt" ]; then
-        if ! systemctl is-active --quiet "$name" 2>/dev/null; then
-            echo -e "${YELLOW}  ⚠ Telemt не запущен, правила применятся после старта сервиса${NC}"
-        fi
-    else
-        echo -e "${YELLOW}  Для внешнего прокси авто-маршрутизация через WARP не поддерживается.${NC}"
-        return 1
-    fi
-
-    if grep -q "^mtg_warp=" "$meta_file" 2>/dev/null; then
-        sed -i 's/^mtg_warp=.*/mtg_warp=1/' "$meta_file"
-    else
-        echo "mtg_warp=1" >> "$meta_file"
-    fi
-
-    _mtg_warp_apply_rules
-    log_action "MTG WARP ON: ${name}"
-    echo -e "${GREEN}  ✓ MTProto ${name} направлен через WARP${NC}"
-    return 0
-}
-
-_mtg_warp_disable() {
-    local name="$1"
-    local meta_file="${MTG_CONF_DIR}/${name}.meta"
-    [ -f "$meta_file" ] || return 1
-
-    if grep -q "^mtg_warp=" "$meta_file" 2>/dev/null; then
-        sed -i 's/^mtg_warp=.*/mtg_warp=0/' "$meta_file"
-    else
-        echo "mtg_warp=0" >> "$meta_file"
-    fi
-
-    _mtg_warp_apply_rules
-    log_action "MTG WARP OFF: ${name}"
-    echo -e "${GREEN}  ✓ MTProto ${name} отключён от WARP${NC}"
-    return 0
-}
-
-_mtg_warp_live_test() {
-    clear
-    echo -e "\n${CYAN}━━━ MTProto → WARP: Live-тест ━━━${NC}\n"
-
-    local socks_addr
-    socks_addr=$(_mtg_warp_socks_addr) || {
-        echo -e "  ${RED}✗ Upstream SOCKS не найден (MTG_UPSTREAM_SOCKS='${MTG_UPSTREAM_SOCKS:-auto}', fallback 127.0.0.1:${WARP_SOCKS_PORT})${NC}"
-        echo -e "  ${YELLOW}Сначала включите/проверьте WARP (п.1 в главном меню).${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    }
-
-    local host_wip
-    host_wip=$(curl -s4 --max-time 8 --proxy "socks5://${socks_addr}" https://api4.ipify.org 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$host_wip" ]; then
-        echo -e "  ${RED}✗ Не удалось получить WARP IP через SOCKS ${socks_addr}${NC}"
-        read -p "Нажмите Enter..." < /dev/tty
-        return
-    fi
-
-    echo -e "  ${WHITE}WARP SOCKS:${NC} ${CYAN}${socks_addr}${NC}"
-    echo -e "  ${WHITE}WARP IP (host):${NC} ${GREEN}${host_wip}${NC}\n"
-
-    local tested=0 matched=0
-    for meta in "${MTG_CONF_DIR}"/*.meta; do
-        [ -f "$meta" ] || continue
-        local name; name=$(basename "$meta" .meta)
-        local flag; flag=$(grep "^mtg_warp=" "$meta" 2>/dev/null | cut -d= -f2)
-        [ "$flag" = "1" ] || continue
-
-        local dtype; dtype=$(_mtg_detect_type "$name")
-        if [ "$dtype" = "govpn" ]; then
-            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
-                echo -e "  ${YELLOW}${name}:${NC} пропуск (контейнер не запущен)"
-                continue
-            fi
-
-            local cip
-            cip=$(_mtg_warp_container_ip "$name")
-            if [ -z "$cip" ]; then
-                echo -e "  ${YELLOW}${name}:${NC} пропуск (нет IP контейнера)"
-                continue
-            fi
-
-            local ip_out
-            ip_out=$(docker exec "$name" sh -c "curl -s4 --max-time 8 https://api4.ipify.org 2>/dev/null || true" | tr -d '[:space:]')
-            tested=$((tested + 1))
-
-            if [ -n "$ip_out" ] && [ "$ip_out" = "$host_wip" ]; then
-                matched=$((matched + 1))
-                echo -e "  ${GREEN}✓ ${name}${NC}  (${cip})  выход: ${GREEN}${ip_out}${NC}"
-            else
-                echo -e "  ${RED}✗ ${name}${NC}  (${cip})  выход: ${YELLOW}${ip_out:-N/A}${NC}"
-            fi
-        elif [ "$dtype" = "telemt" ]; then
-            local svc_user ip_out
-            svc_user=$(grep "^User=" "/etc/systemd/system/${name}.service" 2>/dev/null | head -1 | cut -d= -f2)
-            [ -z "$svc_user" ] && svc_user="telemt"
-            if ! id "$svc_user" >/dev/null 2>&1; then
-                echo -e "  ${YELLOW}${name}:${NC} пропуск (нет пользователя ${svc_user})"
-                continue
-            fi
-            ip_out=$(su -s /bin/sh -c "curl -s4 --max-time 8 https://api4.ipify.org 2>/dev/null || true" "$svc_user" | tr -d '[:space:]')
-            tested=$((tested + 1))
-            if [ -n "$ip_out" ] && [ "$ip_out" = "$host_wip" ]; then
-                matched=$((matched + 1))
-                echo -e "  ${GREEN}✓ ${name}${NC}  (telemt user:${svc_user})  выход: ${GREEN}${ip_out}${NC}"
-            else
-                echo -e "  ${RED}✗ ${name}${NC}  (telemt user:${svc_user})  выход: ${YELLOW}${ip_out:-N/A}${NC}"
-            fi
-        fi
-    done
-
-    echo ""
-    if [ "$tested" -eq 0 ]; then
-        echo -e "  ${YELLOW}Нет запущенных MTProto (mtg) с включённым mtg_warp=1.${NC}"
-    elif [ "$matched" -eq "$tested" ]; then
-        echo -e "  ${GREEN}Итог: ${matched}/${tested} прокси выходят через WARP.${NC}"
-    else
-        echo -e "  ${YELLOW}Итог: ${matched}/${tested} прокси подтверждены через WARP.${NC}"
-        echo -e "  ${WHITE}Проверьте правила: ${CYAN}iptables -t nat -S ${MTG_WARP_CHAIN}${NC}"
-    fi
-
-    read -p "Нажмите Enter..." < /dev/tty
-}
 
 _mtg_list_instances() {
     # Docker контейнеры mtg/mtproto (исключаем telemt)
@@ -11678,8 +11131,6 @@ _mtg_manage() {
         domain=$(grep "^domain=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
         link=$(grep "^link=" "$meta_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
         local created; created=$(grep "^created=" "$meta_file" 2>/dev/null | cut -d'=' -f2-)
-        local warp_flag; warp_flag=$(grep "^mtg_warp=" "$meta_file" 2>/dev/null | cut -d'=' -f2)
-        [ -z "$warp_flag" ] && warp_flag="0"
 
         if _mtg_is_running "$name"; then
             running_st="${GREEN}● активен${NC}"
@@ -11692,19 +11143,9 @@ _mtg_manage() {
         echo -e "  ${WHITE}Порт:    ${CYAN}${port}${NC}"
         echo -e "  ${WHITE}Домен:   ${CYAN}${domain} (FakeTLS)${NC}"
         echo -e "  ${WHITE}Создан:  ${WHITE}${created}${NC}"
-        if [ "$warp_flag" = "1" ]; then
-            echo -e "  ${WHITE}WARP:    ${GREEN}● включён${NC}"
-        else
-            echo -e "  ${WHITE}WARP:    ${YELLOW}○ выключен${NC}"
-        fi
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Показать ссылку и QR"
         echo -e "  ${YELLOW}[2]${NC}  Перевыпустить секрет"
-        if [ "$warp_flag" = "1" ]; then
-            echo -e "  ${YELLOW}[w]${NC}  Отключить MTProto → WARP"
-        else
-            echo -e "  ${YELLOW}[w]${NC}  Включить MTProto → WARP"
-        fi
         if _mtg_is_running "$name"; then
             echo -e "  ${YELLOW}[3]${NC}  Остановить"
         else
@@ -11826,13 +11267,6 @@ PYEOF
                     _mtg_is_running "$name" && echo -e "${GREEN}Запущен.${NC}" || echo -e "${RED}Не удалось запустить.${NC}"
                 fi
                 sleep 1 ;;
-            w|W|ц|Ц)
-                if [ "$warp_flag" = "1" ]; then
-                    _mtg_warp_disable "$name"
-                else
-                    _mtg_warp_enable "$name"
-                fi
-                read -p "Нажмите Enter..." ;;
             4)
                 local del_type; del_type=$(_mtg_detect_type "$name")
                 if [ "$del_type" = "telemt" ]; then
@@ -12906,6 +12340,215 @@ _mtg_recommend_settings() {
     fi
 }
 
+# ═══════════════════════════════════════════════════════════════
+#  TGWS UNIVERSAL (Flowseal tg-ws-proxy)
+# ═══════════════════════════════════════════════════════════════
+
+TGWS_DIR="${CONF_DIR}/tgws-universal"
+TGWS_ENV="${TGWS_DIR}/.env"
+TGWS_COMPOSE="${TGWS_DIR}/docker-compose.yml"
+
+_tgws_prepare_files() {
+    mkdir -p "$TGWS_DIR"
+
+    [ -f "${TGWS_DIR}/.env.example" ] || cat > "${TGWS_DIR}/.env.example" << 'EOF'
+# Public server address for tg:// link (IP or domain)
+TGWS_PUBLIC_HOST=YOUR_SERVER_IP_OR_DOMAIN
+
+# Listen port on host for MTProto clients
+TGWS_HOST_PORT=15443
+
+# Optional fixed MTProto secret (32 hex chars). If empty, autogen on first run.
+TGWS_SECRET=
+
+# Internal container listen params
+TG_WS_PROXY_HOST=0.0.0.0
+TG_WS_PROXY_PORT=1443
+
+# Optional DC override
+TG_WS_PROXY_DC_IPS=2:149.154.167.220 4:149.154.167.220
+EOF
+
+    cat > "$TGWS_COMPOSE" << 'EOF'
+services:
+  tgws:
+    image: ghcr.io/flowseal/tg-ws-proxy:latest
+    container_name: tgws-universal
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TG_WS_PROXY_HOST: ${TG_WS_PROXY_HOST:-0.0.0.0}
+      TG_WS_PROXY_PORT: ${TG_WS_PROXY_PORT:-1443}
+      TG_WS_PROXY_SECRET: ${TGWS_SECRET:-}
+      TG_WS_PROXY_DC_IPS: ${TG_WS_PROXY_DC_IPS:-2:149.154.167.220 4:149.154.167.220}
+    ports:
+      - "${TGWS_HOST_PORT:-15443}:${TG_WS_PROXY_PORT:-1443}"
+EOF
+}
+
+_tgws_compose_cmd() {
+    if docker compose version >/dev/null 2>&1; then
+        echo "docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        echo "docker-compose"
+    else
+        echo ""
+    fi
+}
+
+_tgws_read_env_var() {
+    local key="$1"
+    [ -f "$TGWS_ENV" ] || return 0
+    grep "^${key}=" "$TGWS_ENV" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+_tgws_set_env_var() {
+    local key="$1" val="$2"
+    if grep -q "^${key}=" "$TGWS_ENV" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${val}|" "$TGWS_ENV"
+    else
+        echo "${key}=${val}" >> "$TGWS_ENV"
+    fi
+}
+
+_tgws_print_link() {
+    local host port sec
+    host=$(_tgws_read_env_var TGWS_PUBLIC_HOST)
+    port=$(_tgws_read_env_var TGWS_HOST_PORT)
+    sec=$(_tgws_read_env_var TGWS_SECRET)
+    [ -z "$host" ] && host="$MY_IP"
+    [ -z "$port" ] && port="15443"
+    [ -n "$sec" ] && echo "tg://proxy?server=${host}&port=${port}&secret=dd${sec}"
+}
+
+_tgws_setup_and_deploy() {
+    clear
+    echo -e "\n${CYAN}━━━ TGWS Universal: запуск ━━━${NC}\n"
+    _tgws_prepare_files
+
+    [ -f "$TGWS_ENV" ] || cp "${TGWS_DIR}/.env.example" "$TGWS_ENV"
+
+    local cur_host cur_port cur_secret
+    cur_host=$(_tgws_read_env_var TGWS_PUBLIC_HOST)
+    cur_port=$(_tgws_read_env_var TGWS_HOST_PORT); [ -z "$cur_port" ] && cur_port="15443"
+    cur_secret=$(_tgws_read_env_var TGWS_SECRET)
+
+    [ -z "$cur_host" ] || [ "$cur_host" = "YOUR_SERVER_IP_OR_DOMAIN" ] && cur_host="$MY_IP"
+
+    echo -e "  ${WHITE}Public host/IP:${NC} ${CYAN}${cur_host}${NC}"
+    echo -ne "  Введите host/IP [${cur_host}]: "
+    local vhost; read -r vhost < /dev/tty
+    [ -z "$vhost" ] && vhost="$cur_host"
+    _tgws_set_env_var TGWS_PUBLIC_HOST "$vhost"
+
+    echo -ne "  Введите внешний порт [${cur_port}]: "
+    local vport; read -r vport < /dev/tty
+    [ -z "$vport" ] && vport="$cur_port"
+    if [[ ! "$vport" =~ ^[0-9]+$ ]] || (( vport < 1 || vport > 65535 )); then
+        echo -e "  ${RED}✗ Неверный порт${NC}"
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    fi
+    _tgws_set_env_var TGWS_HOST_PORT "$vport"
+
+    if [ -z "$cur_secret" ]; then
+        cur_secret=$(openssl rand -hex 16 2>/dev/null || true)
+        [ -z "$cur_secret" ] && cur_secret=$(python3 -c "import os,binascii; print(binascii.hexlify(os.urandom(16)).decode())")
+        _tgws_set_env_var TGWS_SECRET "$cur_secret"
+    fi
+
+    local dcmd; dcmd=$(_tgws_compose_cmd)
+    if [ -z "$dcmd" ]; then
+        echo -e "  ${RED}✗ docker compose не найден${NC}"
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    fi
+
+    if ss -tlnp 2>/dev/null | grep -q ":${vport} "; then
+        echo -e "  ${RED}✗ Порт ${vport} уже занят${NC}"
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    fi
+
+    echo -e "\n  ${CYAN}Загружаю образ и запускаю контейнер...${NC}"
+    (cd "$TGWS_DIR" && $dcmd pull && $dcmd up -d) >/dev/null 2>&1 || {
+        echo -e "  ${RED}✗ Ошибка запуска TGWS${NC}"
+        docker logs --tail 80 tgws-universal 2>/dev/null | sed 's/^/    /'
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    }
+
+    sleep 2
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^tgws-universal$'; then
+        echo -e "  ${RED}✗ Контейнер tgws-universal не запущен${NC}"
+        docker logs --tail 80 tgws-universal 2>/dev/null | sed 's/^/    /'
+        read -p "Нажмите Enter..." < /dev/tty
+        return
+    fi
+
+    local link; link=$(_tgws_print_link)
+    echo -e "\n  ${GREEN}✓ TGWS Universal запущен${NC}"
+    echo -e "  ${WHITE}Endpoint:${NC} ${CYAN}${vhost}:${vport}${NC}"
+    [ -n "$link" ] && echo -e "  ${WHITE}Link:${NC} ${GREEN}${link}${NC}"
+    log_action "TGWS DEPLOY: ${vhost}:${vport}"
+    read -p "Нажмите Enter..." < /dev/tty
+}
+
+_tgws_status() {
+    clear
+    echo -e "\n${CYAN}━━━ TGWS Universal: статус ━━━${NC}\n"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^tgws-universal$'; then
+        echo -e "  ${GREEN}✓ контейнер запущен${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ контейнер не запущен${NC}"
+    fi
+    docker ps --filter name=tgws-universal --format '  {{.Names}}  {{.Status}}  {{.Ports}}' 2>/dev/null
+    local link; link=$(_tgws_print_link)
+    [ -n "$link" ] && echo -e "\n  ${WHITE}Link:${NC}\n  ${GREEN}${link}${NC}"
+    echo ""
+    docker logs --tail 25 tgws-universal 2>/dev/null | sed 's/^/  /'
+    read -p "Нажмите Enter..." < /dev/tty
+}
+
+_tgws_remove() {
+    clear
+    echo -e "\n${CYAN}━━━ TGWS Universal: удаление ━━━${NC}\n"
+    echo -ne "  ${RED}Остановить и удалить tgws-universal? (y/n): ${NC}"
+    local c; read -r c < /dev/tty
+    [ "$c" != "y" ] && return
+
+    local dcmd; dcmd=$(_tgws_compose_cmd)
+    if [ -n "$dcmd" ] && [ -f "$TGWS_COMPOSE" ]; then
+        (cd "$TGWS_DIR" && $dcmd down) >/dev/null 2>&1 || true
+    fi
+    docker rm -f tgws-universal >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓ Удалено${NC}"
+    log_action "TGWS REMOVE"
+    read -p "Нажмите Enter..." < /dev/tty
+}
+
+_tgws_menu() {
+    while true; do
+        clear
+        echo -e "\n${CYAN}━━━ TGWS Universal ━━━${NC}\n"
+        local link; link=$(_tgws_print_link)
+        [ -n "$link" ] && echo -e "  ${WHITE}Текущий link:${NC}\n  ${GREEN}${link}${NC}\n"
+        echo -e "  ${YELLOW}[1]${NC}  Подготовить/запустить"
+        echo -e "  ${YELLOW}[2]${NC}  Статус и логи"
+        echo -e "  ${RED}[3]${NC}  Остановить и удалить"
+        echo -e "  ${YELLOW}[0]${NC}  Назад"
+        echo ""
+        local ch; ch=$(read_choice "Выбор: ")
+        case "$ch" in
+            1) _tgws_setup_and_deploy ;;
+            2) _tgws_status ;;
+            3) _tgws_remove ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 mtproto_menu() {
     mkdir -p "$MTG_CONF_DIR"
 
@@ -12983,11 +12626,7 @@ except:
         [ ${#names[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC}  Управление прокси"
         echo -e "  ${WHITE}── Сайт ──────────────────────────────${NC}"
         echo -e "  ${CYAN}[s]${NC}  Настроить сайт-заглушку (SSL + шаблон)"
-        echo -e "  ${CYAN}[u]${NC}  Upstream SOCKS для MTProto (${MTG_UPSTREAM_SOCKS:-auto})"
-        echo -e "  ${CYAN}[k]${NC}  Выбрать SOCKS из найденных"
-        echo -e "  ${CYAN}[b]${NC}  Создать SOCKS bridge из AWG/WARP"
-        echo -e "  ${CYAN}[d]${NC}  Диагностика MTProto → WARP/SOCKS"
-        echo -e "  ${CYAN}[w]${NC}  Проверка MTProto → WARP (live IP тест)"
+        echo -e "  ${CYAN}[g]${NC}  TGWS Universal (серверный WS MTProto)"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
@@ -12996,11 +12635,7 @@ except:
         [ "$ch" = "+" ] && { _mtg_add; continue; }
         [ "$ch" = "t" ] || [ "$ch" = "T" ] && { _telemt_add; continue; }
         [ "$ch" = "s" ] || [ "$ch" = "S" ] && { _stub_setup_full; continue; }
-        [ "$ch" = "u" ] || [ "$ch" = "U" ] && { _mtg_set_upstream_socks; continue; }
-        [ "$ch" = "k" ] || [ "$ch" = "K" ] && { _mtg_select_socks_candidate; continue; }
-        [ "$ch" = "b" ] || [ "$ch" = "B" ] && { _mtg_setup_awg_socks_bridge; continue; }
-        [ "$ch" = "d" ] || [ "$ch" = "D" ] && { _mtg_warp_diagnostics; continue; }
-        [ "$ch" = "w" ] || [ "$ch" = "W" ] && { _mtg_warp_live_test; continue; }
+        [ "$ch" = "g" ] || [ "$ch" = "G" ] && { _tgws_menu; continue; }
 
         if [[ "$ch" =~ ^[0-9]+$ ]] && (( ch >= 1 && ch <= ${#names[@]} )); then
             _mtg_manage "${names[$((ch-1))]}"
@@ -13156,9 +12791,6 @@ run_startup() {
 
     ((s++)); printf "  ${CYAN}[%d/%d]${NC}  Определение режима...\n" "$s" "$total"
     detect_mode
-
-    # Восстановление MTProto→WARP правил (если были включены ранее)
-    _mtg_warp_apply_rules 2>/dev/null || true
 
     # Автодобавление IP этого сервера в список серверов
     if [ -n "$MY_IP" ] && ! grep -q "^${MY_IP}=" "$ALIASES_FILE" 2>/dev/null; then
