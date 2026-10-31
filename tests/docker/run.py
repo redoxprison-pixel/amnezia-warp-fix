@@ -45,7 +45,8 @@ with tempfile.TemporaryDirectory() as temp:
             time.sleep(0.1)
         ctl.import_state(profile, selected, 'awg0')
         docker('cp', str(ROOT / 'govpn.sh'), name + ':/tmp/govpn.sh')
-        assert 'v6.61' in docker('exec', name, 'bash', '/tmp/govpn.sh', 'version').stdout
+        version = re.search(r'^VERSION="([^"]+)"', (ROOT / 'govpn.sh').read_text(), re.M)[1]
+        assert 'v' + version in docker('exec', name, 'bash', '/tmp/govpn.sh', 'version').stdout
         docker('exec', name, 'bash', '/tmp/govpn.sh', 'warp-safe', name, '--help')
         # Exact old GoVPN mark is migrated; unrelated table 100 entries survive.
         docker('exec', name, 'ip', '-4', 'route', 'add', 'default', 'dev', 'uplink', 'table', '100')

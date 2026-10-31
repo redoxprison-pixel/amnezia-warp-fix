@@ -11,10 +11,12 @@ fi
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.61"
+VERSION="6.62"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
-REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh"
+# Keep draft updates on the reviewed branch; switch this ref to main at release.
+UPDATE_REF="fix/awg-warp-safe-persistence"
+REPO_URL="https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/${UPDATE_REF}/govpn.sh"
 
 CONF_DIR="/etc/govpn"
 CONF_FILE="${CONF_DIR}/config"
@@ -9673,32 +9675,78 @@ _check_conflicts() {
 #  АВТООБНОВЛЕНИЕ
 # ═══════════════════════════════════════════════════════════════
 
-UPDATE_CACHE_FILE="${CONF_DIR}/update.cache"   # содержит: "VERSION|TIMESTAMP"
+UPDATE_CACHE_FILE="${CONF_DIR}/update.cache"   # VERSION|TIMESTAMP|UPDATE_REF
 UPDATE_CACHE_TTL=21600                          # 6 часов
 
 # Возвращает версию из кеша (если кеш свежий), иначе пустую строку
 _update_cached_ver() {
     [ -f "$UPDATE_CACHE_FILE" ] || return
-    local line; line=$(cat "$UPDATE_CACHE_FILE" 2>/dev/null)
-    local cached_ver="${line%%|*}"
-    local cached_ts="${line##*|}"
-    [[ "$cached_ver" =~ ^[0-9]+\.[0-9]+ ]] || return
+    local cached_ver cached_ts cached_ref
+    IFS='|' read -r cached_ver cached_ts cached_ref < "$UPDATE_CACHE_FILE" || return
+    [ "$cached_ref" = "$UPDATE_REF" ] || return
+    [[ "$cached_ver" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || return
     [[ "$cached_ts" =~ ^[0-9]+$ ]] || return
     local now; now=$(date +%s)
-    (( now - cached_ts < UPDATE_CACHE_TTL )) && echo "$cached_ver"
+    (( now >= cached_ts && now - cached_ts < UPDATE_CACHE_TTL )) && echo "$cached_ver"
 }
 
-# Асинхронно проверяет версию в репо и обновляет кеш (запускается в фоне)
-_update_fetch_bg() {
-    local tmp="/tmp/govpn_ver_check.sh"
-    curl -fsSL --max-time 10 "$REPO_URL" -o "$tmp" 2>/dev/null || return
-    head -1 "$tmp" 2>/dev/null | grep -q '#!/bin/bash' || { rm -f "$tmp"; return; }
-    local new_ver; new_ver=$(grep '^VERSION=' "$tmp" 2>/dev/null | head -1 | cut -d'"' -f2)
-    rm -f "$tmp"
-    [[ "$new_ver" =~ ^[0-9]+\.[0-9]+ ]] || return
-    mkdir -p "$CONF_DIR"
-    echo "${new_ver}|$(date +%s)" > "$UPDATE_CACHE_FILE"
+_update_validate() {
+    # Parse the download; never source it or execute its Python backend.
+    bash -n "$1" 2>/dev/null || return 1
+    python3 - "$1" <<'GOVPN_UPDATE_PY'
+import ast
+from pathlib import Path
+import re
+import sys
+
+try:
+    text = Path(sys.argv[1]).read_text()
+    if not text.startswith('#!/bin/bash\n'):
+        raise ValueError()
+    versions = re.findall(r'^VERSION="([0-9]+\.[0-9]+(?:\.[0-9]+)?)"$', text, re.M)
+    if len(versions) != 1:
+        raise ValueError()
+    begin, end = '# BEGIN GENERATED SAFE WARP\n', '# END GENERATED SAFE WARP\n'
+    if text.count(begin) != 1 or text.count(end) != 1:
+        raise ValueError()
+    block = text.split(begin, 1)[1].split(end, 1)[0]
+    prefix = '_awg_safe() {\n    python3 - "$AWG_CONTAINER" "$@" <<\'GOVPN_SAFE_PY\'\n'
+    suffix = '\nGOVPN_SAFE_PY\n}\n'
+    if not block.startswith(prefix) or not block.endswith(suffix):
+        raise ValueError()
+    ast.parse(block[len(prefix):-len(suffix)])
+    print(versions[0])
+except (OSError, ValueError, SyntaxError):
+    sys.exit(1)
+GOVPN_UPDATE_PY
 }
+
+_update_download() {
+    curl -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 30 --max-filesize 4194304 \
+        "$REPO_URL" -o "$1" 2>/dev/null
+}
+
+_update_write_cache() (
+    umask 077
+    mkdir -p "$CONF_DIR" || return 1
+    local cache_tmp
+    cache_tmp=$(mktemp "${CONF_DIR}/.update-cache.XXXXXX") || return 1
+    trap 'rm -f -- "$cache_tmp"' EXIT
+    printf '%s|%s|%s\n' "$1" "$(date +%s)" "$UPDATE_REF" > "$cache_tmp" || return 1
+    mv -f -- "$cache_tmp" "$UPDATE_CACHE_FILE"
+)
+
+# Read-only download check; private temporary files and channel-aware cache.
+_update_fetch_bg() (
+    umask 077
+    local work new_ver
+    work=$(mktemp -d /tmp/govpn-check.XXXXXX) || return 1
+    trap 'rm -rf -- "$work"' EXIT
+    _update_download "$work/govpn.sh" || return 1
+    new_ver=$(_update_validate "$work/govpn.sh") || return 1
+    _update_write_cache "$new_ver"
+)
 
 # Запускает фоновую проверку если кеш устарел
 _update_check_async() {
@@ -9710,9 +9758,81 @@ _update_check_async() {
 
 # Скачивает, валидирует и устанавливает новую версию
 # Аргументы: [--force] [--yes]
+_cmd_update_install() (
+    umask 077
+    local force=0 yes=0 arg answer new_ver work="" stage="" backup=""
+    for arg in "$@"; do
+        case "$arg" in
+            --force) force=1 ;;
+            --yes) yes=1 ;;
+            *) echo "Использование: govpn update [--force] [--yes]" >&2; return 1 ;;
+        esac
+    done
+
+    echo "Обновление GoVPN: v${VERSION}"
+    echo "Источник: ${UPDATE_REF}"
+    command -v flock >/dev/null || { echo "Для обновления требуется flock (util-linux)." >&2; return 1; }
+    mkdir -p "$CONF_DIR" "$BACKUP_DIR" || return 1
+    chmod 700 "$CONF_DIR" "$BACKUP_DIR" || return 1
+    exec 9>"${CONF_DIR}/update.lock" || return 1
+    flock -n 9 || { echo "Другое обновление уже выполняется." >&2; return 1; }
+    [ ! -L "$INSTALL_PATH" ] || { echo "Путь установки не должен быть symlink." >&2; return 1; }
+    work=$(mktemp -d /tmp/govpn-update.XXXXXX) || return 1
+    trap 'rm -rf -- "$work"; [ -z "$stage" ] || rm -f -- "$stage"' EXIT
+
+    _update_download "$work/govpn.sh" || { echo "Не удалось скачать обновление. Текущая версия сохранена." >&2; return 1; }
+    new_ver=$(_update_validate "$work/govpn.sh") || {
+        echo "Обновление отклонено: неверный формат, синтаксис или отсутствует safe WARP backend." >&2
+        return 1
+    }
+    echo "Версия в источнике: v${new_ver}"
+
+    if [ "$force" -eq 0 ] && [ "$new_ver" = "$VERSION" ]; then
+        echo "Уже установлена актуальная версия."
+        [ "$yes" -eq 1 ] && return 0
+        read -r -p "Переустановить эту версию? (y/n): " answer < /dev/tty || return 0
+        [ "$answer" = y ] || return 0
+    elif [ "$force" -eq 0 ] && _ver_lt "$new_ver" "$VERSION"; then
+        echo "Источник содержит более старую версию. Для явного отката используйте --force." >&2
+        return 1
+    fi
+
+    # A full backup must succeed before preparing the atomic replacement.
+    if [ -e "$INSTALL_PATH" ]; then
+        [ -f "$INSTALL_PATH" ] || return 1
+        backup=$(mktemp -d "${BACKUP_DIR}/govpn-update.XXXXXX") || return 1
+        cp -p -- "$INSTALL_PATH" "$backup/govpn.sh" && chmod 600 "$backup/govpn.sh" || {
+            echo "Резервная копия не создана. Обновление отменено." >&2
+            return 1
+        }
+    fi
+    stage=$(mktemp "${INSTALL_PATH}.update.XXXXXX") || return 1
+    cp -- "$work/govpn.sh" "$stage" && chmod 755 "$stage" && mv -f -- "$stage" "$INSTALL_PATH" || {
+        echo "Установка не выполнена. Проверьте права и свободное место." >&2
+        return 1
+    }
+    stage=""
+    _update_write_cache "$new_ver" || echo "Версия установлена, но кеш обновить не удалось." >&2
+    log_action "UPDATE: v${VERSION} -> v${new_ver}, source=${UPDATE_REF}" || true
+    echo "Установлена v${new_ver}."
+    [ -z "$backup" ] || echo "Резервная копия: ${backup}/govpn.sh"
+
+    # CLI automation completes without opening an interactive manager.
+    [ "$yes" -eq 1 ] && return 0
+    read -r -p "Нажмите Enter для запуска обновленной версии..." < /dev/tty || return 0
+    # Return to the parent shell after EXIT cleanup and closing the lock fd.
+    # The parent must exec the new menu, otherwise exiting it revives the old one.
+    return 20
+)
+
 cmd_update() {
-    echo "Автообновление review-сборки отключено. Установите проверенный commit явно." >&2
-    return 1
+    local result
+    _cmd_update_install "$@"
+    result=$?
+    if [ "$result" -eq 20 ]; then
+        exec "$INSTALL_PATH"
+    fi
+    return "$result"
 }
 
 # Сравнение версий: возвращает 0 (true) если $1 < $2

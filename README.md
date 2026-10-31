@@ -1,4 +1,4 @@
-# GoVPN Manager v6.61 (Draft review)
+# GoVPN Manager v6.62 (Draft review)
 
 Управление VPN-серверами: AmneziaWG, 3X-UI, WARP, MTProto, iptables.
 
@@ -24,7 +24,7 @@ bash -n govpn.sh
 
 Изолированные тесты реальных Linux routes/iptables описаны в runbook. Для них используются только временные локальные Docker контейнеры без внешней сети, синтетический профиль и dummy WARP. Они не регистрируют аккаунт и не обращаются к production VPS.
 
-Остальные CLI: `govpn`, `backup`, `check-update`, `rollback <файл>`. Автообновление review-сборки отключено, чтобы случайно не вернуть небезопасный код из `main`. Существующие функции 3X-UI, Hysteria и MTProto остаются частью legacy manager; ограничения аудита перечислены отдельно.
+Обновление снова доступно через **8 → Система и управление → 2 → Обновить скрипт**, а также через `govpn update` и `govpn update --force`. Review-сборка получает обновления из `fix/awg-warp-safe-persistence`; старая установленная версия, которая обращается к `main`, не увидит Draft PR до объединения или разовой установки новой версии. Остальные CLI: `govpn`, `backup`, `check-update`, `rollback <файл>`. Существующие функции 3X-UI, Hysteria и MTProto остаются частью legacy manager; ограничения аудита перечислены отдельно.
 
 Не добавляйте runtime profiles, приватные ключи, account TOML и архивы в git. Они содержат секреты. Проверенные исходные копии конфигурации на VPS и существующие резервные копии не заменяются автоматически.
 
