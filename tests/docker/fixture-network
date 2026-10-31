@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+ip link show awg0 >/dev/null 2>&1 || ip link add awg0 type veth peer name client0
+ip link show uplink >/dev/null 2>&1 || ip link add uplink type veth peer name wan0
+for dev in awg0 client0 uplink wan0; do ip link set "$dev" up; done
+ip addr replace 10.8.1.1/24 dev awg0
+ip addr replace 192.0.2.2/24 dev uplink
+ip neigh replace 192.0.2.1 lladdr "$(cat /sys/class/net/wan0/address)" nud permanent dev uplink
+ip route replace default via 192.0.2.1 dev uplink
+ip -6 addr replace fd00:1::1/64 dev awg0 nodad
+ip -6 addr replace 2001:db8:1::2/64 dev uplink nodad
+ip -6 neigh replace 2001:db8:1::1 lladdr "$(cat /sys/class/net/wan0/address)" nud permanent dev uplink
+ip -6 route replace default via 2001:db8:1::1 dev uplink
+iptables -P FORWARD ACCEPT
+iptables -C FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

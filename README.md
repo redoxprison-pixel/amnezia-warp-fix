@@ -1,35 +1,30 @@
-# GoVPN Manager v5.18
+# GoVPN Manager v6.61 (Draft review)
 
-Управление VPN-серверами: AmneziaWG, 3X-UI, WARP, MTProto, iptables-проброс.
+Управление VPN-серверами: AmneziaWG, 3X-UI, WARP, MTProto, iptables.
 
-## Установка
+Ветка `fix/awg-warp-safe-persistence` содержит исправления сохранения WARP для AmneziaWG. Это review-сборка; установка на production и merge выполняются отдельно.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/redoxprison-pixel/amnezia-warp-fix/refs/heads/main/govpn.sh \
-  -o /usr/local/bin/govpn && chmod +x /usr/local/bin/govpn && govpn
-```
+- [Аудит и оставшиеся риски](docs/audit.md)
+- [Сохранение, миграция, fail-closed, IPv6 и восстановление](docs/warp-safety.md)
 
-## CLI-команды
+WARP конфигурация и положительный список выбранных IPv4 /32 хранятся в `/etc/amnezia-warp/<контейнер>/state.json` с правами 600. Профиль импортируется явно. Повторная регистрация WARP и прямое изменение Docker storage исключены. IPv6 AWG блокируется целиком. Обычный restart поддерживается; recreate требует установки hook в остановленный контейнер до его первого запуска.
 
 ```bash
-govpn                  # интерактивное меню
-govpn version          # текущая версия
-govpn update           # обновить скрипт
-govpn update --force   # переустановить принудительно
-govpn check-update     # проверить версию в репо
-govpn backup           # создать полный бэкап
-govpn rollback <файл>  # восстановить x-ui.db или config.json из файла
+# Только информация и помощь, без установки и сетевых изменений.
+bash govpn.sh version
+bash govpn.sh warp-safe amnezia-awg2 --help
+
+# Проверки исходников.
+python3 -m unittest discover -s tests -v
+python3 tools/bundle.py --check
+bash -n govpn.sh
 ```
 
-## Что умеет
+Скрипт остается самодостаточным. Для изменения backend редактируйте `lib/awg_warp.py`, затем выполните `python3 tools/bundle.py` и тесты. Встроенная копия проверяется тестом на совпадение.
 
-- **Автодетект режима** — amnezia / 3xui / combo / bridge при каждом запуске
-- **WARP** — установка, настройка, тест; per-client маршрутизация для AWG
-- **AWG клиенты** — добавить, удалить, QR-код, список с handshake-статусом
-- **MTProto прокси** — запуск mtg-контейнеров с FakeTLS
-- **iptables проброс** — каскад через rxpn bridge
-- **Reality SNI Scanner** — поиск рабочих SNI для VLESS/XTLS
-- **Бэкапы** — полный архив (AWG + x-ui.db + WARP-ключи + скрипт), автобэкап перед изменениями клиентов, rollback по компонентам
-- **Автообновление** — фоновая проверка версии, уведомление в шапке меню
-- **Мониторинг в шапке** — CPU, RAM, диск, AWG peers и трафик
-- **Мультисервер** — цепочка серверов с алиасами и отображением маршрута
+Изолированные тесты реальных Linux routes/iptables описаны в runbook. Для них используются только временные локальные Docker контейнеры без внешней сети, синтетический профиль и dummy WARP. Они не регистрируют аккаунт и не обращаются к production VPS.
+
+Остальные CLI: `govpn`, `backup`, `check-update`, `rollback <файл>`. Автообновление review-сборки отключено, чтобы случайно не вернуть небезопасный код из `main`. Существующие функции 3X-UI, Hysteria и MTProto остаются частью legacy manager; ограничения аудита перечислены отдельно.
+
+Не добавляйте runtime profiles, приватные ключи, account TOML и архивы в git. Они содержат секреты. Проверенные исходные копии конфигурации на VPS и существующие резервные копии не заменяются автоматически.
+

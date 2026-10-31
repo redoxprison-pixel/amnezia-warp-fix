@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+# Local runtime state and backups must never enter git.
+state.json
+warp.conf
+wgcf-account.toml
+wgcf-profile.conf
+clients.list
+*.tar.gz
+*.bak
