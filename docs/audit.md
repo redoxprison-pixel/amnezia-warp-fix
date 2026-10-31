@@ -1,6 +1,6 @@
 # Аудит govpn.sh
 
-База review: main `be7f7da1cc495d9f96e950c672e14b90447c991b`, версия 6.60. Исправления подготовлены в `fix/awg-warp-safe-persistence`, версия 6.65. Production VPS и его конфигурация не использовались как тестовое окружение.
+База review: main `be7f7da1cc495d9f96e950c672e14b90447c991b`, версия 6.60. Исправления подготовлены в `fix/awg-warp-safe-persistence`, версия 6.66. Production VPS и его конфигурация не использовались как тестовое окружение.
 
 ## Исправленные дефекты AWG/WARP
 
@@ -73,3 +73,15 @@ wgcf закреплен на v2.3.1 с SHA256 release assets, работает �
 Мастер больше не сообщает общий успех при частичном отказе combo. Документация и сообщение перед установкой явно требуют внешнего IPv4 DNS в клиентском профиле и проверки full tunnel/IPv6 на устройстве. Автоматическое редактирование настроек клиента, прозрачный DNS DNAT, гарантированная страна выхода и обход требований аккаунта Google не реализованы. См. [Gemini runbook](gemini.md).
 
 Добавлен 21 regression case: первый запуск, отказ/отмена, существующий/поврежденный профиль, сохранение account, retry generate, неопределенный register, SHA256/cache, зависимости/kernel preflight, первый импорт, native awg и частичный отказ combo. Итог: 78 unit tests в изолированном Linux без сети; macOS - 77 PASS и 1 skip настоящего flock. Docker с настоящим kernel WireGuard preflight прошел fresh bootstrap из синтетического профиля, сохранение/повтор/удаление и весь прежний набор kernel packet-path/lifecycle tests. Регистрация и загрузка подставные, туннель dummy; настоящие Cloudflare API/handshake и Gemini не проверялись. Production VPS не использовался.
+
+## UX, повторная выдача профилей и конфликт wg в 6.66
+
+Подтвержден реальный случай: `/usr/bin/wg` и `awg` внутри amnezia-awg2 оба являются amneziawg-tools. Проверка 6.65 ошибочно ожидала обычный WireGuard по тому же имени. Новый preflight выбирает совместимую пару либо извлекает обычные wg/wg-quick из доверенных пакетов дистрибутива в приватный payload, не устанавливая их поверх AWG. Alpine .apk проверяются через apk verify; Debian download использует аутентифицированные package indexes. Account и маршруты не применяются до успешной проверки. Host payload входит в backup и копируется в immutable runtime при восстановлении. Не выполняется fallback на AWG wg при отказе native WG.
+
+Объединены список клиентов, карточка и выбор выхода; MTProto/проброс портов перенесены в дополнительные задачи. Импорт экспортированного .conf и последующий экспорт проверяют текущий клиентский public key, Interface IP, серверный key и PSK. Приватные ключи передаются в pubkey через stdin, не argv. Серверные конфиги, hooks и profile для другого владельца IP не принимаются. Сохраненные profiles имеют режим 600 и не меняют peers. Отсутствие профиля ведет к инструкции по восстановлению, а не к неявной ротации ключей. Полноценный refresh Endpoint/obfuscation/app compatibility этим не подтверждается.
+
+Добавлен install.sh с syntax/embedded AST checks, private backup, общим с updater flock и атомарной установкой. Старая ссылка на main по-прежнему указывает на main; review installer явно использует ветку, без скрытого изменения main. Подготовка SSH в 8 → a выводит валидированный клиентский ProxyJump config и инструкции; sshd/firewall/authorized_keys не меняются, проверка реального внешнего доступа не имитируется.
+
+Итог 6.66: 96 unit cases PASS в Linux без сети; macOS 92 PASS и 4 skip (реальный flock и root installer). Предыдущая kernel matrix PASS. Отдельные локальные Alpine и Ubuntu tests получили доверенные packages, воспроизвел AWG под всеми стандартными именами wg, сохранил исходные binaries по SHA256 и после отключения сети поднял/удалил реальный WireGuard link приватным wg-quick. Использовались синтетические ключи и documentation-only Endpoint, без account Cloudflare/production VPS. Это не тест Gemini и не проверка всей legacy manager поверхности.
+
+Каталог и дальнейшая разбивка: [UX review](ux-review.md), [311 производственных функций](function-catalog.json). Остаточные риски предыдущих разделов не считаются устраненными изменением меню.

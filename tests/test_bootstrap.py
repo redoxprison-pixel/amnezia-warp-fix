@@ -25,7 +25,7 @@ class BootstrapTests(unittest.TestCase):
         self.binary = self.root / 'fake-wgcf'
         self.patches = [patch.object(self.ctl, 'inspect', return_value=True),
                         patch.object(self.ctl, 'read_container', side_effect=self.read),
-                        patch.object(self.ctl, 'prepare_dependencies'),
+                        patch.object(self.ctl, 'prepare_dependencies', return_value={'wg': '/usr/bin/wg', 'wg_quick': '/usr/bin/wg-quick'}),
                         patch.object(self.ctl, 'wgcf_binary', return_value=self.binary),
                         patch.object(self.ctl, 'deploy', return_value=True),
                         patch.object(safe.subprocess, 'run', side_effect=self.run_wgcf)]
@@ -183,7 +183,7 @@ class PreflightTests(unittest.TestCase):
             calls.append(argv)
             return subprocess.CompletedProcess([], int('public-key' in argv))
         with patch.object(self.ctl, 'inspect', return_value=True), patch.object(self.ctl, 'docker', side_effect=docker):
-            with self.assertRaisesRegex(safe.SafeError, 'несовместима'):
+            with self.assertRaisesRegex(safe.SafeError, 'Обычный WireGuard'):
                 self.ctl.prepare_dependencies()
         self.assertIn('delete', calls[-1])
 

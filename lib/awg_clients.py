@@ -5,6 +5,9 @@ join that metadata to the server's peers. GoVPN-only labels are keyed by the
 public key, so reusing an IP does not give a new peer the previous peer's name.
 """
 import contextlib
+import base64
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -118,7 +121,7 @@ def docker(container, *args, optional=False):
     return result.stdout if result.returncode == 0 else ''
 
 
-def snapshot(container):
+def read_config(container):
     config = ''
     for path in ('/opt/amnezia/awg/awg0.conf', '/opt/amnezia/awg/wg0.conf', '/etc/wireguard/wg0.conf'):
         config = docker(container, 'cat', path, optional=True)
@@ -127,6 +130,11 @@ def snapshot(container):
             break
     if not config:
         raise ClientError('Серверный конфиг AWG не найден. Список клиентов не изменен.')
+    return config, iface
+
+
+def snapshot(container):
+    config, iface = read_config(container)
     # Query only non-secret wg fields. Never use `wg show dump`.
     # Modern AWG exposes `awg`; older installations use a fork named `wg`.
     allowed = docker(container, 'awg', 'show', iface, 'allowed-ips', optional=True)
@@ -139,6 +147,110 @@ def snapshot(container):
     # Config remains authoritative when there are no live peers or wg tools.
     peers = live_peers(allowed) + config_peers(config)
     return records(table, peers, handshakes)
+
+
+def sections(text):
+    result, current = [], None
+    for line in text.splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith('['):
+            current = {}
+            result.append((line.lower(), current))
+        elif current is not None and '=' in line:
+            k, v = (s.strip() for s in line.split('=', 1))
+            if k.lower() in current:
+                raise ClientError('Повторный параметр в профиле.')
+            current[k.lower()] = v
+        else:
+            raise ClientError('Неподдерживаемый формат профиля.')
+    return result
+
+
+def public_key(container, private):
+    try:
+        if len(base64.b64decode(private, validate=True)) != 32:
+            raise ValueError()
+        for tool in ('awg', 'wg'):
+            result = subprocess.run(['docker', 'exec', '-i', container, tool, 'pubkey'],
+                                    input=private + '\n', text=True, capture_output=True, timeout=15)
+            value = result.stdout.strip()
+            if result.returncode == 0 and len(base64.b64decode(value, validate=True)) == 32:
+                return value
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+    raise ClientError('Не удалось проверить ключ профиля; он не сохранен и не выдан.')
+
+
+def validate_client_profile(text, row, container):
+    if len(text) > 65536 or any(unicodedata.category(c).startswith('C') and c not in '\n\r\t' for c in text):
+        raise ClientError('Некорректный размер или управляющие символы в профиле.')
+    data = sections(text)
+    if [name for name, _ in data] != ['[interface]', '[peer]']:
+        raise ClientError('Нужен обычный .conf с одним Interface и одним Peer, не ссылка Amnezia.')
+    own, peer = data[0][1], data[1][1]
+    allowed = {'privatekey', 'address', 'dns', 'mtu', 'listenport'} | {
+        'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4', 'i1', 'i2', 'i3', 'i4', 'i5'}
+    if set(own) - allowed or set(peer) - {'publickey', 'presharedkey', 'allowedips', 'endpoint', 'persistentkeepalive'}:
+        raise ClientError('Исполняемые hooks и неизвестные параметры профиля запрещены.')
+    try:
+        own_ips = [ipaddress.ip_interface(s.strip()).ip for s in own['address'].split(',')]
+        routes = [ipaddress.ip_network(s.strip()) for s in peer['allowedips'].split(',')]
+        if ipaddress.ip_interface(row['ip']).ip not in own_ips or not routes:
+            raise ValueError()
+        if not hmac.compare_digest(public_key(container, own['privatekey']), row['key']):
+            raise ValueError()
+        server, _ = read_config(container)
+        blocks = sections(server)
+        interfaces = [v for k, v in blocks if k == '[interface]']
+        matches = [v for k, v in blocks if k == '[peer]' and v.get('publickey') == row['key']
+                   and row['ip'] in addresses(v.get('allowedips'))]
+        if len(matches) != 1 or len(interfaces) != 1:
+            raise ValueError()
+        if not hmac.compare_digest(public_key(container, interfaces[0]['privatekey']), peer['publickey']):
+            raise ValueError()
+        if not hmac.compare_digest(matches[0].get('presharedkey', ''), peer.get('presharedkey', '')):
+            raise ValueError()
+    except (ValueError, KeyError):
+        raise ClientError('Профиль не соответствует текущему ключу, IP или серверу этого клиента.') from None
+    return text
+
+
+def profile_path(root, container, row):
+    return root / 'client-profiles' / container / (hashlib.sha256(row['key'].encode()).hexdigest() + '.conf')
+
+
+def saved_profile(root, container, row):
+    path = profile_path(root, container, row)
+    if not path.exists():
+        path = root / 'awg_clients' / (str(ipaddress.ip_interface(row['ip']).ip) + '.conf')
+    if path.is_symlink() or not path.is_file():
+        raise ClientError('Сохраненного профиля нет. Экспортируйте его с устройства или из доверенной копии.')
+    return validate_client_profile(path.read_text(), row, container)
+
+
+def import_profile(root, container, row, source):
+    source = Path(source)
+    if source.is_symlink() or not source.is_file():
+        raise ClientError('Нужен обычный файл профиля.')
+    text = validate_client_profile(source.read_text(), row, container)
+    path = profile_path(root, container, row)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise ClientError('Каталог профилей не должен быть символической ссылкой.')
+    os.chmod(path.parent.parent, 0o700)
+    os.chmod(path.parent, 0o700)
+    fd, temp = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp)
 
 
 def load_aliases(path):
@@ -186,6 +298,26 @@ def main():
         raise ClientError('Неверное имя контейнера.')
     alias_path = Path('/etc/govpn/client-names') / (container + '.json')
     rows = snapshot(container)
+    if action in ('profile-status', 'profile-export', 'profile-import'):
+        if len(args) != (2 if action == 'profile-import' else 1):
+            raise ClientError('Укажите IP клиента и, для импорта, файл .conf.')
+        matches = [r for r in rows if r['ip'] in addresses(args[0])]
+        if len(matches) != 1:
+            raise ClientError('Клиент не найден однозначно.')
+        row = matches[0]
+        root = Path('/etc/govpn')
+        if action == 'profile-import':
+            import_profile(root, container, row, args[1])
+            print('Профиль сохранен с правами 600. Ключ и конфигурация сервера не изменялись.')
+        elif action == 'profile-export':
+            print(saved_profile(root, container, row), end='')
+        else:
+            try:
+                saved_profile(root, container, row)
+                print('available')
+            except ClientError:
+                print('unavailable')
+        return
     aliases = load_aliases(alias_path)
     if action == 'rename' and len(args) == 2:
         matches = [r for r in rows if r['ip'] in addresses(args[0])]

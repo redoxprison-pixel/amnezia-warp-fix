@@ -11,3 +11,4 @@ clients.list
 *.bak
 client-names/
 awg_clients/
+client-profiles/

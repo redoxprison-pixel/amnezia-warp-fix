@@ -137,6 +137,7 @@ is_amnezia() { return 0; }; docker() { :; }; clear() { :; }
 _awg_iface() { echo awg0; }; _awg_warp_running() { return 1; }
 _awg_refresh_clients() { AWG_CLIENT_IPS=(10.8.1.2/32 10.9.1.2/32); }
 _awg_client_name() { echo Phone; }; _awg_selected_clients() { :; }
+_awg_refresh_policy() { AWG_POLICY_ACTIVE=on; AWG_POLICY_IPS=(); }
 read_choice() { local choice; read -r choice; printf '%s' "$choice"; }
 log_action() { :; }
 ''' + '_awg_apply_rules() { printf \'%s\\n\' "$@" > ' + shlex.quote(str(output)) + '; }\nawg_clients_menu'
@@ -157,23 +158,10 @@ awg_clients_menu
         self.assertNotIn('UNSAFE', result.stdout)
         self.assertNotEqual(result.returncode, 0)
 
-    def test_config_export_refuses_server_config_substring_and_symlink(self):
-        with tempfile.TemporaryDirectory() as root:
-            directory = Path(root) / 'awg_clients'
-            directory.mkdir()
-            path = directory / '10.8.1.2.conf'
-            body = function('_awg_get_client_config') + '\nCONF_DIR=' + shlex.quote(root) + '\n_awg_get_client_config 10.8.1.2/32'
-            for bad in ('[Interface]\nAddress=10.8.1.1/24\nPrivateKey=SERVER\n[Peer]\nAllowedIPs=10.8.1.2/32',
-                        '[Interface]\nAddress=10.8.1.20/32\n[Peer]\nAllowedIPs=0.0.0.0/0'):
-                path.write_text(bad)
-                result = self.run_bash(body)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, '')
-            path.write_text('[Interface]\nAddress=10.8.1.2/32\n[Peer]\nAllowedIPs=0.0.0.0/0\n')
-            self.assertEqual(self.run_bash(body).returncode, 0)
-            path.unlink()
-            path.symlink_to(directory / 'missing')
-            self.assertNotEqual(self.run_bash(body).returncode, 0)
+    def test_config_export_delegates_to_identity_checked_backend(self):
+        body = function('_awg_get_client_config') + '\n_awg_clients_data() { printf \'%s\\n\' "$*"; }\n_awg_get_client_config 10.8.1.2/32'
+        result = self.run_bash(body)
+        self.assertEqual(result.stdout.strip(), 'profile-export 10.8.1.2/32')
 
     def test_site_check_treats_python_fragment_as_data(self):
         with tempfile.TemporaryDirectory() as root:

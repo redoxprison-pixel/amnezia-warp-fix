@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import uuid
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
@@ -47,9 +48,22 @@ with tempfile.TemporaryDirectory() as temp:
         # through bootstrap, with real dependency/firewall/kernel preflight.
         first = safe.Controller(name, root / 'first-install')
         safe.private_dir(first.directory)
-        assert first.bootstrap(['10.8.1.2/32'], source=profile)
+        # Reproduce a vendor AWG command shadowing the distro's standard wg.
+        docker('exec', name, 'sh', '-c', 'printf "#!/bin/sh\nexit 42\n" > /usr/local/bin/wg; chmod 755 /usr/local/bin/wg')
+        prepare = first.prepare_dependencies
+        def fixture_tools(*args, **kwargs):
+            tools = prepare(*args, **kwargs)
+            assert tools['wg'] == '/usr/bin/wg'
+            # Keep the WARP data path deterministic and offline.
+            tools['wg_quick'] = '/usr/local/bin/wg-quick'
+            return tools
+        with patch.object(first, 'prepare_dependencies', side_effect=fixture_tools):
+            assert first.bootstrap(['10.8.1.2/32'], source=profile)
         assert first.state()['clients'] == ['10.8.1.2/32']
         assert first.state()['enabled']
+        startup = docker('exec', name, 'cat', '/opt/amnezia/start.sh').stdout
+        release = re.search(r'/opt/govpn-warp/[a-f0-9]+', startup)[0]
+        docker('exec', name, release + '/tool-bin/wg', 'show', 'interfaces')
         assert docker('exec', name, 'ip', 'link', 'show', 'warp', check=False).returncode == 0
         try:
             first.bootstrap(['10.8.1.2/32'], source=profile)
@@ -57,6 +71,7 @@ with tempfile.TemporaryDirectory() as temp:
         except safe.SafeError as error:
             assert 'Профиль уже существует' in str(error)
         first.remove()
+        docker('exec', name, 'rm', '/usr/local/bin/wg')
         print('fresh bootstrap/preflight/persistence/repeat protection: PASS')
         # Simulate the user's running legacy installation with no state.json.
         docker('exec', name, 'mkdir', '-p', '/opt/warp')

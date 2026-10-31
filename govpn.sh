@@ -6,12 +6,12 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 # ══════════════════════════════════════════════════════════════
-#  GoVPN Manager v6.65
+#  GoVPN Manager v6.66
 #  Автоопределение режима · WARP мастер · iptables каскад
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.65"
+VERSION="6.66"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 # Keep draft updates on the reviewed branch; switch this ref to main at release.
@@ -2237,6 +2237,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import shutil
 import sys
 import tempfile
 import uuid
@@ -2263,6 +2264,18 @@ action=$1
 iface=$2
 case "$iface" in awg0|wg0) ;; *) exit 1 ;; esac
 base=${0%/*}
+quick=wg-quick
+if [ -f "$base/wg-tools" ]; then
+    { IFS= read -r native_wg; IFS= read -r quick; } < "$base/wg-tools"
+    if [ "$native_wg" != "$base/tool-bin/wg" ]; then
+        case "$native_wg" in /usr/bin/wg|/bin/wg|/usr/local/bin/wg) ;; *) exit 1 ;; esac
+    fi
+    if [ "$quick" != "$base/tool-bin/wg-quick" ]; then
+        case "$quick" in /usr/bin/wg-quick|/bin/wg-quick|/usr/local/bin/wg-quick) ;; *) exit 1 ;; esac
+    fi
+    PATH="$base/tool-bin:$PATH"
+    export PATH
+fi
 table=51888
 mark=0x40000000/0x40000000
 ensure() {
@@ -2349,7 +2362,7 @@ fi
 guard
 [ "$action" = guard ] && exit 0
 [ "$action" = apply ] || exit 1
-command -v wg-quick >/dev/null
+command -v "$quick" >/dev/null
 command -v ip >/dev/null
 
 # Reserve our own table/priority. Never flush other users' routing tables.
@@ -2408,9 +2421,9 @@ while ip -4 rule del priority 100 fwmark 100 lookup 100 2>/dev/null; do :; done
 # Remaining unrelated table 100 rules/routes are intentionally preserved.
 
 if ip link show warp >/dev/null 2>&1; then
-    wg-quick down "$base/warp.conf" >/dev/null 2>&1
+    "$quick" down "$base/warp.conf" >/dev/null 2>&1
 fi
-wg-quick up "$base/warp.conf" >/dev/null 2>&1
+"$quick" up "$base/warp.conf" >/dev/null 2>&1
 ip -4 route replace default dev warp metric 10 table "$table"
 
 # Verify the lookup and filter before releasing the ingress guard.
@@ -2586,6 +2599,17 @@ def write_private(path, data):
             os.unlink(name)
 
 
+def validate_tools(tools):
+    if not isinstance(tools, dict) or set(tools) != {'wg', 'wg_quick'}:
+        raise SafeError('Некорректный набор инструментов WARP.')
+    if tools == {'wg': 'private', 'wg_quick': 'private'}:
+        return tools
+    for key, binary in (('wg', 'wg'), ('wg_quick', 'wg-quick')):
+        if tools[key] not in tuple(prefix + '/' + binary for prefix in ('/usr/bin', '/bin', '/usr/local/bin')):
+            raise SafeError('Недопустимый путь инструмента WARP.')
+    return tools
+
+
 class Controller:
     def __init__(self, name, root=ROOT):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', name):
@@ -2635,6 +2659,8 @@ class Controller:
         state['clients'] = clients(state['clients'])
         if state['iface'] not in ('awg0', 'wg0'):
             raise SafeError('Некорректный интерфейс в состоянии.')
+        if 'tools' in state:
+            validate_tools(state['tools'])
         return state
 
     def find_iface(self):
@@ -2696,17 +2722,17 @@ class Controller:
         """Preflight before account creation or ingress guard. Never restart AWG."""
         if not self.inspect():
             raise SafeError('Первая установка требует работающего AWG контейнера.')
-        check = 'for c in bash wg wg-quick ip iptables ip6tables; do command -v "$c" >/dev/null || exit 1; done'
+        check = 'for c in bash ip iptables ip6tables; do command -v "$c" >/dev/null || exit 1; done'
         if self.docker('exec', self.target, 'sh', '-c', check, check=False).returncode:
             if not install:
                 raise SafeError('В контейнере нет инструментов WARP. Повторите первую установку с --install-deps; сеть AWG не изменена.')
             packages = '''set -eu
 if command -v apk >/dev/null; then
-    apk add --no-cache bash wireguard-tools iproute2 iptables
+    apk add --no-cache bash iproute2 iptables
 elif command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y --no-install-recommends bash wireguard-tools iproute2 iptables
+    apt-get install -y --no-install-recommends bash iproute2 iptables
 else
     exit 1
 fi'''
@@ -2722,10 +2748,76 @@ fi'''
         if self.docker('exec', self.target, 'ip', 'link', 'add', name, 'type', 'wireguard', check=False).returncode:
             raise SafeError('Ядро/контейнер не позволяет создать WireGuard интерфейс для WARP. AWG не изменен; нужен WireGuard kernel support и NET_ADMIN.')
         try:
-            if self.docker('exec', self.target, 'wg', 'show', name, 'public-key', check=False).returncode:
-                raise SafeError('Команда wg несовместима с WireGuard kernel interface. Инструменты AWG не подменяются автоматически; сеть AWG не изменена.')
+            for prefix in ('/usr/bin', '/bin', '/usr/local/bin'):
+                native_wg, quick = prefix + '/wg', prefix + '/wg-quick'
+                if self.docker('exec', self.target, 'sh', '-c', '[ -x "$1" ] && [ -x "$2" ]',
+                               'govpn', native_wg, quick, check=False).returncode:
+                    continue
+                if not self.docker('exec', self.target, native_wg, 'show', name, 'public-key', check=False).returncode:
+                    return {'wg': native_wg, 'wg_quick': quick}
+            return self.private_wireguard(name, install)
         finally:
             self.docker('exec', self.target, 'ip', 'link', 'delete', name)
+
+    def private_wireguard(self, probe, install):
+        """Extract trusted distro packages, never overwrite the vendor's wg/awg."""
+        cache = self.directory / 'native-tools'
+        private_dir(cache)
+        cached = all((cache / n).is_file() and not (cache / n).is_symlink() for n in ('wg', 'wg-quick'))
+        if not cached and not install:
+            raise SafeError('Обычный WireGuard wg отсутствует: найден AWG. Выберите setup --install-deps для отдельного инструментария WARP.')
+        remote = REMOTE + '/preflight-' + uuid.uuid4().hex
+        self.docker('exec', self.target, 'sh', '-c', 'umask 077; mkdir -p "$1/bin"', 'govpn', remote)
+        try:
+            if cached:
+                for binary in ('wg', 'wg-quick'):
+                    self.docker('cp', str(cache / binary), self.target + ':' + remote + '/bin/' + binary)
+            else:
+                script = r'''set -eu
+umask 077
+base=$1
+mkdir -p "$base/packages" "$base/unpack"
+cd "$base/packages"
+if command -v apk >/dev/null; then
+    apk fetch --no-cache --output . wireguard-tools-wg wireguard-tools-wg-quick
+    apk verify ./*.apk
+    if apk extract --help >/dev/null 2>&1; then
+        for p in ./*.apk; do apk extract --destination "$base/unpack" "$p"; done
+        cp "$base/unpack/usr/bin/wg" "$base/bin/wg"
+        cp "$base/unpack/usr/bin/wg-quick" "$base/bin/wg-quick"
+    else
+        for p in ./wireguard-tools-wg-[0-9]*.apk; do tar -xzOf "$p" usr/bin/wg > "$base/bin/wg"; done
+        for p in ./wireguard-tools-wg-quick-[0-9]*.apk; do tar -xzOf "$p" usr/bin/wg-quick > "$base/bin/wg-quick"; done
+    fi
+elif command -v apt-get >/dev/null && command -v dpkg-deb >/dev/null; then
+    apt-get update
+    apt-get download wireguard-tools
+    for p in ./wireguard-tools_*.deb; do dpkg-deb -x "$p" "$base/unpack"; done
+    cp "$base/unpack/usr/bin/wg" "$base/bin/wg"
+    cp "$base/unpack/usr/bin/wg-quick" "$base/bin/wg-quick"
+else
+    exit 1
+fi
+test -s "$base/bin/wg"
+test -s "$base/bin/wg-quick"
+chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
+'''
+                if self.docker('exec', self.target, 'sh', '-c', script, 'govpn', remote, check=False).returncode:
+                    raise SafeError('Не удалось извлечь отдельные WireGuard tools из доверенного репозитория контейнера. AWG binaries и маршруты не заменялись.')
+            if self.docker('exec', self.target, remote + '/bin/wg', 'show', probe, 'public-key', check=False).returncode:
+                raise SafeError('Отдельный WireGuard binary несовместим с контейнером/ядром. AWG и маршруты не изменены.')
+            # Retain payload on host for restart/recreate and future offline setup.
+            with tempfile.TemporaryDirectory(dir=cache) as temp:
+                for binary in ('wg', 'wg-quick'):
+                    path = Path(temp) / binary
+                    self.docker('cp', self.target + ':' + remote + '/bin/' + binary, str(path))
+                    if path.is_symlink() or not path.is_file():
+                        raise SafeError('WireGuard payload должен быть обычным файлом.')
+                    path.chmod(0o700)
+                    os.replace(path, cache / binary)
+            return {'wg': 'private', 'wg_quick': 'private'}
+        finally:
+            self.docker('exec', self.target, 'rm', '-rf', '--', remote, check=False)
 
     def wgcf_binary(self):
         machine = os.uname().machine
@@ -2767,7 +2859,7 @@ fi'''
         data = profile(Path(source).read_text()) if source else None
         if data is None and not accept_tos:
             raise SafeError('Новая регистрация требует --accept-tos после принятия условий Cloudflare. Можно импортировать готовый профиль через --config.')
-        self.prepare_dependencies(install_deps)
+        tools = self.prepare_dependencies(install_deps)
         if data is None:
             binary = self.wgcf_binary()
             registration = self.directory / 'registration'
@@ -2804,6 +2896,7 @@ fi'''
             generated.chmod(0o600)
             data = profile(generated.read_text())
         state = self.adopt(replacement=data, selection=selected)
+        state['tools'] = validate_tools(tools)
         state['enabled'] = True
         return self.deploy(state)
 
@@ -2891,6 +2984,22 @@ fi'''
                          'start.sh': patched}
                 for name, content in files.items():
                     write_private(directory / name, content)
+                if 'tools' in state:
+                    tools = validate_tools(state['tools'])
+                    bin_dir = directory / 'tool-bin'
+                    bin_dir.mkdir(mode=0o700)
+                    if tools['wg'] == 'private':
+                        for binary in ('wg', 'wg-quick'):
+                            source = self.directory / 'native-tools' / binary
+                            if source.is_symlink() or not source.is_file():
+                                raise SafeError('Нет сохраненных WireGuard tools для восстановления. Выполните setup --install-deps в работающем контейнере.')
+                            shutil.copyfile(source, bin_dir / binary)
+                            (bin_dir / binary).chmod(0o700)
+                        tools = {'wg': remote + '/tool-bin/wg', 'wg_quick': remote + '/tool-bin/wg-quick'}
+                    else:
+                        write_private(bin_dir / 'wg', '#!/bin/sh\nexec ' + tools['wg'] + ' "$@"\n')
+                    write_private(directory / 'wg-tools', tools['wg'] + '\n' + tools['wg_quick'] + '\n')
+                    (bin_dir / 'wg').chmod(0o700)
                 start_file = directory / 'start.sh'
                 start_file.chmod(0o700)
                 # Immutable release directories preserve the previous boot hook
@@ -2940,10 +3049,12 @@ def main(argv=None):
     imp.add_argument('--clients', required=True)
     imp.add_argument('--iface', choices=('awg0', 'wg0'), required=True)
     apply = sub.add_parser('apply')
+    apply.add_argument('--install-deps', action='store_true')
     apply.add_argument('clients', nargs='*', help='IPv4 /32; пустой список явно отключает WARP для всех')
     sub.add_parser('restore')
     sub.add_parser('prepare-stopped')
     sub.add_parser('selected')
+    sub.add_parser('policy')
     sub.add_parser('status')
     sub.add_parser('profile-source')
     setup = sub.add_parser('setup')
@@ -2980,6 +3091,11 @@ def main(argv=None):
         elif args.action == 'selected':
             ctl.inspect()
             print('\n'.join(ctl.saved_clients()))
+        elif args.action == 'policy':
+            ctl.inspect()
+            state = ctl.state() if (ctl.directory / 'state.json').exists() else None
+            print('on' if state and state.get('enabled', True) else 'off')
+            print('\n'.join(state['clients'] if state else ctl.saved_clients()))
         elif args.action == 'status':
             running = ctl.inspect()
             exists = (ctl.directory / 'state.json').exists()
@@ -2994,11 +3110,14 @@ def main(argv=None):
             running = ctl.bootstrap(args.clients, args.accept_tos, args.install_deps, args.config)
             print('Профиль создан/импортирован, сохранен и применен. IPv6 AWG заблокирован. Выбранных клиентов: ' + str(len(clients(args.clients))))
         else:
-            if args.action == 'setup' and args.install_deps and ctl.inspect():
-                ctl.prepare_dependencies(install=True)
+            tools = None
+            if (args.action == 'setup' or (args.action == 'apply' and args.install_deps)) and ctl.inspect():
+                tools = ctl.prepare_dependencies(install=args.install_deps)
             replacement = profile(Path(args.config).read_text()) if args.action == 'replace-profile' else None
             selection = clients(args.clients) if args.action == 'apply' else None
             state = ctl.adopt(replacement, selection)
+            if tools is not None:
+                state['tools'] = tools
             if args.action == 'restore' and state.get('enabled') is False:
                 raise SafeError('WARP еще не установлен или был удален. Выберите переустановку (setup).')
             state['enabled'] = True
@@ -3049,6 +3168,9 @@ join that metadata to the server's peers. GoVPN-only labels are keyed by the
 public key, so reusing an IP does not give a new peer the previous peer's name.
 """
 import contextlib
+import base64
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -3162,7 +3284,7 @@ def docker(container, *args, optional=False):
     return result.stdout if result.returncode == 0 else ''
 
 
-def snapshot(container):
+def read_config(container):
     config = ''
     for path in ('/opt/amnezia/awg/awg0.conf', '/opt/amnezia/awg/wg0.conf', '/etc/wireguard/wg0.conf'):
         config = docker(container, 'cat', path, optional=True)
@@ -3171,6 +3293,11 @@ def snapshot(container):
             break
     if not config:
         raise ClientError('Серверный конфиг AWG не найден. Список клиентов не изменен.')
+    return config, iface
+
+
+def snapshot(container):
+    config, iface = read_config(container)
     # Query only non-secret wg fields. Never use `wg show dump`.
     # Modern AWG exposes `awg`; older installations use a fork named `wg`.
     allowed = docker(container, 'awg', 'show', iface, 'allowed-ips', optional=True)
@@ -3183,6 +3310,110 @@ def snapshot(container):
     # Config remains authoritative when there are no live peers or wg tools.
     peers = live_peers(allowed) + config_peers(config)
     return records(table, peers, handshakes)
+
+
+def sections(text):
+    result, current = [], None
+    for line in text.splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith('['):
+            current = {}
+            result.append((line.lower(), current))
+        elif current is not None and '=' in line:
+            k, v = (s.strip() for s in line.split('=', 1))
+            if k.lower() in current:
+                raise ClientError('Повторный параметр в профиле.')
+            current[k.lower()] = v
+        else:
+            raise ClientError('Неподдерживаемый формат профиля.')
+    return result
+
+
+def public_key(container, private):
+    try:
+        if len(base64.b64decode(private, validate=True)) != 32:
+            raise ValueError()
+        for tool in ('awg', 'wg'):
+            result = subprocess.run(['docker', 'exec', '-i', container, tool, 'pubkey'],
+                                    input=private + '\n', text=True, capture_output=True, timeout=15)
+            value = result.stdout.strip()
+            if result.returncode == 0 and len(base64.b64decode(value, validate=True)) == 32:
+                return value
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+    raise ClientError('Не удалось проверить ключ профиля; он не сохранен и не выдан.')
+
+
+def validate_client_profile(text, row, container):
+    if len(text) > 65536 or any(unicodedata.category(c).startswith('C') and c not in '\n\r\t' for c in text):
+        raise ClientError('Некорректный размер или управляющие символы в профиле.')
+    data = sections(text)
+    if [name for name, _ in data] != ['[interface]', '[peer]']:
+        raise ClientError('Нужен обычный .conf с одним Interface и одним Peer, не ссылка Amnezia.')
+    own, peer = data[0][1], data[1][1]
+    allowed = {'privatekey', 'address', 'dns', 'mtu', 'listenport'} | {
+        'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4', 'i1', 'i2', 'i3', 'i4', 'i5'}
+    if set(own) - allowed or set(peer) - {'publickey', 'presharedkey', 'allowedips', 'endpoint', 'persistentkeepalive'}:
+        raise ClientError('Исполняемые hooks и неизвестные параметры профиля запрещены.')
+    try:
+        own_ips = [ipaddress.ip_interface(s.strip()).ip for s in own['address'].split(',')]
+        routes = [ipaddress.ip_network(s.strip()) for s in peer['allowedips'].split(',')]
+        if ipaddress.ip_interface(row['ip']).ip not in own_ips or not routes:
+            raise ValueError()
+        if not hmac.compare_digest(public_key(container, own['privatekey']), row['key']):
+            raise ValueError()
+        server, _ = read_config(container)
+        blocks = sections(server)
+        interfaces = [v for k, v in blocks if k == '[interface]']
+        matches = [v for k, v in blocks if k == '[peer]' and v.get('publickey') == row['key']
+                   and row['ip'] in addresses(v.get('allowedips'))]
+        if len(matches) != 1 or len(interfaces) != 1:
+            raise ValueError()
+        if not hmac.compare_digest(public_key(container, interfaces[0]['privatekey']), peer['publickey']):
+            raise ValueError()
+        if not hmac.compare_digest(matches[0].get('presharedkey', ''), peer.get('presharedkey', '')):
+            raise ValueError()
+    except (ValueError, KeyError):
+        raise ClientError('Профиль не соответствует текущему ключу, IP или серверу этого клиента.') from None
+    return text
+
+
+def profile_path(root, container, row):
+    return root / 'client-profiles' / container / (hashlib.sha256(row['key'].encode()).hexdigest() + '.conf')
+
+
+def saved_profile(root, container, row):
+    path = profile_path(root, container, row)
+    if not path.exists():
+        path = root / 'awg_clients' / (str(ipaddress.ip_interface(row['ip']).ip) + '.conf')
+    if path.is_symlink() or not path.is_file():
+        raise ClientError('Сохраненного профиля нет. Экспортируйте его с устройства или из доверенной копии.')
+    return validate_client_profile(path.read_text(), row, container)
+
+
+def import_profile(root, container, row, source):
+    source = Path(source)
+    if source.is_symlink() or not source.is_file():
+        raise ClientError('Нужен обычный файл профиля.')
+    text = validate_client_profile(source.read_text(), row, container)
+    path = profile_path(root, container, row)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise ClientError('Каталог профилей не должен быть символической ссылкой.')
+    os.chmod(path.parent.parent, 0o700)
+    os.chmod(path.parent, 0o700)
+    fd, temp = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp)
 
 
 def load_aliases(path):
@@ -3230,6 +3461,26 @@ def main():
         raise ClientError('Неверное имя контейнера.')
     alias_path = Path('/etc/govpn/client-names') / (container + '.json')
     rows = snapshot(container)
+    if action in ('profile-status', 'profile-export', 'profile-import'):
+        if len(args) != (2 if action == 'profile-import' else 1):
+            raise ClientError('Укажите IP клиента и, для импорта, файл .conf.')
+        matches = [r for r in rows if r['ip'] in addresses(args[0])]
+        if len(matches) != 1:
+            raise ClientError('Клиент не найден однозначно.')
+        row = matches[0]
+        root = Path('/etc/govpn')
+        if action == 'profile-import':
+            import_profile(root, container, row, args[1])
+            print('Профиль сохранен с правами 600. Ключ и конфигурация сервера не изменялись.')
+        elif action == 'profile-export':
+            print(saved_profile(root, container, row), end='')
+        else:
+            try:
+                saved_profile(root, container, row)
+                print('available')
+            except ClientError:
+                print('unavailable')
+        return
     aliases = load_aliases(alias_path)
     if action == 'rename' and len(args) == 2:
         matches = [r for r in rows if r['ip'] in addresses(args[0])]
@@ -3540,7 +3791,7 @@ _awg_tunnel_up() {
 }
 
 _awg_apply_rules() {
-    _awg_safe apply "$@"
+    _awg_safe apply --install-deps "$@"
 }
 
 _awg_patch_start_sh() {
@@ -4180,7 +4431,11 @@ awg_clients_menu() {
         local -a all_ips=("${AWG_CLIENT_IPS[@]}")
 
         if [ "$sel_loaded" -eq 0 ]; then
-            while IFS= read -r ip; do [ -n "$ip" ] && sel_ips+=("$ip"); done <<< "$(_awg_selected_clients)"
+            if ! _awg_refresh_policy; then
+                echo "Политику прочитать не удалось. Изменения не применялись." >&2
+                read -r -p "Enter..."; return 1
+            fi
+            sel_ips=("${AWG_POLICY_IPS[@]}")
             sel_loaded=1
         fi
 
@@ -4745,13 +5000,14 @@ tools_menu() {
         echo -e "  ${YELLOW}[1]${NC}  Тест скорости"
         echo -e "  ${YELLOW}[2]${NC}  Тест цепочки"
         echo -e "  ${YELLOW}[3]${NC}  Проверить сайт"
-        echo -e "  ${YELLOW}[4]${NC}  Серверы (добавить/переименовать)"
-        echo -e "  ${YELLOW}[5]${NC}  Reality SNI Scanner"
+        echo -e "  ${YELLOW}[w]${NC}  Статус и тест WARP"
+
         echo -e "  ${YELLOW}[6]${NC}  Проверка сервисов ${CYAN}(Google/YouTube/ChatGPT/Gemini/Netflix...)${NC}"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
         case "$ch" in
+            w|W) warp_test ;;
             1) _speed_test ;;
             2) _chain_test ;;
             3) _site_check ;;
@@ -9716,6 +9972,7 @@ system_menu() {
         echo -e " ${CYAN}── Обслуживание ──────────────────────${NC}"
         echo -e "  ${YELLOW}[1]${NC}  Бэкапы и восстановление"
         echo -e "  ${YELLOW}[2]${NC}  Обновить скрипт"
+        echo "  [a]  SSH: подготовить резервный доступ"
         echo -e "  ${YELLOW}[3]${NC}  Диагностика зависимостей"
         echo -e "  ${YELLOW}[4]${NC}  Проверка конфликтов"
         echo ""
@@ -9725,8 +9982,8 @@ system_menu() {
         is_amnezia && echo -e "  ${YELLOW}[7]${NC}  Перезапустить AWG контейнер"
         echo ""
         echo -e " ${CYAN}── Сервер ────────────────────────────${NC}"
-        echo -e "  ${YELLOW}[8]${NC}  Домен и SSL"
-        echo -e "  ${YELLOW}[9]${NC}  Установка и компоненты"
+        echo -e "  ${YELLOW}[d]${NC}  Дополнительные функции и компоненты"
+
         is_3xui && echo -e "  ${CYAN}[s]${NC}  Self-Steal Reality (настройка маскировки)"
         echo -e "  ${YELLOW}[r]${NC}  Перезагрузить сервер"
         echo ""
@@ -9740,6 +9997,7 @@ system_menu() {
         case "$ch" in
             1) _backups_menu ;;
             2) _self_update ;;
+            a|A) _ssh_access_menu ;;
             3) _check_deps_full ;;
             4) _check_conflicts ;;
             5)
@@ -9764,7 +10022,8 @@ system_menu() {
                     echo -e "${GREEN}✓ OK${NC}" || echo -e "${RED}✗ Ошибка${NC}"
                 read -p "  Enter..."
                 ;;
-            8) domain_menu ;;
+            d|D) _additional_services_menu ;;
+            8) domain_menu ;; # compatibility
             9) install_wizard ;;
             r|R)
                 read -p "$(echo -e "  ${RED}Перезагрузить сервер? (y/n): ${NC}")" c
@@ -9809,6 +10068,11 @@ do_backup() (
 
     [ ! -d "${CONF_DIR}/client-names" ] || \
         cp -a "${CONF_DIR}/client-names" "${staging}/client-names" || { rm -rf "$staging"; return 1; }
+
+    for profile_dir in client-profiles awg_clients; do
+        [ ! -d "${CONF_DIR}/${profile_dir}" ] || \
+            cp -a "${CONF_DIR}/${profile_dir}" "${staging}/${profile_dir}" || { rm -rf "$staging"; return 1; }
+    done
 
     # — x-ui.db (3X-UI)
     if is_3xui && [ -f "/etc/x-ui/x-ui.db" ]; then
@@ -10543,6 +10807,178 @@ _awg_emergency_restore() {
     read -r -p "Enter..." < /dev/tty
 }
 
+_awg_refresh_policy() {
+    local data ip
+    data=$(_awg_safe policy) || return 1
+    AWG_POLICY_ACTIVE="${data%%$'\n'*}"
+    case "$AWG_POLICY_ACTIVE" in on|off) ;; *) return 1 ;; esac
+    AWG_POLICY_IPS=()
+    if [[ "$data" == *$'\n'* ]]; then
+        while IFS= read -r ip; do [ -z "$ip" ] || AWG_POLICY_IPS+=("$ip"); done <<< "${data#*$'\n'}"
+    fi
+}
+
+_awg_route_label() {
+    local ip
+    [ "$AWG_POLICY_ACTIVE" != unknown ] || { echo "маршрут неизвестен"; return; }
+    for ip in "${AWG_POLICY_IPS[@]}"; do
+        if [ "$ip" = "$1" ]; then
+            if [ "$AWG_POLICY_ACTIVE" = on ]; then echo "WARP выбран"; else echo "WARP выбран, выключен"; fi
+            return
+        fi
+    done
+    echo "через VPS"
+}
+
+_awg_change_client_route() {
+    local target="$1" mode="$2" ip confirmation
+    _awg_refresh_policy || { echo "Не удалось прочитать политику. Изменения не применялись." >&2; return 1; }
+    if [ "$AWG_POLICY_ACTIVE" = off ] && [ "$mode" = direct ]; then
+        echo "WARP выключен. Клиент использует выход VPS."; return 0
+    fi
+    local -a selected=()
+    for ip in "${AWG_POLICY_IPS[@]}"; do [ "$ip" = "$target" ] || selected+=("$ip"); done
+    [ "$mode" != warp ] || selected+=("$target")
+    echo "Маршрут: ${target} -> ${mode}. Managed WARP блокирует весь IPv6 AWG."
+    echo "Для WARP нужен внешний IPv4 DNS на устройстве; доступность Gemini не гарантируется."
+    confirmation=$(read_yn "Применить? (y/n): ")
+    [ "$confirmation" = y ] || return 2
+    _awg_apply_rules "${selected[@]}"
+}
+
+_awg_access_help() {
+    echo "Повторный доступ к клиенту:"
+    echo "1. Экспортируйте профиль на устройстве или найдите доверенную резервную копию."
+    echo "2. Сохраните .conf на VPS с правами 600 и импортируйте в карточке клиента."
+    echo "3. После проверки соответствия ключей GoVPN сможет повторно показать конфиг/QR."
+    echo "Без сохраненной копии приватный ключ из публичного восстановить нельзя."
+    echo "Если устройство потеряно: создайте новый доступ в Amnezia, проверьте его, затем отзовите старый."
+    echo "Смена ключа существующего peer отключит прежние профили. Она автоматически не выполняется."
+}
+
+_ssh_access_plan() {
+    # Arguments are data; this prints client configuration and never runs ssh.
+    python3 - "$@" <<'GOVPN_SSH_PLAN'
+import ipaddress
+import re
+import sys
+host, port, user, jump, jump_port, jump_user = sys.argv[1:]
+def hostname(value):
+    try:
+        return str(ipaddress.ip_address(value.strip('[]')))
+    except ValueError:
+        if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?', value):
+            raise ValueError()
+        return value
+try:
+    host = hostname(host)
+    if not port.isdigit() or not 1 <= int(port) <= 65535 or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]{0,31}', user):
+        raise ValueError()
+    if jump:
+        jump = hostname(jump)
+        if not jump_port.isdigit() or not 1 <= int(jump_port) <= 65535 or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_-]{0,31}', jump_user):
+            raise ValueError()
+except ValueError:
+    sys.exit('Неверный адрес, порт или имя пользователя. Конфигурация не создана.')
+print('# Добавьте блоки в ~/.ssh/config НА СВОЕМ КОМПЬЮТЕРЕ после проверки существующих Host aliases.')
+def block(alias, address, number, login, proxy=''):
+    print(f'Host {alias}\n    HostName {address}\n    Port {number}\n    User {login}\n    ForwardAgent no\n    StrictHostKeyChecking yes\n    ServerAliveInterval 30\n    ServerAliveCountMax 3')
+    if proxy:
+        print('    ProxyJump ' + proxy)
+    print()
+block('govpn-direct', host, port, user)
+if jump:
+    block('govpn-jump', jump, jump_port, jump_user)
+    block('govpn-reserve', host, port, user, 'govpn-jump')
+    print('# Проверьте отдельно: ssh govpn-direct ; затем ssh govpn-reserve')
+    print('# Узнайте fingerprints обоих хостов через доверенную консоль и добавьте их в known_hosts.')
+else:
+    print('# Создан только прямой вход. Для независимого резерва нужен второй доступный сервер.')
+print('# Это план, не подтверждение доступа. Ключи не создавались, sshd/firewall не менялись.')
+GOVPN_SSH_PLAN
+}
+
+_ssh_access_menu() {
+    while true; do
+        clear
+        echo "SSH: резервный доступ без изменения действующего входа"
+        echo "Смена порта не решает блокировку IP и не делает SSH невидимым."
+        echo "[1] Проверить синтаксис и настройки sshd (чтение)"
+        echo "[2] Подготовить SSH config для прямого/резервного входа"
+        echo "[3] Порядок проверки и аварийное восстановление"
+        echo "[0] Назад"
+        local choice; choice=$(read_choice "Выбор: ")
+        case "$choice" in
+            1)
+                if command -v sshd >/dev/null; then
+                    sshd -t && sshd -T 2>/dev/null | awk '$1 ~ /^(port|listenaddress|pubkeyauthentication|passwordauthentication|permitrootlogin|allowtcpforwarding)$/ {print}'
+                    echo "sshd -T без контекста не учитывает все Match-условия и не проверяет вход с вашего компьютера."
+                else echo "sshd не найден."; fi ;;
+            2)
+                local host port user jump jump_port=22 jump_user=root
+                read -r -p "Адрес VPS: " host < /dev/tty
+                read -r -p "Текущий SSH порт [22]: " port < /dev/tty; port=${port:-22}
+                read -r -p "Пользователь VPS [root]: " user < /dev/tty; user=${user:-root}
+                read -r -p "Адрес второго сервера (Enter - только прямой вход): " jump < /dev/tty
+                if [ -n "$jump" ]; then
+                    read -r -p "SSH порт второго сервера [22]: " jump_port < /dev/tty; jump_port=${jump_port:-22}
+                    read -r -p "Пользователь второго сервера [root]: " jump_user < /dev/tty; jump_user=${jump_user:-root}
+                fi
+                _ssh_access_plan "$host" "$port" "$user" "$jump" "$jump_port" "$jump_user" ;;
+            3)
+                echo "1. Проверьте консоль/recovery провайдера и доступ к аккаунту с MFA."
+                echo "2. Сохраните SSH ключ на своем компьютере и защищенную резервную копию."
+                echo "3. Второй сервер должен быть доступен независимо и видеть SSH первого VPS."
+                echo "4. Проверьте прямой и резервный вход из двух новых окон. Текущую сессию оставьте открытой."
+                echo "5. Только после проверки отдельно планируйте ограничения SSH/firewall."
+                echo "VPN на том же VPS, смена SSH порта и WARP не гарантируют аварийный вход."
+                echo "Ни одна кнопка не гарантирует отсутствие блокировок, обнаружения или проверок." ;;
+            0|"") return ;;
+        esac
+        read -r -p "Enter..." < /dev/tty
+    done
+}
+
+_clients_hub() {
+    if is_amnezia && is_3xui; then
+        echo "Клиенты: [1] Amnezia (профиль и маршрут) [2] 3X-UI [0] Назад"
+        local choice; choice=$(read_choice "Выбор: ")
+        case "$choice" in 1) awg_peers_menu ;; 2) _3xui_clients_menu ;; esac
+    elif is_amnezia; then awg_peers_menu
+    elif is_3xui; then _3xui_clients_menu
+    fi
+}
+
+_network_tools_menu() {
+    while true; do
+        echo "Сеть и каскады: [1] Проброс портов [2] Адресная книга серверов [0] Назад"
+        local choice; choice=$(read_choice "Выбор: ")
+        case "$choice" in 1) iptables_menu ;; 2) _servers_menu ;; 0|"") return ;; esac
+    done
+}
+
+_additional_services_menu() {
+    while true; do
+        clear
+        echo "Дополнительные функции - для обычного Amnezia и Gemini не обязательны"
+        echo "[1] Telegram-прокси (MTProto)"
+        echo "[2] Сеть и каскады (проброс портов, серверы)"
+        echo "[3] Веб-сервер: домен, SSL и сайт"
+        echo "[4] Установка дополнительных компонентов"
+        is_3xui && echo "[5] 3X-UI: inbound и транспорты"
+        is_3xui && echo "[6] 3X-UI: geo routing"
+        echo "[7] Reality SNI Scanner"
+        echo "[0] Назад"
+        local choice; choice=$(read_choice "Выбор: ")
+        case "$choice" in
+            1) mtproto_menu ;; 2) _network_tools_menu ;; 3) domain_menu ;;
+            4) install_wizard ;; 5) is_3xui && _3xui_inbound_templates ;;
+            6) is_3xui && _3xui_geo_menu ;; 7) _reality_scanner ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 awg_peers_menu() {
     if ! is_amnezia; then
         echo -e "${YELLOW}Amnezia не обнаружен.${NC}"; read -p "Enter..."; return
@@ -10581,7 +11017,7 @@ awg_peers_menu() {
 
     while true; do
         clear
-        echo -e "\n${CYAN}━━━ Клиенты AWG ━━━${NC}\n"
+        echo -e "\n${CYAN}━━━ Клиенты Amnezia: профили и маршруты ━━━${NC}\n"
         echo -e "  ${WHITE}Контейнер: ${CYAN}${AWG_CONTAINER}${NC}  Сортировка: ${YELLOW}${sort_mode}${NC}\n"
 
         local conf; conf=$(_awg_conf)
@@ -10590,6 +11026,8 @@ awg_peers_menu() {
             read -r -p "Enter..."; return 1
         fi
         local -a all_ips=("${AWG_CLIENT_IPS[@]}")
+
+        _awg_refresh_policy || { AWG_POLICY_ACTIVE=unknown; AWG_POLICY_IPS=(); }
 
         # Сортировка
         local -a sorted_ips=()
@@ -10624,14 +11062,16 @@ awg_peers_menu() {
                 local status_icon="${CYAN}●${NC}"
                 printf "  ${YELLOW}[%d]${NC} %b ${WHITE}%-20s${NC}  ${CYAN}%s${NC}
 "                     "$((i+1))" "$status_icon" "${name:-$bare}" "$ip"
-                printf '       %s\n' "$status_txt"
+                printf '       %s | %s\n' "$status_txt" "$(_awg_route_label "$ip")"
             done
         else
             echo -e "  ${YELLOW}Клиентов нет${NC}"
         fi
 
         echo ""
-        echo -e "  ${YELLOW}[+]${NC}   Добавить клиента"
+        echo -e "  ${YELLOW}[r]${NC}   Маршруты нескольких клиентов (VPS / WARP)"
+        echo -e "  ${YELLOW}[a]${NC}   Как выдать или восстановить доступ"
+        echo -e "  ${YELLOW}[+]${NC}   Добавить клиента (legacy; предпочтительно через Amnezia)"
         [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[номер]${NC} Конфиг / QR код"
         [ ${#sorted_ips[@]} -gt 0 ] && echo -e "  ${YELLOW}[-]${NC}   Удалить клиента"
         echo -e "  ${RED}[!]${NC}   Экстренное восстановление AWG"
@@ -10644,6 +11084,8 @@ awg_peers_menu() {
         [ -z "$ch" ] && continue
 
         case "$ch" in
+            r|R) awg_clients_menu ;;
+            a|A) _awg_access_help; read -r -p "Enter..." < /dev/tty ;;
             "!") _awg_emergency_restore ;;
             +)  _awg_add_peer ;;
             -)  _awg_del_peer "${sorted_ips[@]}" ;;
@@ -10672,17 +11114,41 @@ _awg_show_client_menu() {
         clear
         echo -e "\n${CYAN}━━━ Клиент: ${WHITE}${label}${CYAN} ━━━${NC}\n"
         echo -e "  ${WHITE}IP:   ${CYAN}${client_ip}${NC}"
-        echo ""
-        echo -e "  ${YELLOW}[1]${NC}  Показать конфиг (текст)"
-        echo -e "  ${YELLOW}[2]${NC}  QR код (AmneziaWG)"
+        _awg_refresh_policy || { AWG_POLICY_ACTIVE=unknown; AWG_POLICY_IPS=(); }
+        printf '  Маршрут: %s\n' "$(_awg_route_label "$client_ip")"
+        local profile_status
+        profile_status=$(_awg_clients_data profile-status "$client_ip") || profile_status=unavailable
+        if [ "$profile_status" = available ]; then
+            echo "  Профиль проверен и сохранен: [1] Конфиг  [2] QR"
+        else
+            echo "  Сохраненный профиль недоступен. [a] Способы восстановить доступ"
+        fi
+        echo "  [5] Изменить маршрут: VPS / WARP"
+        echo "  [6] Сохранить экспортированный .conf для повторной выдачи"
         echo -e "  ${YELLOW}[3]${NC}  Имя в GoVPN"
         echo -e "  ${RED}[4]${NC}  Удалить клиента"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
         ch=$(read_choice "Выбор: ")
         case "$ch" in
-            1) _awg_show_config "$client_ip" ;;
-            2) _awg_show_qr "$client_ip" ;;
+            1) if [ "$profile_status" = available ]; then _awg_show_config "$client_ip"; else _awg_access_help; read -r -p "Enter..." < /dev/tty; fi ;;
+            2) if [ "$profile_status" = available ]; then _awg_show_qr "$client_ip"; else _awg_access_help; read -r -p "Enter..." < /dev/tty; fi ;;
+            a|A) _awg_access_help; read -r -p "Enter..." < /dev/tty ;;
+            5)
+                echo "[1] Через VPS  [2] Через WARP  [0] Назад"
+                local route_choice; route_choice=$(read_choice "Выбор: ")
+                case "$route_choice" in
+                    1) _awg_change_client_route "$client_ip" direct ;;
+                    2) _awg_change_client_route "$client_ip" warp ;;
+                esac
+                read -r -p "Enter..." < /dev/tty ;;
+            6)
+                local import_path
+                read -r -p "Путь к экспортированному .conf (Enter - отмена): " import_path < /dev/tty
+                if [ -n "$import_path" ]; then
+                    _awg_clients_data profile-import "$client_ip" "$import_path"
+                    read -r -p "Enter..." < /dev/tty
+                fi ;;
             3)
                 echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_name < /dev/tty
                 [ -z "$new_name" ] && continue
@@ -10710,40 +11176,7 @@ _awg_show_client_menu() {
 
 
 _awg_get_client_config() {
-    # Only configs intentionally saved by GoVPN, with exact Interface Address.
-    # Server configs contain client AllowedIPs too; never find them by substring.
-    python3 - "$CONF_DIR" "$1" <<'GOVPN_CLIENT_CONFIG_PY'
-import ipaddress
-from pathlib import Path
-import sys
-try:
-    target = ipaddress.ip_interface(sys.argv[2])
-    if target.version != 4 or target.network.prefixlen != 32:
-        raise ValueError()
-    path = Path(sys.argv[1]) / 'awg_clients' / (str(target.ip) + '.conf')
-    if path.is_symlink():
-        raise ValueError()
-    text = path.read_text()
-    section, own, peers = '', [], []
-    for line in text.splitlines():
-        line = line.split('#', 1)[0].strip()
-        if line.startswith('['):
-            section = line.lower()
-        elif '=' in line:
-            key, value = (s.strip() for s in line.split('=', 1))
-            if key.lower() == 'address' and section == '[interface]':
-                own.extend(ipaddress.ip_interface(v.strip()).ip for v in value.split(','))
-            if key.lower() == 'allowedips' and section == '[peer]':
-                peers.extend(v.strip() for v in value.split(','))
-    if target.ip not in own or not peers:
-        raise ValueError()
-    # Server peers use /32 addresses. A reusable client profile has a default route.
-    if not any(v in ('0.0.0.0/0', '::/0') for v in peers):
-        raise ValueError()
-    print(text, end='')
-except (OSError, ValueError):
-    sys.exit(1)
-GOVPN_CLIENT_CONFIG_PY
+    _awg_clients_data profile-export "$1"
 }
 
 _awg_show_config() {
@@ -10754,12 +11187,10 @@ _awg_show_config() {
 
     local cfg; cfg=$(_awg_get_client_config "$client_ip")
     if [ -n "$cfg" ]; then
-        echo -e "${GREEN}${cfg}${NC}"
+        printf '%b%s%b\n' "$GREEN" "$cfg" "$NC"
     else
         echo -e "${YELLOW}Конфиг не найден.${NC}"
-        echo -e "${WHITE}Клиент был добавлен через Amnezia приложение —${NC}"
-        echo -e "${WHITE}приватный ключ хранится только на устройстве клиента.${NC}"
-        echo -e "${WHITE}Экспортируйте конфигурацию в приложении Amnezia.${NC}"
+        _awg_access_help
     fi
 
     echo ""
@@ -10775,8 +11206,7 @@ _awg_show_qr() {
     local cfg; cfg=$(_awg_get_client_config "$client_ip")
     if [ -z "$cfg" ]; then
         echo -e "${YELLOW}Конфиг не найден.${NC}"
-        echo -e "${WHITE}Клиент добавлен через Amnezia — ключ только на устройстве.${NC}"
-        echo -e "${WHITE}Экспортируйте конфигурацию в приложении Amnezia.${NC}"
+        _awg_access_help
         echo ""; read -p "Нажмите Enter..."; return
     fi
 
@@ -13063,7 +13493,7 @@ show_menu() {
             [ -n "$_awg_stats" ] && echo -e "  ${WHITE}AWG:  ${GREEN}${_awg_stats}${NC}"
         fi
 
-        # Hysteria2 статус скрыт (протокол заблокирован ТСПУ)
+        # Hysteria2 - отдельный legacy модуль; статус в главном меню скрыт.
 
         # Уведомление о новой версии (из кеша, без задержки)
         local _upd_cached; _upd_cached=$(_update_cached_ver)
@@ -13094,46 +13524,17 @@ show_menu() {
 
         echo -e "${MAGENTA}──────────────────────────────────────────────${NC}"
 
-        # Адаптивное меню
-        if ! is_bridge; then
-            echo -e " ${CYAN}── WARP ──────────────────────────────${NC}"
-            echo -e "  ${GREEN}1)  ★ Настроить WARP${NC}  ${CYAN}(мастер)${NC}"
-            echo -e "  2)  Тест WARP"
-            if is_amnezia; then
-                if is_3xui; then
-                    echo -e "  w)  Клиенты AWG → WARP"
-                else
-                    echo -e "  3)  Клиенты → WARP"
-                fi
-            fi
+        echo -e " ${CYAN}── ЕЖЕДНЕВНЫЕ ДЕЙСТВИЯ ───────────────${NC}"
+        if is_amnezia || is_3xui; then
+            echo "  3)  Клиенты - доступ, профили и маршруты"
         fi
-        if is_amnezia; then
-            echo -e " ${CYAN}── AWG ───────────────────────────────${NC}"
-            echo -e "  4)  Управление клиентами AWG"
-        fi
-        if is_3xui; then
-            echo -e " ${CYAN}── 3X-UI ─────────────────────────────${NC}"
-            echo -e "  ${GREEN}3)  Клиенты 3X-UI${NC}"
-            echo -e "  ${CYAN}i)  Inbound'ы (создать/управлять)${NC}"
-        fi
-        echo -e " ${CYAN}── ПРОКСИ ────────────────────────────${NC}"
-        # MTProto только на не-bridge серверах
-        if ! is_bridge; then
-            local _mtg_cnt; _mtg_cnt=$(_mtg_count_running 2>/dev/null || echo 0)
-            if [ "$_mtg_cnt" -gt 0 ]; then
-                echo -e "  ${GREEN}5)  MTProto прокси${NC}  ${CYAN}(${_mtg_cnt} активных)${NC}"
-            else
-                echo -e "  5)  MTProto прокси"
-            fi
-        fi
-        echo -e "  6)  iptables проброс"
-        echo -e " ${CYAN}── ИНСТРУМЕНТЫ ──────────────────────${NC}"
-        echo -e "  7)  Серверы, скорость, тесты"
-        echo -e " ${CYAN}── СИСТЕМА ──────────────────────────${NC}"
-        echo -e "  8)  Система и управление"
-        is_amnezia && echo -e "  ${RED}!${NC}  AWG авария? → ${RED}[!]${NC} Экстренное восстановление"
-        # h) Hysteria2 скрыт
-        echo -e "  0)  Выход"
+        ! is_bridge && echo "  1)  WARP - дополнительный выход в интернет"
+        echo "  7)  Диагностика соединения"
+        echo "  8)  Обслуживание - резервные копии и обновление"
+        echo -e " ${CYAN}── ДОПОЛНИТЕЛЬНО ─────────────────────${NC}"
+        echo "  5)  Дополнительные функции и компоненты"
+        is_amnezia && echo "  !)  Восстановление AWG после сбоя"
+        echo "  0)  Выход"
         echo -e "${MAGENTA}══════════════════════════════════════════════${NC}"
         ch=$(read_choice "Выбор: ")
 
@@ -13147,17 +13548,11 @@ show_menu() {
         case "$ch" in
             1) ! is_bridge && warp_setup_wizard ;;
             2) ! is_bridge && warp_test ;;
-            3)
-                if is_amnezia && ! is_3xui; then
-                    awg_clients_menu
-                elif is_3xui; then
-                    _3xui_clients_menu
-                fi ;;
-            w|W) is_amnezia && awg_clients_menu ;;
-            4) is_amnezia && awg_peers_menu ;;
+            3) _clients_hub ;;
+            w|W|4) is_amnezia && awg_peers_menu ;;
             i|I|и|И) is_3xui && _3xui_inbound_templates ;;
-            5) mtproto_menu ;;
-            6) iptables_menu ;;
+            5) _additional_services_menu ;;
+            6) iptables_menu ;; # compatibility shortcut; visible entry moved to Additional
             7) tools_menu ;;
             8) system_menu ;;
             # h|H|р|Р) is_hysteria2 && hysteria2_menu ;;

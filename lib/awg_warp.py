@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import shutil
 import sys
 import tempfile
 import uuid
@@ -39,6 +40,18 @@ action=$1
 iface=$2
 case "$iface" in awg0|wg0) ;; *) exit 1 ;; esac
 base=${0%/*}
+quick=wg-quick
+if [ -f "$base/wg-tools" ]; then
+    { IFS= read -r native_wg; IFS= read -r quick; } < "$base/wg-tools"
+    if [ "$native_wg" != "$base/tool-bin/wg" ]; then
+        case "$native_wg" in /usr/bin/wg|/bin/wg|/usr/local/bin/wg) ;; *) exit 1 ;; esac
+    fi
+    if [ "$quick" != "$base/tool-bin/wg-quick" ]; then
+        case "$quick" in /usr/bin/wg-quick|/bin/wg-quick|/usr/local/bin/wg-quick) ;; *) exit 1 ;; esac
+    fi
+    PATH="$base/tool-bin:$PATH"
+    export PATH
+fi
 table=51888
 mark=0x40000000/0x40000000
 ensure() {
@@ -125,7 +138,7 @@ fi
 guard
 [ "$action" = guard ] && exit 0
 [ "$action" = apply ] || exit 1
-command -v wg-quick >/dev/null
+command -v "$quick" >/dev/null
 command -v ip >/dev/null
 
 # Reserve our own table/priority. Never flush other users' routing tables.
@@ -184,9 +197,9 @@ while ip -4 rule del priority 100 fwmark 100 lookup 100 2>/dev/null; do :; done
 # Remaining unrelated table 100 rules/routes are intentionally preserved.
 
 if ip link show warp >/dev/null 2>&1; then
-    wg-quick down "$base/warp.conf" >/dev/null 2>&1
+    "$quick" down "$base/warp.conf" >/dev/null 2>&1
 fi
-wg-quick up "$base/warp.conf" >/dev/null 2>&1
+"$quick" up "$base/warp.conf" >/dev/null 2>&1
 ip -4 route replace default dev warp metric 10 table "$table"
 
 # Verify the lookup and filter before releasing the ingress guard.
@@ -362,6 +375,17 @@ def write_private(path, data):
             os.unlink(name)
 
 
+def validate_tools(tools):
+    if not isinstance(tools, dict) or set(tools) != {'wg', 'wg_quick'}:
+        raise SafeError('Некорректный набор инструментов WARP.')
+    if tools == {'wg': 'private', 'wg_quick': 'private'}:
+        return tools
+    for key, binary in (('wg', 'wg'), ('wg_quick', 'wg-quick')):
+        if tools[key] not in tuple(prefix + '/' + binary for prefix in ('/usr/bin', '/bin', '/usr/local/bin')):
+            raise SafeError('Недопустимый путь инструмента WARP.')
+    return tools
+
+
 class Controller:
     def __init__(self, name, root=ROOT):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', name):
@@ -411,6 +435,8 @@ class Controller:
         state['clients'] = clients(state['clients'])
         if state['iface'] not in ('awg0', 'wg0'):
             raise SafeError('Некорректный интерфейс в состоянии.')
+        if 'tools' in state:
+            validate_tools(state['tools'])
         return state
 
     def find_iface(self):
@@ -472,17 +498,17 @@ class Controller:
         """Preflight before account creation or ingress guard. Never restart AWG."""
         if not self.inspect():
             raise SafeError('Первая установка требует работающего AWG контейнера.')
-        check = 'for c in bash wg wg-quick ip iptables ip6tables; do command -v "$c" >/dev/null || exit 1; done'
+        check = 'for c in bash ip iptables ip6tables; do command -v "$c" >/dev/null || exit 1; done'
         if self.docker('exec', self.target, 'sh', '-c', check, check=False).returncode:
             if not install:
                 raise SafeError('В контейнере нет инструментов WARP. Повторите первую установку с --install-deps; сеть AWG не изменена.')
             packages = '''set -eu
 if command -v apk >/dev/null; then
-    apk add --no-cache bash wireguard-tools iproute2 iptables
+    apk add --no-cache bash iproute2 iptables
 elif command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y --no-install-recommends bash wireguard-tools iproute2 iptables
+    apt-get install -y --no-install-recommends bash iproute2 iptables
 else
     exit 1
 fi'''
@@ -498,10 +524,76 @@ fi'''
         if self.docker('exec', self.target, 'ip', 'link', 'add', name, 'type', 'wireguard', check=False).returncode:
             raise SafeError('Ядро/контейнер не позволяет создать WireGuard интерфейс для WARP. AWG не изменен; нужен WireGuard kernel support и NET_ADMIN.')
         try:
-            if self.docker('exec', self.target, 'wg', 'show', name, 'public-key', check=False).returncode:
-                raise SafeError('Команда wg несовместима с WireGuard kernel interface. Инструменты AWG не подменяются автоматически; сеть AWG не изменена.')
+            for prefix in ('/usr/bin', '/bin', '/usr/local/bin'):
+                native_wg, quick = prefix + '/wg', prefix + '/wg-quick'
+                if self.docker('exec', self.target, 'sh', '-c', '[ -x "$1" ] && [ -x "$2" ]',
+                               'govpn', native_wg, quick, check=False).returncode:
+                    continue
+                if not self.docker('exec', self.target, native_wg, 'show', name, 'public-key', check=False).returncode:
+                    return {'wg': native_wg, 'wg_quick': quick}
+            return self.private_wireguard(name, install)
         finally:
             self.docker('exec', self.target, 'ip', 'link', 'delete', name)
+
+    def private_wireguard(self, probe, install):
+        """Extract trusted distro packages, never overwrite the vendor's wg/awg."""
+        cache = self.directory / 'native-tools'
+        private_dir(cache)
+        cached = all((cache / n).is_file() and not (cache / n).is_symlink() for n in ('wg', 'wg-quick'))
+        if not cached and not install:
+            raise SafeError('Обычный WireGuard wg отсутствует: найден AWG. Выберите setup --install-deps для отдельного инструментария WARP.')
+        remote = REMOTE + '/preflight-' + uuid.uuid4().hex
+        self.docker('exec', self.target, 'sh', '-c', 'umask 077; mkdir -p "$1/bin"', 'govpn', remote)
+        try:
+            if cached:
+                for binary in ('wg', 'wg-quick'):
+                    self.docker('cp', str(cache / binary), self.target + ':' + remote + '/bin/' + binary)
+            else:
+                script = r'''set -eu
+umask 077
+base=$1
+mkdir -p "$base/packages" "$base/unpack"
+cd "$base/packages"
+if command -v apk >/dev/null; then
+    apk fetch --no-cache --output . wireguard-tools-wg wireguard-tools-wg-quick
+    apk verify ./*.apk
+    if apk extract --help >/dev/null 2>&1; then
+        for p in ./*.apk; do apk extract --destination "$base/unpack" "$p"; done
+        cp "$base/unpack/usr/bin/wg" "$base/bin/wg"
+        cp "$base/unpack/usr/bin/wg-quick" "$base/bin/wg-quick"
+    else
+        for p in ./wireguard-tools-wg-[0-9]*.apk; do tar -xzOf "$p" usr/bin/wg > "$base/bin/wg"; done
+        for p in ./wireguard-tools-wg-quick-[0-9]*.apk; do tar -xzOf "$p" usr/bin/wg-quick > "$base/bin/wg-quick"; done
+    fi
+elif command -v apt-get >/dev/null && command -v dpkg-deb >/dev/null; then
+    apt-get update
+    apt-get download wireguard-tools
+    for p in ./wireguard-tools_*.deb; do dpkg-deb -x "$p" "$base/unpack"; done
+    cp "$base/unpack/usr/bin/wg" "$base/bin/wg"
+    cp "$base/unpack/usr/bin/wg-quick" "$base/bin/wg-quick"
+else
+    exit 1
+fi
+test -s "$base/bin/wg"
+test -s "$base/bin/wg-quick"
+chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
+'''
+                if self.docker('exec', self.target, 'sh', '-c', script, 'govpn', remote, check=False).returncode:
+                    raise SafeError('Не удалось извлечь отдельные WireGuard tools из доверенного репозитория контейнера. AWG binaries и маршруты не заменялись.')
+            if self.docker('exec', self.target, remote + '/bin/wg', 'show', probe, 'public-key', check=False).returncode:
+                raise SafeError('Отдельный WireGuard binary несовместим с контейнером/ядром. AWG и маршруты не изменены.')
+            # Retain payload on host for restart/recreate and future offline setup.
+            with tempfile.TemporaryDirectory(dir=cache) as temp:
+                for binary in ('wg', 'wg-quick'):
+                    path = Path(temp) / binary
+                    self.docker('cp', self.target + ':' + remote + '/bin/' + binary, str(path))
+                    if path.is_symlink() or not path.is_file():
+                        raise SafeError('WireGuard payload должен быть обычным файлом.')
+                    path.chmod(0o700)
+                    os.replace(path, cache / binary)
+            return {'wg': 'private', 'wg_quick': 'private'}
+        finally:
+            self.docker('exec', self.target, 'rm', '-rf', '--', remote, check=False)
 
     def wgcf_binary(self):
         machine = os.uname().machine
@@ -543,7 +635,7 @@ fi'''
         data = profile(Path(source).read_text()) if source else None
         if data is None and not accept_tos:
             raise SafeError('Новая регистрация требует --accept-tos после принятия условий Cloudflare. Можно импортировать готовый профиль через --config.')
-        self.prepare_dependencies(install_deps)
+        tools = self.prepare_dependencies(install_deps)
         if data is None:
             binary = self.wgcf_binary()
             registration = self.directory / 'registration'
@@ -580,6 +672,7 @@ fi'''
             generated.chmod(0o600)
             data = profile(generated.read_text())
         state = self.adopt(replacement=data, selection=selected)
+        state['tools'] = validate_tools(tools)
         state['enabled'] = True
         return self.deploy(state)
 
@@ -667,6 +760,22 @@ fi'''
                          'start.sh': patched}
                 for name, content in files.items():
                     write_private(directory / name, content)
+                if 'tools' in state:
+                    tools = validate_tools(state['tools'])
+                    bin_dir = directory / 'tool-bin'
+                    bin_dir.mkdir(mode=0o700)
+                    if tools['wg'] == 'private':
+                        for binary in ('wg', 'wg-quick'):
+                            source = self.directory / 'native-tools' / binary
+                            if source.is_symlink() or not source.is_file():
+                                raise SafeError('Нет сохраненных WireGuard tools для восстановления. Выполните setup --install-deps в работающем контейнере.')
+                            shutil.copyfile(source, bin_dir / binary)
+                            (bin_dir / binary).chmod(0o700)
+                        tools = {'wg': remote + '/tool-bin/wg', 'wg_quick': remote + '/tool-bin/wg-quick'}
+                    else:
+                        write_private(bin_dir / 'wg', '#!/bin/sh\nexec ' + tools['wg'] + ' "$@"\n')
+                    write_private(directory / 'wg-tools', tools['wg'] + '\n' + tools['wg_quick'] + '\n')
+                    (bin_dir / 'wg').chmod(0o700)
                 start_file = directory / 'start.sh'
                 start_file.chmod(0o700)
                 # Immutable release directories preserve the previous boot hook
@@ -716,10 +825,12 @@ def main(argv=None):
     imp.add_argument('--clients', required=True)
     imp.add_argument('--iface', choices=('awg0', 'wg0'), required=True)
     apply = sub.add_parser('apply')
+    apply.add_argument('--install-deps', action='store_true')
     apply.add_argument('clients', nargs='*', help='IPv4 /32; пустой список явно отключает WARP для всех')
     sub.add_parser('restore')
     sub.add_parser('prepare-stopped')
     sub.add_parser('selected')
+    sub.add_parser('policy')
     sub.add_parser('status')
     sub.add_parser('profile-source')
     setup = sub.add_parser('setup')
@@ -756,6 +867,11 @@ def main(argv=None):
         elif args.action == 'selected':
             ctl.inspect()
             print('\n'.join(ctl.saved_clients()))
+        elif args.action == 'policy':
+            ctl.inspect()
+            state = ctl.state() if (ctl.directory / 'state.json').exists() else None
+            print('on' if state and state.get('enabled', True) else 'off')
+            print('\n'.join(state['clients'] if state else ctl.saved_clients()))
         elif args.action == 'status':
             running = ctl.inspect()
             exists = (ctl.directory / 'state.json').exists()
@@ -770,11 +886,14 @@ def main(argv=None):
             running = ctl.bootstrap(args.clients, args.accept_tos, args.install_deps, args.config)
             print('Профиль создан/импортирован, сохранен и применен. IPv6 AWG заблокирован. Выбранных клиентов: ' + str(len(clients(args.clients))))
         else:
-            if args.action == 'setup' and args.install_deps and ctl.inspect():
-                ctl.prepare_dependencies(install=True)
+            tools = None
+            if (args.action == 'setup' or (args.action == 'apply' and args.install_deps)) and ctl.inspect():
+                tools = ctl.prepare_dependencies(install=args.install_deps)
             replacement = profile(Path(args.config).read_text()) if args.action == 'replace-profile' else None
             selection = clients(args.clients) if args.action == 'apply' else None
             state = ctl.adopt(replacement, selection)
+            if tools is not None:
+                state['tools'] = tools
             if args.action == 'restore' and state.get('enabled') is False:
                 raise SafeError('WARP еще не установлен или был удален. Выберите переустановку (setup).')
             state['enabled'] = True
