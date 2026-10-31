@@ -6,12 +6,12 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 # ══════════════════════════════════════════════════════════════
-#  GoVPN Manager v6.63
+#  GoVPN Manager v6.64
 #  Автоопределение режима · WARP мастер · iptables каскад
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.63"
+VERSION="6.64"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 # Keep draft updates on the reviewed branch; switch this ref to main at release.
@@ -2895,6 +2895,221 @@ GOVPN_SAFE_PY
 }
 # END GENERATED SAFE WARP
 
+# BEGIN GENERATED AWG CLIENTS
+_awg_clients_data() {
+    python3 - "$AWG_CONTAINER" "$@" <<'GOVPN_CLIENTS_PY'
+"""Read AWG identities without exposing keys or changing Amnezia metadata.
+
+clientsTable may contain a name and clientId without allowedIps. Public keys
+join that metadata to the server's peers. GoVPN-only labels are keyed by the
+public key, so reusing an IP does not give a new peer the previous peer's name.
+"""
+import contextlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+
+
+class ClientError(Exception):
+    pass
+
+
+def label(value):
+    if not isinstance(value, str):
+        return ''
+    value = ''.join(c for c in value if not unicodedata.category(c).startswith('C'))
+    return ' '.join(value.replace('|', '/').replace('\\', '/').split())[:80]
+
+
+def addresses(value):
+    if isinstance(value, list):
+        value = ','.join(v for v in value if isinstance(v, str))
+    if not isinstance(value, str):
+        return []
+    result = []
+    for part in re.split(r'[,\s]+', value):
+        try:
+            net = ipaddress.ip_network(part if '/' in part else part + '/32', strict=True)
+            if net.version == 4 and net.prefixlen == 32:
+                result.append(str(net))
+        except ValueError:
+            continue
+    return result
+
+
+def metadata(raw):
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if isinstance(data, dict):
+        # Amnezia's legacy map: public key -> {clientName: ...}.
+        data = [{'clientId': k, 'userData': v} for k, v in data.items()]
+    if not isinstance(data, list):
+        return []
+    return [c for c in data if isinstance(c, dict) and isinstance(c.get('userData'), dict)]
+
+
+def config_peers(raw):
+    peers, current = [], None
+    for line in raw.splitlines():
+        line = line.split('#', 1)[0].strip()
+        if line.startswith('['):
+            current = {} if line.lower() == '[peer]' else None
+            if current is not None:
+                peers.append(current)
+        elif current is not None and '=' in line:
+            key, value = (s.strip() for s in line.split('=', 1))
+            current[key.lower()] = value
+    return [(c.get('publickey', ''), ip) for c in peers for ip in addresses(c.get('allowedips', ''))]
+
+
+def live_peers(raw):
+    return [(parts[0], ip) for line in raw.splitlines()
+            if len(parts := line.split(None, 1)) == 2 for ip in addresses(parts[1])]
+
+
+def records(table, peers, handshakes='', aliases=None):
+    by_key, by_ip = {}, {}
+    for entry in metadata(table):
+        data = entry['userData']
+        name, key = label(data.get('clientName')), entry.get('clientId')
+        if isinstance(key, str) and key:
+            by_key.setdefault(key, set()).add(name)
+        else:
+            for ip in addresses(data.get('allowedIps')):
+                by_ip.setdefault(ip, set()).add(name)
+    stamps = {}
+    for line in handshakes.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            stamps[parts[0]] = int(parts[1])
+    identities = {}
+    for key, ip in peers:
+        if key:
+            identities.setdefault(ip, set()).add(key)
+    result = []
+    for ip, keys in identities.items():
+        if len(keys) != 1:
+            raise ClientError('Один IP назначен нескольким ключам. Исправьте peers в Amnezia.')
+        key = next(iter(keys))
+        names = by_key.get(key, by_ip.get(ip, set())) - {''}
+        name = next(iter(names)) if len(names) == 1 else ''
+        name = label((aliases or {}).get(key)) or name
+        result.append({'ip': ip, 'key': key, 'name': name, 'handshake': stamps.get(key, 0)})
+    return sorted(result, key=lambda r: int(ipaddress.ip_interface(r['ip']).ip))
+
+
+def docker(container, *args, optional=False):
+    try:
+        result = subprocess.run(['docker', 'exec', container, *args], capture_output=True,
+                                text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ClientError('Не удалось прочитать клиентов через Docker.') from None
+    if result.returncode and not optional:
+        raise ClientError('Не удалось прочитать peers AWG. Проверьте контейнер и интерфейс.')
+    return result.stdout if result.returncode == 0 else ''
+
+
+def snapshot(container):
+    config = ''
+    for path in ('/opt/amnezia/awg/awg0.conf', '/opt/amnezia/awg/wg0.conf', '/etc/wireguard/wg0.conf'):
+        config = docker(container, 'cat', path, optional=True)
+        if config:
+            iface = Path(path).stem
+            break
+    if not config:
+        raise ClientError('Серверный конфиг AWG не найден. Список клиентов не изменен.')
+    # Query only non-secret wg fields. Never use `wg show dump`.
+    allowed = docker(container, 'wg', 'show', iface, 'allowed-ips')
+    handshakes = docker(container, 'wg', 'show', iface, 'latest-handshakes', optional=True)
+    table = docker(container, 'cat', '/opt/amnezia/awg/clientsTable', optional=True)
+    # Include configured peers while the interface is temporarily empty.
+    peers = live_peers(allowed) + config_peers(config)
+    return records(table, peers, handshakes)
+
+
+def load_aliases(path):
+    if not path.exists():
+        return {}
+    if path.is_symlink():
+        raise ClientError('Файл имен не должен быть символической ссылкой.')
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+            raise ValueError()
+        return data
+    except (OSError, ValueError):
+        raise ClientError('Не удалось прочитать локальные имена GoVPN.') from None
+
+
+def rename(path, key, name):
+    import fcntl
+    if not label(name) or len(name) > 80 or label(name) != name:
+        raise ClientError('Имя: 1-80 символов, без управляющих символов, | и обратного слеша.')
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ClientError('Каталог имен не должен быть символической ссылкой.')
+    os.chmod(path.parent, 0o700)
+    lock = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock, 'w') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        data = load_aliases(path)
+        data[key] = name
+        fd, temp = tempfile.mkstemp(dir=path.parent, prefix='.names-')
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(data, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp)
+
+
+def main():
+    container, action, *args = sys.argv[1:]
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', container):
+        raise ClientError('Неверное имя контейнера.')
+    alias_path = Path('/etc/govpn/client-names') / (container + '.json')
+    rows = snapshot(container)
+    aliases = load_aliases(alias_path)
+    if action == 'rename' and len(args) == 2:
+        matches = [r for r in rows if r['ip'] in addresses(args[0])]
+        if len(matches) != 1:
+            raise ClientError('Клиент не найден однозначно. Обновите список.')
+        rename(alias_path, matches[0]['key'], args[1])
+    elif action == 'list' and not args:
+        for row in rows:
+            name = label(aliases.get(row['key'])) or row['name'] or '(имя не сохранено)'
+            stamp = row['handshake']
+            age = int(time.time()) - stamp if stamp else None
+            status = 'нет handshake' if age is None else (
+                f'handshake {max(0, age)} сек. назад' if age >= 0 else 'время handshake в будущем')
+            print(f"{row['ip']}|{name}|{stamp}|{status}")
+    else:
+        raise ClientError('Неизвестная команда имен клиентов.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ClientError, OSError, ValueError) as exc:
+        print(str(exc) if isinstance(exc, ClientError) else 'Ошибка чтения имен клиентов.', file=sys.stderr)
+        sys.exit(1)
+
+GOVPN_CLIENTS_PY
+}
+# END GENERATED AWG CLIENTS
+
 _awg_conf() {
     for f in /opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf /etc/wireguard/wg0.conf; do
         docker exec "$AWG_CONTAINER" sh -c "[ -f '$f' ]" 2>/dev/null && echo "$f" && return
@@ -2915,49 +3130,42 @@ _awg_warp_ip() {
         "curl -s --interface warp --connect-timeout 5 https://api4.ipify.org 2>/dev/null || true"
 }
 
+# A single snapshot per menu refresh; no repeated Docker read for each name.
+_awg_refresh_clients() {
+    local snapshot ip name stamp status
+    AWG_CLIENTS_CONTAINER=""
+    AWG_CLIENT_IPS=(); AWG_CLIENT_NAMES=(); AWG_CLIENT_STAMPS=(); AWG_CLIENT_STATUS=()
+    snapshot=$(_awg_clients_data list) || return 1
+    while IFS='|' read -r ip name stamp status; do
+        [ -n "$ip" ] || continue
+        AWG_CLIENT_IPS+=("$ip"); AWG_CLIENT_NAMES+=("$name")
+        AWG_CLIENT_STAMPS+=("$stamp"); AWG_CLIENT_STATUS+=("$status")
+    done <<< "$snapshot"
+    AWG_CLIENTS_CONTAINER="$AWG_CONTAINER"
+}
+
 _awg_all_clients() {
-    local raw
-    raw=$(docker exec "$AWG_CONTAINER" sh -c         "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
-
-    local result
-    result=$(echo "$raw" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    for c in d:
-        ip = c.get('userData', {}).get('allowedIps', '')
-        if ip and ip[0].isdigit():
-            print(ip if '/' in ip else ip + '/32')
-except Exception:
-    pass
-" 2>/dev/null)
-
-    # Fallback — конфиг awg
-    if [ -z "$result" ]; then
-        local conf; conf=$(_awg_conf)
-        result=$(docker exec "$AWG_CONTAINER" sh -c             "grep 'AllowedIPs' '$conf' 2>/dev/null" 2>/dev/null |             grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32')
-    fi
-
-    echo "$result"
+    [ "${AWG_CLIENTS_CONTAINER:-}" = "$AWG_CONTAINER" ] || _awg_refresh_clients || return 1
+    [ "${#AWG_CLIENT_IPS[@]}" -eq 0 ] || printf '%s\n' "${AWG_CLIENT_IPS[@]}"
 }
 
 _awg_client_name() {
-    local ip="${1%/32}"
-    local raw
-    raw=$(docker exec "$AWG_CONTAINER" sh -c         "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
-    echo "$raw" | python3 -c "
-import json, sys
-target = '$ip'
-try:
-    d = json.load(sys.stdin)
-    for c in d:
-        ud = c.get('userData', {})
-        if ud.get('allowedIps', '').split('/')[0] == target:
-            print(ud.get('clientName', ''))
-            break
-except Exception:
-    pass
-" 2>/dev/null
+    local i
+    [ "${AWG_CLIENTS_CONTAINER:-}" = "$AWG_CONTAINER" ] || _awg_refresh_clients || return 1
+    for i in "${!AWG_CLIENT_IPS[@]}"; do
+        if [ "${AWG_CLIENT_IPS[$i]}" = "$1" ]; then
+            printf '%s\n' "${AWG_CLIENT_NAMES[$i]}"; return
+        fi
+    done
+}
+
+_awg_client_status() {
+    local i
+    for i in "${!AWG_CLIENT_IPS[@]}"; do
+        if [ "${AWG_CLIENT_IPS[$i]}" = "$1" ]; then
+            printf '%s\n' "${AWG_CLIENT_STATUS[$i]}"; return
+        fi
+    done
 }
 
 _awg_selected_clients() {
@@ -3745,8 +3953,11 @@ awg_clients_menu() {
         fi
         echo ""
 
-        local -a all_ips=()
-        while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
+        if ! _awg_refresh_clients; then
+            echo "Список недоступен. Изменения не применялись." >&2
+            read -r -p "Enter..."; return 1
+        fi
+        local -a all_ips=("${AWG_CLIENT_IPS[@]}")
 
         if [ "$sel_loaded" -eq 0 ]; then
             while IFS= read -r ip; do [ -n "$ip" ] && sel_ips+=("$ip"); done <<< "$(_awg_selected_clients)"
@@ -3758,13 +3969,12 @@ awg_clients_menu() {
             local ip="${all_ips[$i]}"
             local name; name=$(_awg_client_name "$ip")
             local label="${name:-${ip%/32}}"
-            local octet="${ip%/32}"; octet="${octet##*.}"
             local in_warp=0
             for s in "${sel_ips[@]}"; do [ "$s" = "$ip" ] && in_warp=1; done
             if [ "$in_warp" -eq 1 ]; then
-                echo -e "  ${YELLOW}[${octet}]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}"
+                echo -e "  ${YELLOW}[$((i+1))]${NC} ${GREEN}✅${NC} ${WHITE}${label}${NC}  ${ip}"
             else
-                echo -e "  ${YELLOW}[${octet}]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
+                echo -e "  ${YELLOW}[$((i+1))]${NC} ${WHITE}☐${NC}  ${WHITE}${label}${NC}  ${ip}"
             fi
         done
 
@@ -3779,12 +3989,10 @@ awg_clients_menu() {
         [ "$ch" = "0" ] || [ -z "$ch" ] && return
 
         if [[ "$ch" =~ ^[0-9]+$ ]]; then
-            # Ищем IP по последнему октету
             local tip=""
-            for ip in "${all_ips[@]}"; do
-                local oct="${ip%/32}"; oct="${oct##*.}"
-                [ "$oct" = "$ch" ] && tip="$ip" && break
-            done
+            if [ "${#ch}" -le 5 ] && (( 10#$ch >= 1 && 10#$ch <= ${#all_ips[@]} )); then
+                tip="${all_ips[$((10#$ch-1))]}"
+            fi
             if [ -n "$tip" ]; then
                 local already=0
                 for s in "${sel_ips[@]}"; do [ "$s" = "$tip" ] && already=1; done
@@ -4738,7 +4946,7 @@ _site_check() {
     local tip="$target"
     if ! [[ "$target" =~ ^[0-9]{1,3}\.[0-9]{1,3} ]]; then
         echo -ne "${WHITE}DNS...${NC}  "
-        tip=$(python3 -c "import socket; print(socket.gethostbyname('${target}'))" 2>/dev/null)
+        tip=$(python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$target" 2>/dev/null)
         [ -n "$tip" ] && echo -e "${GREEN}${tip}${NC}" || { echo -e "${RED}не определён${NC}"; read -p "Enter..."; return; }
     fi
 
@@ -9379,6 +9587,9 @@ do_backup() (
     cp "$CONF_FILE"   "${staging}/config"   2>/dev/null || true
     cp "$ALIASES_FILE" "${staging}/aliases" 2>/dev/null || true
 
+    [ ! -d "${CONF_DIR}/client-names" ] || \
+        cp -a "${CONF_DIR}/client-names" "${staging}/client-names" || { rm -rf "$staging"; return 1; }
+
     # — x-ui.db (3X-UI)
     if is_3xui && [ -f "/etc/x-ui/x-ui.db" ]; then
         _bak_log "→ 3X-UI база (x-ui.db)"
@@ -9906,6 +10117,18 @@ try:
     if not block.startswith(prefix) or not block.endswith(suffix):
         raise ValueError()
     ast.parse(block[len(prefix):-len(suffix)])
+    # Older safe builds can still be rolled back explicitly. If a download
+    # includes the names module, validate it too without executing any code.
+    begin, end = '# BEGIN GENERATED AWG CLIENTS\n', '# END GENERATED AWG CLIENTS\n'
+    if begin in text or end in text:
+        if text.count(begin) != 1 or text.count(end) != 1:
+            raise ValueError()
+        block = text.split(begin, 1)[1].split(end, 1)[0]
+        prefix = '_awg_clients_data() {\n    python3 - "$AWG_CONTAINER" "$@" <<\'GOVPN_CLIENTS_PY\'\n'
+        suffix = '\nGOVPN_CLIENTS_PY\n}\n'
+        if not block.startswith(prefix) or not block.endswith(suffix):
+            raise ValueError()
+        ast.parse(block[len(prefix):-len(suffix)])
     print(versions[0])
 except (OSError, ValueError, SyntaxError):
     sys.exit(1)
@@ -10105,8 +10328,7 @@ awg_peers_menu() {
         echo -e "${YELLOW}Amnezia не обнаружен.${NC}"; read -p "Enter..."; return
     fi
 
-    command -v qrencode &>/dev/null || apt-get install -y qrencode > /dev/null 2>&1
-
+    # QR dependency is requested only when displaying a QR code.
     # Выбор контейнера если их несколько
     local -a containers=()
     mapfile -t containers < <(docker ps --format '{{.Names}}' 2>/dev/null | grep -i "amnezia-awg" | sort)
@@ -10143,12 +10365,11 @@ awg_peers_menu() {
         echo -e "  ${WHITE}Контейнер: ${CYAN}${AWG_CONTAINER}${NC}  Сортировка: ${YELLOW}${sort_mode}${NC}\n"
 
         local conf; conf=$(_awg_conf)
-        local -a all_ips=()
-        while IFS= read -r ip; do [ -n "$ip" ] && all_ips+=("$ip"); done <<< "$(_awg_all_clients)"
-
-        # Кешируем wg show
-        local wg_show
-        wg_show=$(docker exec "$AWG_CONTAINER" sh -c "wg show $(_awg_iface) 2>/dev/null" 2>/dev/null)
+        if ! _awg_refresh_clients; then
+            echo "Список недоступен. Изменения не применялись." >&2
+            read -r -p "Enter..."; return 1
+        fi
+        local -a all_ips=("${AWG_CLIENT_IPS[@]}")
 
         # Сортировка
         local -a sorted_ips=()
@@ -10157,17 +10378,20 @@ awg_peers_menu() {
             for ip in "${all_ips[@]}"; do
                 local name; name=$(_awg_client_name "$ip")
                 local bare="${ip%/32}"
-                local hshake
-                hshake=$(echo "$wg_show" |                     awk "/allowed ips:.*${bare}\/32/{f=1} f && /latest handshake/{print; f=0}" |                     head -1 | sed 's/.*latest handshake: //')
                 case "$sort_mode" in
-                    name)     pairs+=("${name:-zzz_$bare}|${ip}") ;;
-                    ip)       pairs+=("${bare}|${ip}") ;;
-                    activity) [ -n "$hshake" ] && pairs+=("0|${ip}") || pairs+=("1|${ip}") ;;
+                    name) pairs+=("${name:-zzz_$bare}|${ip}") ;;
+                    ip)   pairs+=("$(printf '%03d.%03d.%03d.%03d' ${bare//./ })|${ip}") ;;
+                    activity)
+                        local j stamp=0
+                        for j in "${!AWG_CLIENT_IPS[@]}"; do
+                            [ "${AWG_CLIENT_IPS[$j]}" = "$ip" ] && stamp="${AWG_CLIENT_STAMPS[$j]}"
+                        done
+                        pairs+=("$(printf '%020d' "$stamp")|${ip}") ;;
                 esac
             done
             while IFS='|' read -r _ ip; do
                 sorted_ips+=("$ip")
-            done < <(printf '%s\n' "${pairs[@]}" | sort -f)
+            done < <(printf '%s\n' "${pairs[@]}" | { if [ "$sort_mode" = activity ]; then sort -r; else sort -f; fi; })
         fi
 
         if [ ${#sorted_ips[@]} -gt 0 ]; then
@@ -10176,18 +10400,11 @@ awg_peers_menu() {
                 local ip="${sorted_ips[$i]}"
                 local name; name=$(_awg_client_name "$ip")
                 local bare="${ip%/32}"
-                local hshake
-                # head -1 чтобы брать только первое совпадение
-                hshake=$(echo "$wg_show" |                     awk "/allowed ips:.*${bare}\/32/{f=1} f && /latest handshake/{print; f=0}" |                     head -1 | sed 's/.*latest handshake: //')
-                local status_icon="${RED}●${NC}"
-                local status_txt="${RED}не подключён${NC}"
-                if [ -n "$hshake" ]; then
-                    status_icon="${GREEN}●${NC}"
-                    status_txt="${GREEN}${hshake}${NC}"
-                fi
+                local status_txt; status_txt=$(_awg_client_status "$ip")
+                local status_icon="${CYAN}●${NC}"
                 printf "  ${YELLOW}[%d]${NC} %b ${WHITE}%-20s${NC}  ${CYAN}%s${NC}
 "                     "$((i+1))" "$status_icon" "${name:-$bare}" "$ip"
-                echo -e "       ${status_txt}"
+                printf '       %s\n' "$status_txt"
             done
         else
             echo -e "  ${YELLOW}Клиентов нет${NC}"
@@ -10238,7 +10455,7 @@ _awg_show_client_menu() {
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Показать конфиг (текст)"
         echo -e "  ${YELLOW}[2]${NC}  QR код (AmneziaWG)"
-        echo -e "  ${YELLOW}[3]${NC}  Переименовать"
+        echo -e "  ${YELLOW}[3]${NC}  Имя в GoVPN"
         echo -e "  ${RED}[4]${NC}  Удалить клиента"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -10249,27 +10466,14 @@ _awg_show_client_menu() {
             3)
                 echo -ne "  ${WHITE}Новое имя: ${NC}"; read -r new_name < /dev/tty
                 [ -z "$new_name" ] && continue
-                local tmp_ct="/tmp/awg_ct_rename.json"
-                docker cp "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" "$tmp_ct" 2>/dev/null
-                if [ -f "$tmp_ct" ]; then
-                    local bare_ip="${client_ip%/32}"
-                    python3 - "$tmp_ct" "$bare_ip" "$new_name" << 'PYEOF'
-import sys, json
-ct, bare, newname = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    with open(ct) as f: data = json.load(f)
-    for c in data:
-        if c.get("userData",{}).get("allowedIps","").split("/")[0] == bare:
-            c["userData"]["clientName"] = newname; break
-    with open(ct,"w") as f: json.dump(data, f, indent=4)
-    print("ok")
-except Exception as e: print("err:"+str(e))
-PYEOF
-                    docker cp "$tmp_ct" "${AWG_CONTAINER}:/opt/amnezia/awg/clientsTable" 2>/dev/null
-                    rm -f "$tmp_ct"
-                    name="$new_name"; label="$new_name"
-                    echo -e "  ${GREEN}✓ Переименован в '${new_name}'${NC}"
-                    log_action "AWG PEER RENAME: ${client_ip} -> ${new_name}"
+                if _awg_clients_data rename "$client_ip" "$new_name"; then
+                    _awg_refresh_clients || return 1
+                    name=$(_awg_client_name "$client_ip"); label="$name"
+                    printf 'Имя в GoVPN сохранено: %s\n' "$name"
+                    echo "Имя в приложении Amnezia изменяется отдельно."
+                    log_action "AWG PEER LABEL: ${client_ip}"
+                else
+                    echo "Имя не изменено." >&2
                 fi
                 read -p "  Enter..." < /dev/tty ;;
             4)
@@ -10286,35 +10490,40 @@ PYEOF
 
 
 _awg_get_client_config() {
-    local client_ip="$1"
-    local conf; conf=$(_awg_conf)
-
-    # Получаем данные клиента из clientsTable
-    local privkey psk
-    local client_data
-    client_data=$(docker exec "$AWG_CONTAINER" sh -c \
-        "cat /opt/amnezia/awg/clientsTable 2>/dev/null || true" 2>/dev/null)
-
-    # Ищем приватный ключ в файлах клиентов (если сохранён)
-    # В Amnezia приватные ключи хранятся в отдельных файлах или в самом конфиге
-    local client_dir="/opt/amnezia/awg"
-    local bare="${client_ip%/32}"
-
-    # Ищем сохранённый конфиг клиента
-    local saved_conf
-    saved_conf=$(docker exec "$AWG_CONTAINER" sh -c \
-        "find '${client_dir}' -name '*.conf' 2>/dev/null | xargs grep -l '${bare}' 2>/dev/null | grep -v wg0 | head -1")
-
-    if [ -n "$saved_conf" ]; then
-        docker exec "$AWG_CONTAINER" sh -c "cat '${saved_conf}'" 2>/dev/null
-        return 0
-    fi
-
-    # Если конфиг создан нашим скриптом — ищем в govpn storage
-    local govpn_conf="${CONF_DIR}/awg_clients/${bare}.conf"
-    [ -f "$govpn_conf" ] && cat "$govpn_conf" && return 0
-
-    return 1
+    # Only configs intentionally saved by GoVPN, with exact Interface Address.
+    # Server configs contain client AllowedIPs too; never find them by substring.
+    python3 - "$CONF_DIR" "$1" <<'GOVPN_CLIENT_CONFIG_PY'
+import ipaddress
+from pathlib import Path
+import sys
+try:
+    target = ipaddress.ip_interface(sys.argv[2])
+    if target.version != 4 or target.network.prefixlen != 32:
+        raise ValueError()
+    path = Path(sys.argv[1]) / 'awg_clients' / (str(target.ip) + '.conf')
+    if path.is_symlink():
+        raise ValueError()
+    text = path.read_text()
+    section, own, peers = '', [], []
+    for line in text.splitlines():
+        line = line.split('#', 1)[0].strip()
+        if line.startswith('['):
+            section = line.lower()
+        elif '=' in line:
+            key, value = (s.strip() for s in line.split('=', 1))
+            if key.lower() == 'address' and section == '[interface]':
+                own.extend(ipaddress.ip_interface(v.strip()).ip for v in value.split(','))
+            if key.lower() == 'allowedips' and section == '[peer]':
+                peers.extend(v.strip() for v in value.split(','))
+    if target.ip not in own or not peers:
+        raise ValueError()
+    # Server peers use /32 addresses. A reusable client profile has a default route.
+    if not any(v in ('0.0.0.0/0', '::/0') for v in peers):
+        raise ValueError()
+    print(text, end='')
+except (OSError, ValueError):
+    sys.exit(1)
+GOVPN_CLIENT_CONFIG_PY
 }
 
 _awg_show_config() {
@@ -10330,7 +10539,7 @@ _awg_show_config() {
         echo -e "${YELLOW}Конфиг не найден.${NC}"
         echo -e "${WHITE}Клиент был добавлен через Amnezia приложение —${NC}"
         echo -e "${WHITE}приватный ключ хранится только на устройстве клиента.${NC}"
-        echo -e "${WHITE}Для повторной выдачи: удалите и создайте клиента заново.${NC}"
+        echo -e "${WHITE}Экспортируйте конфигурацию в приложении Amnezia.${NC}"
     fi
 
     echo ""
@@ -10347,7 +10556,7 @@ _awg_show_qr() {
     if [ -z "$cfg" ]; then
         echo -e "${YELLOW}Конфиг не найден.${NC}"
         echo -e "${WHITE}Клиент добавлен через Amnezia — ключ только на устройстве.${NC}"
-        echo -e "${WHITE}Удалите и создайте клиента заново через п.5.${NC}"
+        echo -e "${WHITE}Экспортируйте конфигурацию в приложении Amnezia.${NC}"
         echo ""; read -p "Нажмите Enter..."; return
     fi
 
@@ -12671,7 +12880,11 @@ show_menu() {
             echo -e "  ${GREEN}1)  ★ Настроить WARP${NC}  ${CYAN}(мастер)${NC}"
             echo -e "  2)  Тест WARP"
             if is_amnezia; then
-                echo -e "  3)  Клиенты → WARP"
+                if is_3xui; then
+                    echo -e "  w)  Клиенты AWG → WARP"
+                else
+                    echo -e "  3)  Клиенты → WARP"
+                fi
             fi
         fi
         if is_amnezia; then
@@ -12720,6 +12933,7 @@ show_menu() {
                 elif is_3xui; then
                     _3xui_clients_menu
                 fi ;;
+            w|W) is_amnezia && awg_clients_menu ;;
             4) is_amnezia && awg_peers_menu ;;
             i|I|и|И) is_3xui && _3xui_inbound_templates ;;
             5) mtproto_menu ;;

@@ -15,6 +15,17 @@ if begin in text:
     updated = before + block + after
 else:
     updated = text.replace('_awg_conf() {', block + '\n_awg_conf() {', 1)
+client_begin = '# BEGIN GENERATED AWG CLIENTS\n'
+client_end = '# END GENERATED AWG CLIENTS\n'
+client_source = (root / 'lib/awg_clients.py').read_text()
+client_block = (client_begin + '_awg_clients_data() {\n    python3 - "$AWG_CONTAINER" "$@" <<\'GOVPN_CLIENTS_PY\'\n'
+                + client_source + '\nGOVPN_CLIENTS_PY\n}\n' + client_end)
+if client_begin in updated:
+    before, rest = updated.split(client_begin, 1)
+    _, after = rest.split(client_end, 1)
+    updated = before + client_block + after
+else:
+    updated = updated.replace('_awg_conf() {', client_block + '\n_awg_conf() {', 1)
 if '--check' in sys.argv:
     if updated != text:
         sys.exit('Embedded controller is stale: run python3 tools/bundle.py')

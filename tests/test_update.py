@@ -132,6 +132,14 @@ exit 0
         self.assertNotEqual(self.run_update('cmd_update --force --yes').returncode, 0)
         self.assert_untouched()
 
+    def test_reject_broken_names_module_without_running_it(self):
+        for text in (self.good.replace('import contextlib', 'import !broken', 1),
+                     self.good.replace('# END GENERATED AWG CLIENTS', '# MISSING CLIENTS END', 1)):
+            with self.subTest():
+                self.candidate.write_text(text)
+                self.assertNotEqual(self.run_update().returncode, 0)
+                self.assert_untouched()
+
     def test_backup_failure_aborts_install(self):
         self.assertNotEqual(self.run_update(FAIL_BACKUP=1).returncode, 0)
         self.assert_untouched()

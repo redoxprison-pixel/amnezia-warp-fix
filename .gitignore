@@ -9,3 +9,5 @@ wgcf-profile.conf
 clients.list
 *.tar.gz
 *.bak
+client-names/
+awg_clients/
