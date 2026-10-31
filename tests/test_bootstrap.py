@@ -125,6 +125,19 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(self.commands)
         self.mocks[3].assert_not_called()
 
+    def test_resume_only_generates_without_tos_or_new_registration(self):
+        registration = self.ctl.directory / 'registration'
+        registration.mkdir()
+        (registration / 'wgcf-account.toml').write_text('synthetic')
+        self.ctl.bootstrap([], resume_only=True)
+        self.assertEqual(len(self.commands), 1)
+        self.assertIn('generate', self.commands[0])
+
+    def test_resume_only_without_account_cannot_register(self):
+        with self.assertRaisesRegex(safe.SafeError, 'новая регистрация запрещена'):
+            self.ctl.bootstrap([], resume_only=True)
+        self.assertFalse(self.commands)
+
 
 class PreflightTests(unittest.TestCase):
     def setUp(self):
@@ -251,19 +264,18 @@ _awg_create_warp_conf
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(calls.read_text().strip(), 'bootstrap --config /secure/profile.conf --install-deps --clients 10.8.1.2/32')
 
-    def test_combo_partial_failure_cannot_claim_full_success(self):
-        harness = function('warp_setup_wizard').replace('< /dev/tty', '') + '''
-MODE=combo
-is_amnezia() { return 0; }; is_3xui() { return 0; }; clear() { :; }
-_awg_warp_running() { return 1; }; _awg_safe() { return 0; }
-_3xui_warp_installed() { return 1; }; _3xui_warp_running() { return 1; }
-_3xui_install_warp() { return 0; }; _awg_install_warp() { return 1; }
+    def test_combo_requires_selecting_one_warp_target(self):
+        harness = function('warp_setup_wizard') + "\n" + function('_menu_begin') + "\n" + function('_menu_add') + "\n" + function('_menu_read') + '''
+is_amnezia() { return 0; }; is_3xui() { return 0; }
+read_choice() { echo 1; }
+_awg_warp_screen() { echo AWG_ONLY; }
+_host_warp_screen() { echo UNEXPECTED_HOST; }
 warp_setup_wizard
 '''
-        result = subprocess.run(['bash', '-c', harness], input='3\n3\n\n', text=True, capture_output=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('WARP успешно настроен', result.stdout)
-        self.assertIn('успешно 1, ошибок 1', result.stdout)
+        result = subprocess.run(['bash', '-c', harness], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('AWG_ONLY', result.stdout)
+        self.assertNotIn('UNEXPECTED_HOST', result.stdout)
 
 
 if __name__ == '__main__':

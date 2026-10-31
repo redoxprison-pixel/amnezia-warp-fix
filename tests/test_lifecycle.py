@@ -108,8 +108,8 @@ class LifecycleTests(unittest.TestCase):
         install.assert_called_once_with(self.state, safe.patch_start(START, 'awg0'), running=False)
 
     def menu_remove(self, answer):
-        script = (ROOT / 'govpn.sh').read_text()
-        wizard = script[script.index('warp_setup_wizard() {'):script.index('warp_test() {')]
+        from test_clients import function
+        wizard = function('_awg_remove_from_menu')
         calls = self.root / 'calls'
         harness = '''
 MODE=amnezia
@@ -123,7 +123,7 @@ read_yn() { echo ANSWER; }
 _awg_safe() { [ "$1" = selected ] || echo "$*" >> CALLS; }
 '''.replace('CALLS', shlex.quote(str(calls))).replace('ANSWER', answer)
         wizard = wizard.replace('< /dev/tty', '< /dev/null')
-        result = subprocess.run(['bash'], input=harness + wizard + '\nwarp_setup_wizard\n4\n', text=True,
+        result = subprocess.run(['bash'], input=harness + wizard + '\n_awg_remove_from_menu\n', text=True,
                                 capture_output=True, timeout=10)
         return result, calls
 

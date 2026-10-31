@@ -24,6 +24,68 @@ class ClientError(Exception):
     pass
 
 
+READ_TIMEOUT = 6
+
+
+def container_names():
+    try:
+        result = subprocess.run(['docker', 'ps', '--format', '{{.Names}}'], capture_output=True,
+                                text=True, timeout=READ_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ClientError('Docker не ответил за 6 секунд. Проверьте daemon; список клиентов не изменен.') from None
+    if result.returncode:
+        raise ClientError('Не удалось получить список контейнеров Docker.')
+    return sorted(n for n in result.stdout.splitlines() if re.fullmatch(r'amnezia-awg[A-Za-z0-9_.-]*', n))
+
+
+def fast_snapshot(container):
+    # One bounded exec for a screen. Secret key fields are excluded at source.
+    script = r'''set -eu
+conf=
+for f in /opt/amnezia/awg/awg0.conf /opt/amnezia/awg/wg0.conf /etc/wireguard/wg0.conf; do
+    if [ -r "$f" ]; then conf=$f; break; fi
+done
+[ -n "$conf" ] || exit 1
+iface=${conf##*/}; iface=${iface%.conf}
+printf '%s\n' GOVPN_CONFIG
+awk -F= 'tolower($1) !~ /^[[:space:]]*(privatekey|presharedkey)[[:space:]]*$/' "$conf"
+printf '\n%s\n' GOVPN_TABLE
+cat /opt/amnezia/awg/clientsTable 2>/dev/null || printf '[]'
+tool=awg
+command -v awg >/dev/null 2>&1 || tool=wg
+run() {
+    if command -v timeout >/dev/null 2>&1; then timeout 2 "$@"; else "$@"; fi
+}
+printf '\n%s\n' GOVPN_ALLOWED
+run "$tool" show "$iface" allowed-ips 2>/dev/null || true
+printf '\n%s\n' GOVPN_HANDSHAKES
+if run "$tool" show "$iface" latest-handshakes 2>/dev/null; then
+    printf '\nGOVPN_HANDSHAKE_OK\n'
+else
+    printf '\nGOVPN_HANDSHAKE_UNKNOWN\n'
+fi
+printf '\n%s\n' GOVPN_DONE
+'''
+    try:
+        result = subprocess.run(['docker', 'exec', container, 'sh', '-c', script], capture_output=True,
+                                text=True, timeout=READ_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ClientError('Docker не ответил за 6 секунд. Операция прервана; данные и сеть не изменены.') from None
+    if result.returncode:
+        raise ClientError('Не удалось прочитать клиентов: проверьте контейнер и AWG config.')
+    try:
+        config, rest = result.stdout.split('GOVPN_CONFIG\n', 1)[1].split('\nGOVPN_TABLE\n', 1)
+        table, rest = rest.split('\nGOVPN_ALLOWED\n', 1)
+        allowed, rest = rest.split('\nGOVPN_HANDSHAKES\n', 1)
+        handshakes, _ = rest.split('\nGOVPN_DONE', 1)
+    except (ValueError, IndexError):
+        raise ClientError('Ответ Docker неполный; список не изменен.') from None
+    rows = records(table, config_peers(config) + live_peers(allowed), handshakes)
+    for row in rows:
+        row['handshake_known'] = 'GOVPN_HANDSHAKE_OK' in handshakes
+    return rows
+
+
 def label(value):
     if not isinstance(value, str):
         return ''
@@ -113,7 +175,7 @@ def records(table, peers, handshakes='', aliases=None):
 def docker(container, *args, optional=False):
     try:
         result = subprocess.run(['docker', 'exec', container, *args], capture_output=True,
-                                text=True, timeout=15)
+                                text=True, timeout=READ_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         raise ClientError('Не удалось прочитать клиентов через Docker.') from None
     if result.returncode and not optional:
@@ -297,8 +359,11 @@ def main():
     if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', container):
         raise ClientError('Неверное имя контейнера.')
     alias_path = Path('/etc/govpn/client-names') / (container + '.json')
-    rows = snapshot(container)
-    if action in ('profile-status', 'profile-export', 'profile-import'):
+    if action == 'containers' and not args:
+        print('\n'.join(container_names()))
+        return
+    rows = fast_snapshot(container) if action in ('list', 'profile-hint') else snapshot(container)
+    if action in ('profile-status', 'profile-hint', 'profile-export', 'profile-import'):
         if len(args) != (2 if action == 'profile-import' else 1):
             raise ClientError('Укажите IP клиента и, для импорта, файл .conf.')
         matches = [r for r in rows if r['ip'] in addresses(args[0])]
@@ -306,6 +371,11 @@ def main():
             raise ClientError('Клиент не найден однозначно.')
         row = matches[0]
         root = Path('/etc/govpn')
+        if action == 'profile-hint':
+            path = profile_path(root, container, row)
+            legacy = root / 'awg_clients' / (str(ipaddress.ip_interface(row['ip']).ip) + '.conf')
+            print('available' if any(p.is_file() and not p.is_symlink() for p in (path, legacy)) else 'unavailable')
+            return
         if action == 'profile-import':
             import_profile(root, container, row, args[1])
             print('Профиль сохранен с правами 600. Ключ и конфигурация сервера не изменялись.')
@@ -331,6 +401,8 @@ def main():
             age = int(time.time()) - stamp if stamp else None
             status = 'нет handshake' if age is None else (
                 f'handshake {max(0, age)} сек. назад' if age >= 0 else 'время handshake в будущем')
+            if not row.get('handshake_known', True):
+                status = 'данные handshake недоступны'
             print(f"{row['ip']}|{name}|{stamp}|{status}")
     else:
         raise ClientError('Неизвестная команда имен клиентов.')

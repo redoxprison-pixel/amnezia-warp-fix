@@ -395,14 +395,14 @@ class Controller:
         self.directory = root / name
         self.target = name
 
-    def docker(self, *args, check=True):
-        result = subprocess.run(['docker', *args], capture_output=True, text=True, timeout=90)
+    def docker(self, *args, check=True, timeout=90):
+        result = subprocess.run(['docker', *args], capture_output=True, text=True, timeout=timeout)
         if check and result.returncode:
             raise SafeError('Операция Docker завершилась ошибкой (вывод скрыт для защиты ключей).')
         return result
 
-    def inspect(self):
-        data = json.loads(self.docker('inspect', self.name).stdout)[0]
+    def inspect(self, timeout=90):
+        data = json.loads(self.docker('inspect', self.name, timeout=timeout).stdout)[0]
         if data.get('Name', '/' + self.name).lstrip('/') != self.name:
             raise SafeError('Укажите каноническое имя контейнера, а не ID/alias.')
         if data['HostConfig']['NetworkMode'] == 'host' or data['HostConfig']['NetworkMode'].startswith('container:'):
@@ -457,8 +457,47 @@ class Controller:
             if content is not None:
                 return clients(content.splitlines())
         if required:
-            raise SafeError('Список WARP-клиентов не найден. Выберите клиентов в пункте 3 и примените выбор; пустой список автоматически не подставляется.')
+            raise SafeError('Список WARP-клиентов не найден. Выберите клиентов в меню 1 → r и примените выбор; пустой список автоматически не подставляется.')
         return []
+
+    def phase(self):
+        """Read-only screen status; no account creation, packages, or networking."""
+        state = self.state() if (self.directory / 'state.json').exists() else None
+        running = self.inspect(timeout=6)
+        saved = bool(state)
+        if not saved:
+            saved = any(p.is_file() and not p.is_symlink() for p in (
+                self.directory / 'warp.conf', self.root / 'warp.conf', self.root / 'wgcf-profile.conf'))
+        active = False
+        healthy = False
+        if running:
+            result = self.docker('exec', self.target, 'sh', '-c', '''
+for p in /opt/warp/warp.conf /etc/amnezia/amneziawg/warp.conf /etc/wireguard/warp.conf; do
+    [ ! -s "$p" ] || echo saved
+done
+if ip link show warp >/dev/null 2>&1; then echo active; fi
+if ip -4 rule show | grep -q '10900:.*fwmark 0x40000000/0x40000000 lookup 51888'; then echo policy; fi
+''', check=False, timeout=6)
+            if result.returncode:
+                raise SafeError('Не удалось проверить этап WARP; сеть не изменялась.')
+            flags = result.stdout.splitlines()
+            saved = saved or 'saved' in flags
+            active = 'active' in flags
+            healthy = active and 'policy' in flags
+        pending = (self.directory / 'registration/wgcf-account.toml').is_file()
+        enabled = bool(state and state.get('enabled', True))
+        if not running:
+            stage = 'stopped'
+        elif state and enabled:
+            stage = 'ready' if healthy else 'repair'
+        elif state:
+            stage = 'saved'
+        elif saved:
+            stage = 'legacy'
+        else:
+            stage = 'pending' if pending else 'missing'
+        return {'stage': stage, 'managed': bool(state), 'active': active or enabled,
+                'clients': len(state['clients']) if state else 0}
 
     def existing_profile(self):
         """Read-only discovery. Invalid existing data must never trigger registration."""
@@ -487,7 +526,7 @@ class Controller:
         patch_start(original, iface)  # preflight before recording the migration
         data = replacement if replacement is not None else self.existing_profile()
         if data is None:
-            raise SafeError('Профиль WARP отсутствует: для первой установки выберите создание нового профиля в меню 1 → 3. Переустановка (setup) аккаунт не создает.')
+            raise SafeError('Профиль WARP отсутствует: для первой установки выберите подключение в меню 2 → 1. Переустановка (setup) аккаунт не создает.')
         selected = self.saved_clients(required=True) if selection is None else clients(selection)
         state = {'version': 1, 'profile': data, 'clients': selected, 'iface': iface, 'enabled': False}
         self.backup(original, None)
@@ -622,7 +661,7 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
         binary.chmod(0o700)
         return binary
 
-    def bootstrap(self, selection, accept_tos=False, install_deps=False, source=None):
+    def bootstrap(self, selection, accept_tos=False, install_deps=False, source=None, resume_only=False):
         """Explicit first install only. Persist credentials before touching routes."""
         if selection is None:
             raise SafeError('Для первой установки нужен явный --clients со списком IPv4 /32; --clients без адресов означает выбор никого.')
@@ -633,7 +672,9 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
         original = self.read_container(START)
         patch_start(original, self.find_iface())
         data = profile(Path(source).read_text()) if source else None
-        if data is None and not accept_tos:
+        if resume_only and (source is not None or not (self.directory / 'registration/wgcf-account.toml').is_file()):
+            raise SafeError('Продолжение требует сохраненный account; новая регистрация запрещена. Используйте первую установку или импорт профиля.')
+        if data is None and not accept_tos and not resume_only:
             raise SafeError('Новая регистрация требует --accept-tos после принятия условий Cloudflare. Можно импортировать готовый профиль через --config.')
         tools = self.prepare_dependencies(install_deps)
         if data is None:
@@ -657,6 +698,8 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                     raise SafeError('wgcf завершился ошибкой. Возможно, Cloudflare недоступен или отклонил регистрацию. Вывод скрыт для защиты ключей; сохраненные данные не удалены.')
 
             if not account.exists():
+                if resume_only:
+                    raise SafeError('Сохраненный account исчез. Новая регистрация не выполнялась.')
                 if attempt.exists():
                     raise SafeError('Предыдущая регистрация не дала локальный account. Повторная регистрация заблокирована: проверьте каталог registration или используйте --config с готовым профилем.')
                 write_private(attempt, json.dumps({'version': WGCF_VERSION, 'registration_started': True}) + '\n')
@@ -830,16 +873,21 @@ def main(argv=None):
     sub.add_parser('restore')
     sub.add_parser('prepare-stopped')
     sub.add_parser('selected')
-    sub.add_parser('policy')
+    pol = sub.add_parser('policy')
+    pol.add_argument('--host-only', action='store_true')
+    sub.add_parser('phase')
     sub.add_parser('status')
     sub.add_parser('profile-source')
     setup = sub.add_parser('setup')
     setup.add_argument('--install-deps', action='store_true')
+    setup.add_argument('--clients', nargs='*', default=None)
+    setup.add_argument('--config')
     first = sub.add_parser('bootstrap', help='Первая установка: отдельная регистрация либо готовый профиль')
     first.add_argument('--clients', nargs='*', default=None)
     first.add_argument('--accept-tos', action='store_true')
     first.add_argument('--install-deps', action='store_true')
     first.add_argument('--config')
+    first.add_argument('--resume-only', action='store_true')
     sub.add_parser('remove')
     ep = sub.add_parser('endpoint')
     ep.add_argument('endpoint')
@@ -868,10 +916,20 @@ def main(argv=None):
             ctl.inspect()
             print('\n'.join(ctl.saved_clients()))
         elif args.action == 'policy':
-            ctl.inspect()
+            if not args.host_only:
+                ctl.inspect()
             state = ctl.state() if (ctl.directory / 'state.json').exists() else None
+            if args.host_only and state is None:
+                print('unknown')
+                return
             print('on' if state and state.get('enabled', True) else 'off')
             print('\n'.join(state['clients'] if state else ctl.saved_clients()))
+        elif args.action == 'phase':
+            try:
+                data = ctl.phase()
+            except subprocess.TimeoutExpired:
+                raise SafeError('Превышено ожидание ответа Docker (6 секунд на запрос). Профиль и сеть не изменены.') from None
+            print(json.dumps(data))
         elif args.action == 'status':
             running = ctl.inspect()
             exists = (ctl.directory / 'state.json').exists()
@@ -883,21 +941,23 @@ def main(argv=None):
             ctl.inspect()
             print('saved' if ctl.existing_profile() is not None else 'missing')
         elif args.action == 'bootstrap':
-            running = ctl.bootstrap(args.clients, args.accept_tos, args.install_deps, args.config)
+            running = ctl.bootstrap(args.clients, args.accept_tos, args.install_deps, args.config, args.resume_only)
             print('Профиль создан/импортирован, сохранен и применен. IPv6 AWG заблокирован. Выбранных клиентов: ' + str(len(clients(args.clients))))
         else:
             tools = None
             if (args.action == 'setup' or (args.action == 'apply' and args.install_deps)) and ctl.inspect():
                 tools = ctl.prepare_dependencies(install=args.install_deps)
-            replacement = profile(Path(args.config).read_text()) if args.action == 'replace-profile' else None
-            selection = clients(args.clients) if args.action == 'apply' else None
+            replacement = profile(Path(args.config).read_text()) if args.action == 'replace-profile' or (args.action == 'setup' and args.config) else None
+            selection = clients(args.clients) if args.action in ('apply', 'setup') and args.clients is not None else None
             state = ctl.adopt(replacement, selection)
             if tools is not None:
                 state['tools'] = tools
             if args.action == 'restore' and state.get('enabled') is False:
                 raise SafeError('WARP еще не установлен или был удален. Выберите переустановку (setup).')
             state['enabled'] = True
-            if args.action == 'apply':
+            if replacement is not None:
+                state['profile'] = replacement
+            if selection is not None:
                 state['clients'] = clients(args.clients)
             elif args.action == 'endpoint':
                 value = endpoint(args.endpoint)

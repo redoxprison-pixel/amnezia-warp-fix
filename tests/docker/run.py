@@ -13,6 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from test_awg_warp import PROFILE, safe
+from test_clients import clients
 
 
 def docker(*args, check=True):
@@ -44,6 +45,25 @@ with tempfile.TemporaryDirectory() as temp:
             if docker('exec', name, 'ip', 'link', 'show', 'awg0', check=False).returncode == 0:
                 break
             time.sleep(0.1)
+        assert ctl.phase()['stage'] == 'missing'
+        # The client screen obtains a real snapshot in one exec and excludes
+        # secret fields before copying any config text out of the container.
+        test_config = root / 'server.conf'
+        test_config.write_text('[Interface]\nAddress=10.8.1.1/24\nPrivateKey=fixture-only-private\n[Peer]\nPublicKey=A\nPresharedKey=fixture-only-psk\nAllowedIPs=10.8.1.2/32\n')
+        docker('cp', str(test_config), name + ':/opt/amnezia/awg/awg0.conf')
+        table = root / 'clientsTable'
+        table.write_text(json.dumps([{'clientId':'A', 'userData':{'clientName':'Fixture Phone'}}]))
+        docker('cp', str(table), name + ':/opt/amnezia/awg/clientsTable')
+        real_run = subprocess.run
+        def inspect_snapshot(*args, **kwargs):
+            result = real_run(*args, **kwargs)
+            assert 'fixture-only-private' not in result.stdout
+            assert 'fixture-only-psk' not in result.stdout
+            return result
+        with patch.object(clients.subprocess, 'run', side_effect=inspect_snapshot):
+            rows = clients.fast_snapshot(name)
+        assert rows[0]['name'] == 'Fixture Phone'
+        print('bounded single-exec client snapshot and secret filtering: PASS')
         # Fresh server: no legacy profile/list/state. Import the synthetic profile
         # through bootstrap, with real dependency/firewall/kernel preflight.
         first = safe.Controller(name, root / 'first-install')
@@ -61,6 +81,7 @@ with tempfile.TemporaryDirectory() as temp:
             assert first.bootstrap(['10.8.1.2/32'], source=profile)
         assert first.state()['clients'] == ['10.8.1.2/32']
         assert first.state()['enabled']
+        assert first.phase()['stage'] == 'ready'
         startup = docker('exec', name, 'cat', '/opt/amnezia/start.sh').stdout
         release = re.search(r'/opt/govpn-warp/[a-f0-9]+', startup)[0]
         docker('exec', name, release + '/tool-bin/wg', 'show', 'interfaces')
@@ -71,6 +92,7 @@ with tempfile.TemporaryDirectory() as temp:
         except safe.SafeError as error:
             assert 'Профиль уже существует' in str(error)
         first.remove()
+        assert first.phase()['stage'] == 'saved'
         docker('exec', name, 'rm', '/usr/local/bin/wg')
         print('fresh bootstrap/preflight/persistence/repeat protection: PASS')
         # Simulate the user's running legacy installation with no state.json.

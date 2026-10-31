@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / 'govpn.sh').read_text()
@@ -91,7 +92,7 @@ log_action() { :; }
         result = self.run_update('_self_update --yes')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.install.read_text(), self.good)
-        self.assertIn('2) _self_update ;;', SCRIPT)
+        self.assertTrue('update) _self_update ;;' in SCRIPT, 'System menu must use the same updater')
 
     def test_interactive_menu_replaces_the_parent_process(self):
         # A harmless executable fixture with the expected embedded-code format.
@@ -160,6 +161,26 @@ exit 0
         self.assertNotEqual(self.run_update().returncode, 0)
         self.assert_untouched()
         self.assertEqual(self.run_update('cmd_update --force --yes').returncode, 0)
+
+    def test_cache_never_advertises_older_release(self):
+        cache = self.conf / 'update.cache'
+        for version in ('6.65', '1.0', CURRENT):
+            cache.write_text(f'{version}|{int(time.time())}|{REF}\n')
+            result = self.run_update('_update_cached_ver; exit 0')
+            self.assertEqual(result.stdout.strip(), CURRENT if version == CURRENT else '')
+
+    def test_version_compare_is_numeric_and_normalizes_missing_patch(self):
+        for older, newer in (('6.9', '6.10'), ('6.67.1', '6.67.2'), ('9.99', '10.0')):
+            self.assertEqual(self.run_update(f'_ver_lt {older} {newer}').returncode, 0)
+            self.assertNotEqual(self.run_update(f'_ver_lt {newer} {older}').returncode, 0)
+        self.assertNotEqual(self.run_update('_ver_lt 6.67 6.67.0').returncode, 0)
+        self.assertNotEqual(self.run_update('_ver_lt 6.67.0 6.67').returncode, 0)
+
+    def test_background_check_of_stale_remote_cannot_reintroduce_old_banner(self):
+        self.candidate.write_text(SCRIPT.replace(f'VERSION="{CURRENT}"', 'VERSION="6.65"', 1))
+        result = self.run_update('_update_fetch_bg; _update_cached_ver')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), CURRENT)
 
     def test_cache_is_bound_to_update_branch(self):
         result = self.run_update('_update_fetch_bg && _update_cached_ver')

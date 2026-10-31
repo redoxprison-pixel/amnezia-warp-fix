@@ -8,23 +8,28 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 TEXT = (ROOT / 'govpn.sh').read_text()
 GROUPS = {
-    '_3xui_load_config': ('3X-UI: клиенты и API', '3 / Клиенты 3X-UI'),
-    '_awg_conf': ('Amnezia и WARP', '3 / Клиенты; 1 / WARP'),
+    '_3xui_load_config': ('3X-UI: клиенты и API', '1 / Клиенты 3X-UI'),
+    '_awg_conf': ('Amnezia и WARP', '1 / Клиенты; 2 / WARP'),
+    '_awg_read_phase': ('Подключение WARP', '2'),
+    '_service_restart_menu': ('Перезапуск сервисов', '4 / 6'),
+    'warp_test': ('Диагностика WARP', '2 / проверка подключения'),
+    'awg_clients_menu': ('Маршруты клиентов', '1 / r'),
     'save_iptables': ('Сеть и каскады', '5 / 2'),
-    'tools_menu': ('Диагностика', '7'),
+    'tools_menu': ('Диагностика', '3'),
     '_hy2_list_users': ('Hysteria legacy', 'скрыт; кандидат на отдельный модуль'),
     '_install_docker': ('Установка компонентов', '5 / 4'),
-    '_3xui_backup_geofiles': ('3X-UI: дополнительные настройки', '5 / 5-6'),
+    '_3xui_backup_geofiles': ('3X-UI: дополнительные настройки', '5 / 6-8'),
     '_install_3xui': ('Установка компонентов', '5 / 4'),
     '_domain_detect_short': ('Веб-сервер, домены и SSL', '5 / 3'),
-    'system_menu': ('Обслуживание', '8'),
-    'do_backup': ('Резервные копии', '8 / 1'),
-    '_update_cached_ver': ('Обновление и установка', '8 / 2; install.sh'),
-    '_awg_emergency_restore': ('Клиенты, профили и маршруты', '3'),
-    '_ssh_access_plan': ('Резервный SSH', '8 / a'),
-    '_clients_hub': ('Навигация клиентов', '3'),
+    'system_menu': ('Обслуживание', '4'),
+    'do_backup': ('Резервные копии', '4 / 1'),
+    '_update_cached_ver': ('Обновление и установка', '4 / 2; install.sh'),
+    '_awg_emergency_restore': ('Клиенты, профили и маршруты', '1'),
+    '_ssh_access_plan': ('Резервный SSH', '4 / 3'),
+    '_clients_hub': ('Навигация клиентов', '1'),
+    '_menu_begin': ('Общая навигация', 'основные экраны'),
     '_network_tools_menu': ('Навигация дополнительных функций', '5'),
-    'awg_peers_menu': ('Клиенты, профили и маршруты', '3'),
+    'awg_peers_menu': ('Клиенты, профили и маршруты', '1'),
     '_mtg_list_instances': ('Telegram-прокси', '5 / 1'),
     'show_menu': ('Навигация и запуск', 'главное меню'),
 }
@@ -39,7 +44,7 @@ for number, line in enumerate(TEXT.splitlines(), 1):
         adapter = re.match(r'^(_awg_safe|_awg_clients_data)\(\)', line)
         if adapter:
             entries.append({'file': 'govpn.sh', 'line': number, 'function': adapter[1],
-                            'category': 'Адаптеры backend', 'destination': '1 / WARP; 3 / Клиенты', 'kind': 'shell'})
+                            'category': 'Адаптеры backend', 'destination': '2 / WARP; 1 / Клиенты', 'kind': 'shell'})
         if line.startswith('# END GENERATED '):
             generated = False
         continue
@@ -71,7 +76,7 @@ def python_functions(nodes, file, scope=''):
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             entries.append({'file': file, 'line': node.lineno, 'function': scope + node.name,
                             'category': 'Backend WARP' if 'warp' in file else 'Backend клиентов/профилей',
-                            'destination': '1 / WARP; 3 / Клиенты', 'kind': 'python'})
+                            'destination': '2 / WARP; 1 / Клиенты', 'kind': 'python'})
             python_functions(node.body, file, scope + node.name + '.')
         else:
             python_functions(list(ast.iter_child_nodes(node)), file, scope)
