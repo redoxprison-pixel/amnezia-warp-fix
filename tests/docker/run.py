@@ -43,7 +43,20 @@ with tempfile.TemporaryDirectory() as temp:
             if docker('exec', name, 'ip', 'link', 'show', 'awg0', check=False).returncode == 0:
                 break
             time.sleep(0.1)
-        ctl.import_state(profile, selected, 'awg0')
+        # Simulate the user's running legacy installation with no state.json.
+        docker('exec', name, 'mkdir', '-p', '/opt/warp')
+        docker('cp', str(profile), name + ':/opt/warp/warp.conf')
+        docker('cp', str(selected), name + ':/opt/warp/clients.list')
+        docker('exec', name, 'wg-quick', 'up', '/opt/warp/warp.conf')
+        docker('exec', name, 'iptables', '-t', 'mangle', '-N', 'AWG_WARP')
+        docker('exec', name, 'iptables', '-t', 'mangle', '-A', 'AWG_WARP', '-j', 'MARK', '--set-mark', '100')
+        docker('exec', name, 'iptables', '-t', 'mangle', '-A', 'PREROUTING', '-i', 'awg0', '-j', 'AWG_WARP')
+        ctl.remove()
+        assert docker('exec', name, 'ip', 'link', 'show', 'warp', check=False).returncode != 0
+        assert not (ctl.directory / 'state.json').exists()
+        state = ctl.adopt()
+        assert state['clients'] == ['10.8.1.2/32']
+        state['enabled'] = True
         docker('cp', str(ROOT / 'govpn.sh'), name + ':/tmp/govpn.sh')
         version = re.search(r'^VERSION="([^"]+)"', (ROOT / 'govpn.sh').read_text(), re.M)[1]
         assert 'v' + version in docker('exec', name, 'bash', '/tmp/govpn.sh', 'version').stdout
@@ -53,7 +66,7 @@ with tempfile.TemporaryDirectory() as temp:
         docker('exec', name, 'ip', '-4', 'rule', 'add', 'priority', '100', 'fwmark', '100', 'lookup', '100')
         docker('exec', name, 'ip', '-4', 'rule', 'add', 'priority', '200', 'from', '10.8.1.77/32', 'lookup', '100')
         docker('exec', name, 'iptables', '-t', 'mangle', '-A', 'PREROUTING', '-i', 'awg0', '-j', 'MARK', '--set-mark', '100')
-        ctl.deploy(ctl.state())
+        ctl.deploy(state)
         assert 'from 10.8.1.77 lookup 100' in docker('exec', name, 'ip', '-4', 'rule', 'show').stdout
         assert 'default dev uplink' in docker('exec', name, 'ip', '-4', 'route', 'show', 'table', '100').stdout
         # Real wg-quick parses the sanitized profile, without printing its keys.
@@ -71,9 +84,32 @@ with tempfile.TemporaryDirectory() as temp:
             probe('fd00:1::2', 'drop')
 
         check_paths()
-        first = docker('exec', name, 'iptables-save').stdout
+        # Removal does not depend on tunnel startup, even when wg-quick fails.
+        docker('exec', name, 'touch', '/tmp/fail-warp')
+        ctl.remove()
+        assert not ctl.state()['enabled']
+        assert safe.BEGIN not in docker('exec', name, 'cat', '/opt/amnezia/start.sh').stdout
+        assert docker('exec', name, 'ip', 'link', 'show', 'warp', check=False).returncode != 0
+        assert 'from 10.8.1.77 lookup 100' in docker('exec', name, 'ip', '-4', 'rule', 'show').stdout
+        probe('10.8.1.2', 'uplink')
+        probe('fd00:1::2', 'uplink')
+        ctl.remove()  # repeat removal is idempotent
+        docker('restart', name)
+        time.sleep(1)
+        probe('10.8.1.2', 'uplink')
+        assert docker('exec', name, 'ip', 'link', 'show', 'warp', check=False).returncode != 0
+        docker('exec', name, 'rm', '-f', '/tmp/fail-warp')
+        state = ctl.state()
+        state['enabled'] = True
+        ctl.deploy(state)
+        check_paths()
+        def rules():
+            # iptables-save adds generated/completed timestamps; compare rules.
+            return '\n'.join(line for line in docker('exec', name, 'iptables-save').stdout.splitlines()
+                             if line and not line.startswith('#'))
+        first = rules()
         ctl.deploy(ctl.state())
-        assert first == docker('exec', name, 'iptables-save').stdout
+        assert first == rules()
         check_paths()
         docker('restart', name)
         for attempt in range(50):
@@ -113,13 +149,16 @@ with tempfile.TemporaryDirectory() as temp:
         # Recreate remains stopped until the saved hook/configuration is installed.
         docker('rm', name)
         docker('create', *fixture_args)
-        ctl.prepare_stopped()
+        state = ctl.state()
+        state['enabled'] = True
+        assert not ctl.deploy(state, allow_stopped=True)
+        assert not json.loads(docker('inspect', name).stdout)[0]['State']['Running']
         docker('start', name)
         for attempt in range(50):
             if docker('exec', name, 'ip', 'link', 'show', 'warp', check=False).returncode == 0:
                 break
             time.sleep(0.1)
         check_paths()
-        print('PASS: CLI, wg-quick parse, legacy migration, foreign routes, kernel packet paths, repeat apply, restart, empty selection, tunnel loss, fail-closed stop, stopped restore, recreate')
+        print('PASS: legacy removal without import, migration, removal with failed wg-quick, repeat removal, removed restart, reinstall; CLI, wg-quick parse, foreign routes, kernel packet paths, repeat apply, restart, empty selection, tunnel loss, fail-closed stop, stopped restore, recreate')
     finally:
         docker('rm', '-f', name, check=False)

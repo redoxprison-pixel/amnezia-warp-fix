@@ -1,4 +1,4 @@
-"""Run the updater tests with real Linux Bash/flock in a disposable container."""
+"""Run unit tests with real Linux Bash/flock in a disposable container."""
 import json
 import os
 from pathlib import Path
@@ -23,9 +23,11 @@ if not endpoint.startswith('unix://'):
 name = 'govpn-update-test-' + uuid.uuid4().hex[:12]
 with tempfile.TemporaryDirectory() as temp:
     files = Path(temp)
-    (files / 'tests').mkdir()
-    shutil.copyfile(ROOT / 'govpn.sh', files / 'govpn.sh')
-    shutil.copyfile(ROOT / 'tests/test_update.py', files / 'tests/test_update.py')
+    for relative in ('govpn.sh', 'lib/awg_warp.py', 'tools/bundle.py',
+                     'tests/test_awg_warp.py', 'tests/test_update.py', 'tests/test_lifecycle.py'):
+        target = files / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, target)
     docker('create', '--name', name, '--network', 'none', '--workdir', '/workspace',
            '--entrypoint', 'python3', 'govpn-warp-test:local',
            '-m', 'unittest', 'discover', '-s', 'tests', '-v', capture_output=True)

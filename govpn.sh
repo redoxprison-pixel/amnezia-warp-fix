@@ -6,12 +6,12 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 # ══════════════════════════════════════════════════════════════
-#  GoVPN Manager v4.0
+#  GoVPN Manager v6.63
 #  Автоопределение режима · WARP мастер · iptables каскад
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.62"
+VERSION="6.63"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 # Keep draft updates on the reviewed branch; switch this ref to main at release.
@@ -2274,6 +2274,68 @@ guard() {
         add "$tool" filter INPUT -i "$iface" -m comment --comment govpn-warp-boot -j DROP
     done
 }
+# Explicit removal permits direct routing and must work without wg-quick or a
+# working tunnel. Keep ingress blocked until only our resources are removed.
+if [ "$action" = remove ]; then
+    v6=0
+    ip6tables -t filter -S >/dev/null 2>&1 && v6=1
+    for chain in FORWARD INPUT; do
+        add iptables filter "$chain" -i "$iface" -m comment --comment govpn-warp-boot -j DROP
+        if [ "$v6" = 1 ]; then
+            add ip6tables filter "$chain" -i "$iface" -m comment --comment govpn-warp-boot -j DROP
+        fi
+    done
+    for spec in 'mangle PREROUTING GVPN_WARP_MARK' 'filter FORWARD GVPN_WARP_FWD' 'filter INPUT GVPN_WARP_IN'; do
+        set -- $spec
+        while ensure iptables -t "$1" -C "$2" -i "$iface" -j "$3"; do
+            ensure iptables -t "$1" -D "$2" -i "$iface" -j "$3"
+        done
+    done
+    while ensure iptables -t nat -C POSTROUTING -j GVPN_WARP_NAT; do
+        ensure iptables -t nat -D POSTROUTING -j GVPN_WARP_NAT
+    done
+    for spec in 'mangle GVPN_WARP_MARK' 'filter GVPN_WARP_FWD' 'filter GVPN_WARP_IN' 'nat GVPN_WARP_NAT'; do
+        set -- $spec
+        if ensure iptables -t "$1" -S "$2" >/dev/null; then
+            ensure iptables -t "$1" -F "$2"
+            ensure iptables -t "$1" -X "$2"
+        fi
+    done
+    while ensure iptables -t mangle -C PREROUTING -i "$iface" -j AWG_WARP; do
+        ensure iptables -t mangle -D PREROUTING -i "$iface" -j AWG_WARP
+    done
+    if ensure iptables -t mangle -S AWG_WARP >/dev/null; then
+        ensure iptables -t mangle -F AWG_WARP
+        ensure iptables -t mangle -X AWG_WARP
+    fi
+    while ensure iptables -t mangle -C PREROUTING -i "$iface" -j MARK --set-mark 100; do
+        ensure iptables -t mangle -D PREROUTING -i "$iface" -j MARK --set-mark 100
+    done
+    while ensure iptables -t nat -C POSTROUTING -o warp -j MASQUERADE; do
+        ensure iptables -t nat -D POSTROUTING -o warp -j MASQUERADE
+    done
+    while ensure iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; do
+        ensure iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    done
+    while ip -4 rule del priority 10900 fwmark "$mark" lookup "$table" 2>/dev/null; do :; done
+    while ip -4 rule del priority 100 fwmark 100 lookup 100 2>/dev/null; do :; done
+    if ip link show warp >/dev/null 2>&1; then ip link delete warp; fi
+    ip -4 route del unreachable default metric 32767 table "$table" 2>/dev/null || true
+    for chain in FORWARD INPUT; do
+        if [ "$v6" = 1 ]; then
+            while ensure ip6tables -t filter -C "$chain" -i "$iface" -m comment --comment govpn-warp-ipv6 -j DROP; do
+                ensure ip6tables -t filter -D "$chain" -i "$iface" -m comment --comment govpn-warp-ipv6 -j DROP
+            done
+            while ensure ip6tables -t filter -C "$chain" -i "$iface" -m comment --comment govpn-warp-boot -j DROP; do
+                ensure ip6tables -t filter -D "$chain" -i "$iface" -m comment --comment govpn-warp-boot -j DROP
+            done
+        fi
+        while ensure iptables -t filter -C "$chain" -i "$iface" -m comment --comment govpn-warp-boot -j DROP; do
+            ensure iptables -t filter -D "$chain" -i "$iface" -m comment --comment govpn-warp-boot -j DROP
+        done
+    done
+    exit 0
+fi
 guard
 [ "$action" = guard ] && exit 0
 [ "$action" = apply ] || exit 1
@@ -2445,9 +2507,7 @@ def profile(text):
                    for name, data in (('Interface', a), ('Peer', p)))
 
 
-def patch_start(text, iface):
-    if iface not in ('awg0', 'wg0'):
-        raise SafeError('Неизвестный интерфейс AWG.')
+def unpatch_start(text):
     lines = text.splitlines()
     if not lines or lines[0] not in ('#!/bin/bash', '#!/bin/sh', '#!/usr/bin/env bash'):
         raise SafeError('Неизвестный start.sh; автоматическая подмена шаблоном запрещена.')
@@ -2477,6 +2537,13 @@ def patch_start(text, iface):
     for line in clean[1:-1]:
         if re.search(r'warp|lookup\s+100|fwmark|\bexec\b|\bexit\b|\btail\b|&\s*$', line.split('#', 1)[0], re.I):
             raise SafeError('В start.sh остались неподдерживаемые команды; требуется ручной аудит.')
+    return '\n'.join(clean) + '\n'
+
+
+def patch_start(text, iface):
+    if iface not in ('awg0', 'wg0'):
+        raise SafeError('Неизвестный интерфейс AWG.')
+    clean = unpatch_start(text).splitlines()
     boot = [BEGIN, f'sh {REMOTE}/runtime.sh guard {iface} || exit 1', END]
     apply = [BEGIN, f'sh {REMOTE}/runtime.sh apply {iface} || exit 1', END]
     return '\n'.join(clean[:1] + boot + clean[1:-1] + apply + clean[-1:]) + '\n'
@@ -2560,6 +2627,95 @@ class Controller:
             raise SafeError('Некорректный интерфейс в состоянии.')
         return state
 
+    def find_iface(self):
+        for iface in ('awg0', 'wg0'):
+            for path in ('/opt/amnezia/awg/' + iface + '.conf', '/etc/wireguard/' + iface + '.conf'):
+                if self.read_container(path, optional=True) is not None:
+                    return iface
+        raise SafeError('Конфигурация AWG не найдена; контейнер не изменен.')
+
+    def saved_clients(self, required=False):
+        if (self.directory / 'state.json').exists():
+            return self.state()['clients']
+        for path in (self.directory / 'clients.list', self.root / 'clients.list', self.root / 'warp-clients.list'):
+            if path.is_file() and not path.is_symlink():
+                return clients(path.read_text().splitlines())
+        for path in ('/opt/warp/clients.list', '/opt/amnezia/awg/warp_clients.txt'):
+            content = self.read_container(path, optional=True)
+            if content is not None:
+                return clients(content.splitlines())
+        if required:
+            raise SafeError('Список WARP-клиентов не найден. Выберите клиентов в пункте 3 и примените выбор; пустой список автоматически не подставляется.')
+        return []
+
+    def adopt(self, replacement=None, selection=None):
+        """Reuse existing credentials; never register a new account implicitly."""
+        if (self.directory / 'state.json').exists():
+            return self.state()
+        self.inspect()
+        original = self.read_container(START)
+        iface = self.find_iface()
+        patch_start(original, iface)  # preflight before recording the migration
+        data = replacement
+        if data is None:
+            for path in (self.directory / 'warp.conf', self.root / 'warp.conf', self.root / 'wgcf-profile.conf'):
+                if path.is_file() and not path.is_symlink():
+                    data = profile(path.read_text())
+                    break
+        if data is None:
+            releases = re.findall(r'/opt/govpn-warp/[a-f0-9]{32}/runtime.sh', original)
+            candidates = [s.removesuffix('runtime.sh') + 'warp.conf' for s in releases]
+            candidates += ['/opt/warp/warp.conf', '/etc/amnezia/amneziawg/warp.conf', '/etc/wireguard/warp.conf']
+            for path in dict.fromkeys(candidates):
+                content = self.read_container(path, optional=True)
+                if content is not None:
+                    data = profile(content)
+                    break
+        if data is None:
+            raise SafeError('Сохраненный профиль WARP не найден. Укажите файл через пункт замены профиля или import.')
+        selected = self.saved_clients(required=True) if selection is None else clients(selection)
+        state = {'version': 1, 'profile': data, 'clients': selected, 'iface': iface, 'enabled': False}
+        self.backup(original, None)
+        write_private(self.directory / 'state.json', json.dumps(state, indent=2) + '\n')
+        return state
+
+    def remove(self):
+        """Remove active WARP even when managed state was never imported."""
+        running = self.inspect()
+        original = self.read_container(START)
+        plain = unpatch_start(original)
+        state = self.state() if (self.directory / 'state.json').exists() else None
+        iface = state['iface'] if state else self.find_iface()
+        self.backup(original, state)
+        mutated = False
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                remote = REMOTE + '/' + uuid.uuid4().hex
+                write_private(directory / 'runtime.sh', RUNTIME)
+                write_private(directory / 'start.sh', plain)
+                (directory / 'start.sh').chmod(0o700)
+                empty = directory / 'empty'
+                empty.mkdir(mode=0o700)
+                mutated = True
+                self.docker('cp', str(empty) + '/.', self.target + ':' + REMOTE)
+                empty.rmdir()
+                self.docker('cp', str(directory) + '/.', self.target + ':' + remote)
+                if running:
+                    self.docker('exec', self.target, 'sh', '-c', 'mv -f -- "$1" "$2"',
+                                'govpn', remote + '/start.sh', START)
+                else:
+                    self.docker('cp', str(directory / 'start.sh'), self.target + ':' + START)
+                if state:
+                    state['enabled'] = False
+                    write_private(self.directory / 'state.json', json.dumps(state, indent=2) + '\n')
+                if running:
+                    self.docker('exec', self.target, 'sh', remote + '/runtime.sh', 'remove', iface)
+        except Exception:
+            if mutated and running:
+                self.docker('stop', '--time', '0', self.target, check=False)
+            raise
+
     def import_state(self, source, client_file, iface):
         if (self.directory / 'state.json').exists():
             raise SafeError('Состояние уже существует; используйте apply/restore.')
@@ -2585,14 +2741,15 @@ class Controller:
         path = directory / (uuid.uuid4().hex + '.json')
         write_private(path, json.dumps({'start.sh': start, 'state': state}, indent=2) + '\n')
 
-    def deploy(self, state):
+    def deploy(self, state, allow_stopped=False):
         running = self.inspect()
         original = self.read_container(START)
         patched = patch_start(original, state['iface'])
         self.backup(original, self.state())
-        if not running:
-            raise SafeError('Контейнер остановлен. Для установки hook используйте prepare-stopped.')
-        self.install(state, patched, running=True)
+        if not running and not allow_stopped:
+            raise SafeError('Контейнер остановлен. Выберите setup для переустановки или prepare-stopped для включенного состояния.')
+        self.install(state, patched, running=running)
+        return running
 
     def install(self, state, patched, running):
         mutated = False
@@ -2635,6 +2792,8 @@ class Controller:
 
     def prepare_stopped(self):
         state = self.state()
+        if state.get('enabled') is False:
+            raise SafeError('WARP удален. Для повторной установки используйте setup; restore отключен до установки.')
         if self.inspect():
             raise SafeError('prepare-stopped разрешен только для остановленного контейнера.')
         original = self.read_container(START)
@@ -2657,6 +2816,8 @@ def main(argv=None):
     sub.add_parser('prepare-stopped')
     sub.add_parser('selected')
     sub.add_parser('status')
+    sub.add_parser('setup')
+    sub.add_parser('remove')
     ep = sub.add_parser('endpoint')
     ep.add_argument('endpoint')
     replacement = sub.add_parser('replace-profile')
@@ -2677,30 +2838,49 @@ def main(argv=None):
         elif args.action == 'prepare-stopped':
             ctl.prepare_stopped()
             print('Hook установлен в остановленный контейнер. Запуск выполняется отдельно.')
+        elif args.action == 'remove':
+            ctl.remove()
+            print('Активный WARP удален. Клиенты могут выходить напрямую; сохраненные профили и backups оставлены.')
+        elif args.action == 'selected':
+            ctl.inspect()
+            print('\n'.join(ctl.saved_clients()))
+        elif args.action == 'status':
+            running = ctl.inspect()
+            exists = (ctl.directory / 'state.json').exists()
+            state = ctl.state() if exists else None
+            count = len(state['clients']) if state else len(ctl.saved_clients())
+            enabled = state.get('enabled', True) if state else 'legacy/unknown'
+            print(f'{ctl.name}: running={running}; managed_state={exists}; enabled={enabled}; saved_clients={count}')
         else:
-            state = ctl.state()
-            if args.action == 'selected':
-                print('\n'.join(state['clients']))
-            elif args.action == 'status':
-                running = ctl.inspect()
-                print(f"{ctl.name}: running={running}; saved IPv4 WARP clients={len(state['clients'])}; saved IPv6 policy=block")
+            replacement = profile(Path(args.config).read_text()) if args.action == 'replace-profile' else None
+            selection = clients(args.clients) if args.action == 'apply' else None
+            state = ctl.adopt(replacement, selection)
+            if args.action == 'restore' and state.get('enabled') is False:
+                raise SafeError('WARP еще не установлен или был удален. Выберите переустановку (setup).')
+            state['enabled'] = True
+            if args.action == 'apply':
+                state['clients'] = clients(args.clients)
+            elif args.action == 'endpoint':
+                value = endpoint(args.endpoint)
+                state['profile'] = profile(re.sub(r'^Endpoint = .*$', 'Endpoint = ' + value,
+                                                 state['profile'], flags=re.M))
+            elif args.action == 'replace-profile':
+                state['profile'] = replacement
+            running = ctl.deploy(state, allow_stopped=args.action == 'setup')
+            if running:
+                print('WARP сохранен и применен. IPv6 AWG заблокирован. Выбранных клиентов: ' + str(len(state['clients'])))
             else:
-                if args.action == 'apply':
-                    state['clients'] = clients(args.clients)
-                elif args.action == 'endpoint':
-                    value = endpoint(args.endpoint)
-                    state['profile'] = profile(re.sub(r'^Endpoint = .*$', 'Endpoint = ' + value,
-                                                     state['profile'], flags=re.M))
-                elif args.action == 'replace-profile':
-                    state['profile'] = profile(Path(args.config).read_text())
-                ctl.deploy(state)
-                print('WARP сохранен и применен. IPv6 AWG заблокирован.')
+                print('WARP подготовлен в остановленном контейнере. Контейнер не запускался; запуск выполняется отдельно.')
 
 
 def entry():
     try:
         main()
-    except (SafeError, OSError, ValueError, KeyError, subprocess.SubprocessError):
+    except SafeError as error:
+        # SafeError messages are fixed diagnostics, never raw subprocess output.
+        print('Ошибка WARP: ' + str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         # Do not print exceptions: malformed input/command errors can include keys.
         print('Ошибка safe WARP. Проверьте формат, права, Docker и совместимость start.sh. '
               'При частичном применении контейнер останавливается; см. docs/warp-safety.md.', file=sys.stderr)
@@ -2951,8 +3131,10 @@ _awg_change_region() {
 }
 
 _awg_create_warp_conf() {
-    echo "Автоматический перевыпуск отключен: используйте govpn warp-safe <контейнер> replace-profile --config <файл>." >&2
-    return 1
+    local profile_path
+    read -r -p "Путь к существующему WARP-профилю (Enter - отмена): " profile_path < /dev/tty || return 1
+    [ -n "$profile_path" ] || return 0
+    _awg_safe replace-profile --config "$profile_path"
 }
 
 _awg_tunnel_up() {
@@ -2968,9 +3150,12 @@ _awg_patch_start_sh() {
 }
 
 _awg_install_warp() {
-    echo "Восстановление сохраненного профиля WARP для ${AWG_CONTAINER}."
-    echo "Первый запуск требует явного import; инструкция: docs/warp-safety.md."
-    _awg_safe restore
+    echo "Установка / переустановка WARP для ${AWG_CONTAINER} из сохраненного профиля."
+    if ! _awg_safe setup; then
+        echo "Переустановка не выполнена. Причина указана выше." >&2
+        return 1
+    fi
+    echo "Профиль повторно использован. Клиентов для WARP можно выбрать в главном меню, пункт 3."
 }
 
 _awg_warp_status() {
@@ -3298,18 +3483,18 @@ warp_setup_wizard() {
     [ "$amn_running" -eq 1 ] && already_running=1
     [ "$xui_running" -eq 1 ] && already_running=1
 
-    if [ "$already_running" -eq 1 ]; then
-        echo -e "${GREEN}━━━ WARP уже настроен ━━━${NC}\n"
+    if [ "$already_running" -eq 1 ] || is_amnezia; then
+        echo -e "${GREEN}━━━ Управление WARP ━━━${NC}\n"
         is_amnezia && [ "$amn_running" -eq 1 ] && \
             echo -e "  ${WHITE}Amnezia:  ${GREEN}● ${amn_ip}${NC}"
         is_3xui && [ "$xui_running" -eq 1 ] && \
             echo -e "  ${WHITE}3X-UI:    ${GREEN}● ${xui_ip}${NC}"
         echo ""
         echo -e "  ${YELLOW}[1]${NC}  Статус и тест"
-        echo -e "  ${YELLOW}[2]${NC}  Замена профиля AWG WARP (инструкция)"
-        echo -e "  ${YELLOW}[3]${NC}  Восстановить сохраненный WARP"
+        is_amnezia && echo -e "  ${YELLOW}[2]${NC}  Заменить профиль AWG WARP из файла"
+        echo -e "  ${YELLOW}[3]${NC}  Установить / переустановить WARP"
         is_3xui && [ "$xui_running" -eq 1 ] &&             echo -e "  ${CYAN}[r]${NC}  Переподключить WARP (обновить датацентр)"
-        echo -e "  ${RED}[4]${NC}  Отключить AWG WARP / удалить host WARP"
+        echo -e "  ${RED}[4]${NC}  Удалить WARP (с резервной копией)"
         is_3xui && echo -e "  ${CYAN}[i]${NC}  Инструкция — как подключить трафик через WARP в 3X-UI"
         echo -e "  ${YELLOW}[0]${NC}  Назад"
         echo ""
@@ -3327,39 +3512,41 @@ warp_setup_wizard() {
                     read -p "  Enter..." < /dev/tty
                 fi ;;
             i|I) is_3xui && { _3xui_warp_instruction; return; } ;;
-            4) # Отключение WARP для клиентов AWG
-                echo -ne "\n  ${RED}Отключить WARP для AWG клиентов (профиль сохранится)? (y/n): ${NC}"
-                read -r c < /dev/tty
-                [ "$c" != "y" ] && continue
-                echo -e "\n${YELLOW}Удаляю WARP...${NC}"
-                if is_amnezia && [ -n "$AWG_CONTAINER" ]; then
-                    if ! _awg_safe apply; then
-                        echo "Не удалось отключить клиентов WARP; сохраненное состояние сохранено." >&2
-                        read -r -p "Enter..." < /dev/tty
-                        return 1
-                    fi
-                    echo "Клиенты AWG отключены от WARP. Профиль и резервные копии сохранены; IPv6 заблокирован."
+            4)
+                local remove_awg=0 remove_xui=0 remove_choice confirmation
+                if [ "$MODE" = combo ]; then
+                    echo "Удалить WARP: [1] Amnezia [2] 3X-UI [3] оба [0] отмена"
+                    remove_choice=$(read_choice "Выбор: ")
+                    case "$remove_choice" in
+                        1) remove_awg=1 ;;
+                        2) remove_xui=1 ;;
+                        3) remove_awg=1; remove_xui=1 ;;
+                        *) return ;;
+                    esac
+                elif is_amnezia; then
+                    remove_awg=1
+                else
+                    remove_xui=1
                 fi
-                if is_3xui; then
+                confirmation=$(read_yn "Удалить активный WARP? Клиенты смогут выходить напрямую; профили и backups сохранятся. (y/n): ")
+                [ "$confirmation" = y ] || return 0
+                if [ "$remove_awg" = 1 ]; then
+                    _awg_safe remove || { read -r -p "Enter..." < /dev/tty; return 1; }
+                fi
+                if [ "$remove_xui" = 1 ]; then
                     warp-cli disconnect 2>/dev/null || true
-                    systemctl stop warp-svc 2>/dev/null
-                    systemctl disable warp-svc 2>/dev/null
-                    apt-get remove -y cloudflare-warp 2>/dev/null
-                    echo -e "  ${GREEN}✓ warp-cli удалён${NC}"
+                    systemctl stop warp-svc 2>/dev/null || true
+                    systemctl disable warp-svc 2>/dev/null || true
+                    apt-get remove -y cloudflare-warp || { echo "Не удалось удалить host WARP." >&2; return 1; }
                 fi
-                sed -i '/^WARP_/d' /etc/govpn/config 2>/dev/null
-                log_action "WARP: удалён"
-                echo -e "  ${GREEN}✓ Готово. Перезапустите govpn.${NC}"
-                read -p "  Enter..." < /dev/tty
+                log_action "WARP REMOVE: awg=${remove_awg}, xui=${remove_xui}"
+                echo "Удаление завершено. AWG и сохраненные ключи не удалялись."
+                read -r -p "Enter..." < /dev/tty || true
+                return 0 ;;
+            2)
+                is_amnezia && _awg_create_warp_conf
+                read -r -p "Enter..." < /dev/tty
                 return ;;
-            2) # Перевыпуск — только wgcf регистрация заново
-                clear
-                echo -e "\n${CYAN}━━━ Перевыпуск ключа WARP ━━━${NC}\n"
-                if is_amnezia && [ "$amn_installed" -eq 1 ]; then
-                    echo -e "${YELLOW}Используйте заранее проверенный профиль WARP.${NC}"
-                    _awg_create_warp_conf
-                fi
-                read -p "Нажмите Enter..."; return ;;
             3) : ;; # продолжаем к полной установке
             *) return ;;
         esac
@@ -3481,10 +3668,14 @@ warp_test() {
         docker exec "$AWG_CONTAINER" sh -c "ip rule list | grep -q fwmark" 2>/dev/null && \
             echo -e "${GREEN}✓${NC}" || { echo -e "${YELLOW}⚠ — включите клиентов${NC}"; }
 
-        local sel_count
-        sel_count=$(docker exec "$AWG_CONTAINER" sh -c \
-            "cat '${AWG_CLIENTS_FILE}' 2>/dev/null | grep -c '[0-9]'" 2>/dev/null || echo "0")
-        echo -e "  Клиентов через WARP:   ${CYAN}${sel_count}${NC}"
+        local selected_output sel_count
+        if selected_output=$(_awg_selected_clients); then
+            sel_count=$(printf '%s\n' "$selected_output" | awk 'NF {n++} END {print n+0}')
+            echo -e "  Сохраненный выбор:      ${CYAN}${sel_count}${NC} клиентов"
+        else
+            echo "  Список клиентов прочитать не удалось. Причина указана выше."
+            all_ok=0
+        fi
         echo ""
     fi
 
