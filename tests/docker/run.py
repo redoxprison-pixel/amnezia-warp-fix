@@ -43,6 +43,21 @@ with tempfile.TemporaryDirectory() as temp:
             if docker('exec', name, 'ip', 'link', 'show', 'awg0', check=False).returncode == 0:
                 break
             time.sleep(0.1)
+        # Fresh server: no legacy profile/list/state. Import the synthetic profile
+        # through bootstrap, with real dependency/firewall/kernel preflight.
+        first = safe.Controller(name, root / 'first-install')
+        safe.private_dir(first.directory)
+        assert first.bootstrap(['10.8.1.2/32'], source=profile)
+        assert first.state()['clients'] == ['10.8.1.2/32']
+        assert first.state()['enabled']
+        assert docker('exec', name, 'ip', 'link', 'show', 'warp', check=False).returncode == 0
+        try:
+            first.bootstrap(['10.8.1.2/32'], source=profile)
+            raise AssertionError('Fresh bootstrap overwrote existing profile')
+        except safe.SafeError as error:
+            assert 'Профиль уже существует' in str(error)
+        first.remove()
+        print('fresh bootstrap/preflight/persistence/repeat protection: PASS')
         # Simulate the user's running legacy installation with no state.json.
         docker('exec', name, 'mkdir', '-p', '/opt/warp')
         docker('cp', str(profile), name + ':/opt/warp/warp.conf')

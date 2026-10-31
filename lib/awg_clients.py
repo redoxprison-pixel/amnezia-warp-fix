@@ -128,10 +128,15 @@ def snapshot(container):
     if not config:
         raise ClientError('Серверный конфиг AWG не найден. Список клиентов не изменен.')
     # Query only non-secret wg fields. Never use `wg show dump`.
-    allowed = docker(container, 'wg', 'show', iface, 'allowed-ips')
-    handshakes = docker(container, 'wg', 'show', iface, 'latest-handshakes', optional=True)
+    # Modern AWG exposes `awg`; older installations use a fork named `wg`.
+    allowed = docker(container, 'awg', 'show', iface, 'allowed-ips', optional=True)
+    tool = 'awg'
+    if not allowed:
+        tool = 'wg'
+        allowed = docker(container, tool, 'show', iface, 'allowed-ips', optional=True)
+    handshakes = docker(container, tool, 'show', iface, 'latest-handshakes', optional=True)
     table = docker(container, 'cat', '/opt/amnezia/awg/clientsTable', optional=True)
-    # Include configured peers while the interface is temporarily empty.
+    # Config remains authoritative when there are no live peers or wg tools.
     peers = live_peers(allowed) + config_peers(config)
     return records(table, peers, handshakes)
 

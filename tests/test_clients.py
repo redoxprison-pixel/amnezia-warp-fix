@@ -107,6 +107,22 @@ class IdentityTests(unittest.TestCase):
         embedded = SCRIPT.split("<<'GOVPN_CLIENTS_PY'\n", 1)[1].split('\nGOVPN_CLIENTS_PY', 1)[0]
         self.assertEqual(embedded, (ROOT / 'lib/awg_clients.py').read_text())
 
+    def test_modern_awg_uses_awg_for_live_peer_and_handshake(self):
+        def docker(container, *args, **kwargs):
+            if args == ('cat', '/opt/amnezia/awg/awg0.conf'):
+                return '[Interface]\nAddress=10.8.1.1/24\n'
+            if args == ('awg', 'show', 'awg0', 'allowed-ips'):
+                return 'A\t10.8.1.2/32\n'
+            if args == ('awg', 'show', 'awg0', 'latest-handshakes'):
+                return 'A\t123\n'
+            if args == ('cat', '/opt/amnezia/awg/clientsTable'):
+                return json.dumps([{'clientId': 'A', 'userData': {'clientName': 'Phone'}}])
+            raise AssertionError('Unexpected wg call: ' + repr(args))
+        with patch.object(clients, 'docker', side_effect=docker):
+            rows = clients.snapshot('amnezia-awg2')
+        self.assertEqual(rows[0]['name'], 'Phone')
+        self.assertEqual(rows[0]['handshake'], 123)
+
 
 class MenuTests(unittest.TestCase):
     def run_bash(self, body, data=''):

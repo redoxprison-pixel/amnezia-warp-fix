@@ -6,6 +6,7 @@ which may contain private WireGuard keys.
 import argparse
 import base64
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -21,6 +22,15 @@ REMOTE = '/opt/govpn-warp'
 START = '/opt/amnezia/start.sh'
 BEGIN = '# --- GOVPN SAFE WARP BEGIN ---'
 END = '# --- GOVPN SAFE WARP END ---'
+
+# Pinned upstream release assets, verified against GitHub release digests.
+# https://github.com/ViRb3/wgcf/releases/tag/v2.3.1
+WGCF_VERSION = '2.3.1'
+WGCF_ASSETS = {
+    'x86_64': ('amd64', '4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8'),
+    'aarch64': ('arm64', '710ab2d8ac145d81a4cf0c11bdb0e05914f77ae2a45f67b87e718d84b4cb7301'),
+    'armv7l': ('armv7', 'de57cf6cdc8678cb15ae1cde75dacca39959e30a3a27482a14b9828da2308f03'),
+}
 
 # POSIX sh: the container need not have Python or Bash for this helper.
 RUNTIME = r'''#!/bin/sh
@@ -424,6 +434,23 @@ class Controller:
             raise SafeError('Список WARP-клиентов не найден. Выберите клиентов в пункте 3 и примените выбор; пустой список автоматически не подставляется.')
         return []
 
+    def existing_profile(self):
+        """Read-only discovery. Invalid existing data must never trigger registration."""
+        if (self.directory / 'state.json').exists():
+            return self.state()['profile']
+        original = self.read_container(START)
+        for path in (self.directory / 'warp.conf', self.root / 'warp.conf', self.root / 'wgcf-profile.conf'):
+            if path.is_file() and not path.is_symlink():
+                return profile(path.read_text())
+        releases = re.findall(r'/opt/govpn-warp/[a-f0-9]{32}/runtime.sh', original)
+        candidates = [s[:-len('runtime.sh')] + 'warp.conf' for s in releases]
+        candidates += ['/opt/warp/warp.conf', '/etc/amnezia/amneziawg/warp.conf', '/etc/wireguard/warp.conf']
+        for path in dict.fromkeys(candidates):
+            content = self.read_container(path, optional=True)
+            if content is not None:
+                return profile(content)
+        return None
+
     def adopt(self, replacement=None, selection=None):
         """Reuse existing credentials; never register a new account implicitly."""
         if (self.directory / 'state.json').exists():
@@ -432,28 +459,129 @@ class Controller:
         original = self.read_container(START)
         iface = self.find_iface()
         patch_start(original, iface)  # preflight before recording the migration
-        data = replacement
+        data = replacement if replacement is not None else self.existing_profile()
         if data is None:
-            for path in (self.directory / 'warp.conf', self.root / 'warp.conf', self.root / 'wgcf-profile.conf'):
-                if path.is_file() and not path.is_symlink():
-                    data = profile(path.read_text())
-                    break
-        if data is None:
-            releases = re.findall(r'/opt/govpn-warp/[a-f0-9]{32}/runtime.sh', original)
-            candidates = [s.removesuffix('runtime.sh') + 'warp.conf' for s in releases]
-            candidates += ['/opt/warp/warp.conf', '/etc/amnezia/amneziawg/warp.conf', '/etc/wireguard/warp.conf']
-            for path in dict.fromkeys(candidates):
-                content = self.read_container(path, optional=True)
-                if content is not None:
-                    data = profile(content)
-                    break
-        if data is None:
-            raise SafeError('Сохраненный профиль WARP не найден. Укажите файл через пункт замены профиля или import.')
+            raise SafeError('Профиль WARP отсутствует: для первой установки выберите создание нового профиля в меню 1 → 3. Переустановка (setup) аккаунт не создает.')
         selected = self.saved_clients(required=True) if selection is None else clients(selection)
         state = {'version': 1, 'profile': data, 'clients': selected, 'iface': iface, 'enabled': False}
         self.backup(original, None)
         write_private(self.directory / 'state.json', json.dumps(state, indent=2) + '\n')
         return state
+
+    def prepare_dependencies(self, install=False):
+        """Preflight before account creation or ingress guard. Never restart AWG."""
+        if not self.inspect():
+            raise SafeError('Первая установка требует работающего AWG контейнера.')
+        check = 'for c in bash wg wg-quick ip iptables ip6tables; do command -v "$c" >/dev/null || exit 1; done'
+        if self.docker('exec', self.target, 'sh', '-c', check, check=False).returncode:
+            if not install:
+                raise SafeError('В контейнере нет инструментов WARP. Повторите первую установку с --install-deps; сеть AWG не изменена.')
+            packages = '''set -eu
+if command -v apk >/dev/null; then
+    apk add --no-cache bash wireguard-tools iproute2 iptables
+elif command -v apt-get >/dev/null; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends bash wireguard-tools iproute2 iptables
+else
+    exit 1
+fi'''
+            if self.docker('exec', self.target, 'sh', '-c', packages, check=False).returncode:
+                raise SafeError('Не удалось установить WARP packages в контейнере; AWG не перезапускался. Проверьте доступ к package repositories.')
+            if self.docker('exec', self.target, 'sh', '-c', check, check=False).returncode:
+                raise SafeError('После установки packages инструменты WARP недоступны; сеть AWG не изменена.')
+        for tool in ('iptables', 'ip6tables'):
+            if self.docker('exec', self.target, tool, '-w', '10', '-t', 'filter', '-S', check=False).returncode:
+                raise SafeError('Недоступен IPv4/IPv6 firewall контейнера; применение WARP не начиналось.')
+        # A transient unconfigured link tests kernel support without routing traffic.
+        name = 'gvpn' + uuid.uuid4().hex[:10]
+        if self.docker('exec', self.target, 'ip', 'link', 'add', name, 'type', 'wireguard', check=False).returncode:
+            raise SafeError('Ядро/контейнер не позволяет создать WireGuard интерфейс для WARP. AWG не изменен; нужен WireGuard kernel support и NET_ADMIN.')
+        try:
+            if self.docker('exec', self.target, 'wg', 'show', name, 'public-key', check=False).returncode:
+                raise SafeError('Команда wg несовместима с WireGuard kernel interface. Инструменты AWG не подменяются автоматически; сеть AWG не изменена.')
+        finally:
+            self.docker('exec', self.target, 'ip', 'link', 'delete', name)
+
+    def wgcf_binary(self):
+        machine = os.uname().machine
+        if os.uname().sysname != 'Linux' or machine not in WGCF_ASSETS:
+            raise SafeError('Автоматическая регистрация поддерживает Linux x86_64/aarch64/armv7l. Используйте import готового профиля.')
+        arch, digest = WGCF_ASSETS[machine]
+        cache = self.root / 'tools'
+        private_dir(cache)
+        binary = cache / ('wgcf-' + WGCF_VERSION + '-' + arch)
+
+        def valid(path):
+            return (path.is_file() and not path.is_symlink()
+                    and hashlib.sha256(path.read_bytes()).hexdigest() == digest)
+
+        if not valid(binary):
+            with tempfile.TemporaryDirectory(dir=cache) as tmp:
+                download = Path(tmp) / 'wgcf'
+                url = f'https://github.com/ViRb3/wgcf/releases/download/v{WGCF_VERSION}/wgcf_{WGCF_VERSION}_linux_{arch}'
+                result = subprocess.run(['curl', '-fsSL', '--proto', '=https', '--proto-redir', '=https',
+                                         '--connect-timeout', '10', '--max-time', '90', '--max-filesize',
+                                         '41943040', url, '-o', str(download)], capture_output=True, timeout=100)
+                if result.returncode or not valid(download):
+                    raise SafeError('Не удалось скачать wgcf или SHA256 не совпадает. Код не запускался, регистрация не начиналась.')
+                download.chmod(0o700)
+                os.replace(download, binary)
+        binary.chmod(0o700)
+        return binary
+
+    def bootstrap(self, selection, accept_tos=False, install_deps=False, source=None):
+        """Explicit first install only. Persist credentials before touching routes."""
+        if selection is None:
+            raise SafeError('Для первой установки нужен явный --clients со списком IPv4 /32; --clients без адресов означает выбор никого.')
+        selected = clients(selection)
+        self.inspect()
+        if self.existing_profile() is not None:
+            raise SafeError('Профиль уже существует. Используйте setup, новая регистрация не выполнялась.')
+        original = self.read_container(START)
+        patch_start(original, self.find_iface())
+        data = profile(Path(source).read_text()) if source else None
+        if data is None and not accept_tos:
+            raise SafeError('Новая регистрация требует --accept-tos после принятия условий Cloudflare. Можно импортировать готовый профиль через --config.')
+        self.prepare_dependencies(install_deps)
+        if data is None:
+            binary = self.wgcf_binary()
+            registration = self.directory / 'registration'
+            private_dir(registration)
+            account = registration / 'wgcf-account.toml'
+            generated = registration / 'wgcf-profile.conf'
+            attempt = registration / 'attempt.json'
+            if any(p.is_symlink() for p in (account, generated, attempt)):
+                raise SafeError('Файлы регистрации не должны быть символическими ссылками.')
+            env = {k: v for k, v in os.environ.items() if not k.startswith('WGCF_')}
+
+            def run(*args):
+                try:
+                    result = subprocess.run([str(binary), '--config', str(account), *args], cwd=registration,
+                                            env=env, capture_output=True, timeout=120)
+                except (OSError, subprocess.SubprocessError):
+                    raise SafeError('wgcf не завершился. Данные регистрации сохранены; повторная регистрация автоматически не выполняется.') from None
+                if result.returncode:
+                    raise SafeError('wgcf завершился ошибкой. Возможно, Cloudflare недоступен или отклонил регистрацию. Вывод скрыт для защиты ключей; сохраненные данные не удалены.')
+
+            if not account.exists():
+                if attempt.exists():
+                    raise SafeError('Предыдущая регистрация не дала локальный account. Повторная регистрация заблокирована: проверьте каталог registration или используйте --config с готовым профилем.')
+                write_private(attempt, json.dumps({'version': WGCF_VERSION, 'registration_started': True}) + '\n')
+                run('register', '--accept-tos')
+            if not account.is_file() or not account.stat().st_size:
+                raise SafeError('wgcf не сохранил account. Повторная регистрация заблокирована; сеть AWG не изменена.')
+            account.chmod(0o600)
+            # Resume with the same account after a failed generate; never delete it.
+            if not generated.exists():
+                run('generate', '--profile', str(generated), '--keepalive', '25')
+            if not generated.is_file():
+                raise SafeError('Профиль не создан; account сохранен для повторной генерации.')
+            generated.chmod(0o600)
+            data = profile(generated.read_text())
+        state = self.adopt(replacement=data, selection=selected)
+        state['enabled'] = True
+        return self.deploy(state)
 
     def remove(self):
         """Remove active WARP even when managed state was never imported."""
@@ -579,6 +707,7 @@ class Controller:
 
 
 def main(argv=None):
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description='Безопасное сохранение WARP для одного AWG контейнера')
     parser.add_argument('container')
     sub = parser.add_subparsers(dest='action', required=True)
@@ -592,7 +721,14 @@ def main(argv=None):
     sub.add_parser('prepare-stopped')
     sub.add_parser('selected')
     sub.add_parser('status')
-    sub.add_parser('setup')
+    sub.add_parser('profile-source')
+    setup = sub.add_parser('setup')
+    setup.add_argument('--install-deps', action='store_true')
+    first = sub.add_parser('bootstrap', help='Первая установка: отдельная регистрация либо готовый профиль')
+    first.add_argument('--clients', nargs='*', default=None)
+    first.add_argument('--accept-tos', action='store_true')
+    first.add_argument('--install-deps', action='store_true')
+    first.add_argument('--config')
     sub.add_parser('remove')
     ep = sub.add_parser('endpoint')
     ep.add_argument('endpoint')
@@ -627,7 +763,15 @@ def main(argv=None):
             count = len(state['clients']) if state else len(ctl.saved_clients())
             enabled = state.get('enabled', True) if state else 'legacy/unknown'
             print(f'{ctl.name}: running={running}; managed_state={exists}; enabled={enabled}; saved_clients={count}')
+        elif args.action == 'profile-source':
+            ctl.inspect()
+            print('saved' if ctl.existing_profile() is not None else 'missing')
+        elif args.action == 'bootstrap':
+            running = ctl.bootstrap(args.clients, args.accept_tos, args.install_deps, args.config)
+            print('Профиль создан/импортирован, сохранен и применен. IPv6 AWG заблокирован. Выбранных клиентов: ' + str(len(clients(args.clients))))
         else:
+            if args.action == 'setup' and args.install_deps and ctl.inspect():
+                ctl.prepare_dependencies(install=True)
             replacement = profile(Path(args.config).read_text()) if args.action == 'replace-profile' else None
             selection = clients(args.clients) if args.action == 'apply' else None
             state = ctl.adopt(replacement, selection)
