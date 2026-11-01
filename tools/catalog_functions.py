@@ -42,7 +42,7 @@ for number, line in enumerate(TEXT.splitlines(), 1):
     if line.startswith('# BEGIN GENERATED '):
         generated = True
     if generated:
-        adapter = re.match(r'^(_awg_safe|_awg_clients_data|_connection_report)\(\)', line)
+        adapter = re.match(r'^(_awg_safe|_awg_clients_data|_connection_report|_access_tools)\(\)', line)
         if adapter:
             entries.append({'file': 'govpn.sh', 'line': number, 'function': adapter[1],
                             'category': 'Адаптеры backend', 'destination': '3 / Диагностика' if adapter[1] == '_connection_report' else '2 / WARP; 1 / Клиенты', 'kind': 'shell'})
@@ -76,14 +76,14 @@ def python_functions(nodes, file, scope=''):
             python_functions(node.body, file, scope + node.name + '.')
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             entries.append({'file': file, 'line': node.lineno, 'function': scope + node.name,
-                            'category': 'Диагностика' if 'diagnostics' in file else ('Backend WARP' if 'warp' in file else 'Backend клиентов/профилей'),
-                            'destination': '3 / Диагностика' if 'diagnostics' in file else '2 / WARP; 1 / Клиенты', 'kind': 'python'})
+                            'category': 'Маршрутизация и резерв' if 'access_tools' in file else 'Диагностика' if 'diagnostics' in file else ('Backend WARP' if 'warp' in file else 'Backend клиентов/профилей'),
+                            'destination': '5 / Маршрутизация и резерв' if 'access_tools' in file else '3 / Диагностика' if 'diagnostics' in file else '2 / WARP; 1 / Клиенты', 'kind': 'python'})
             python_functions(node.body, file, scope + node.name + '.')
         else:
             python_functions(list(ast.iter_child_nodes(node)), file, scope)
 
 
-for file in ('lib/awg_warp.py', 'lib/awg_clients.py', 'lib/diagnostics.py'):
+for file in ('lib/awg_warp.py', 'lib/awg_clients.py', 'lib/diagnostics.py', 'lib/access_tools.py'):
     python_functions(ast.parse((ROOT / file).read_text()).body, file)
 data = {'version': re.search(r'^VERSION="([^"]+)"', TEXT, re.M)[1],
         'scope': 'Product shell functions and Python backends; tests and generators are not product features.',

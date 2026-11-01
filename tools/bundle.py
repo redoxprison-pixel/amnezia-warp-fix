@@ -37,6 +37,17 @@ if diag_begin in updated:
     updated = before + diag_block + after
 else:
     updated = updated.replace('tools_menu() {', diag_block + '\ntools_menu() {', 1)
+access_begin = '# BEGIN GENERATED ACCESS TOOLS\n'
+access_end = '# END GENERATED ACCESS TOOLS\n'
+access_source = (root / 'lib/access_tools.py').read_text()
+access_block = (access_begin + '_access_tools() {\n    python3 - "$@" <<\'GOVPN_ACCESS_PY\'\n'
+                + access_source + '\nGOVPN_ACCESS_PY\n}\n' + access_end)
+if access_begin in updated:
+    before, rest = updated.split(access_begin, 1)
+    _, after = rest.split(access_end, 1)
+    updated = before + access_block + after
+else:
+    updated = updated.replace('_country_direct_menu() {', access_block + '\n_country_direct_menu() {', 1)
 if '--check' in sys.argv:
     if updated != text:
         sys.exit('Embedded controller is stale: run python3 tools/bundle.py')

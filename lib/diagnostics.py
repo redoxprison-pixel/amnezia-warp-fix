@@ -4,6 +4,7 @@ A VPS probe is not a client packet-path or a Gemini eligibility test.
 All displayed remote fields are validated; raw errors/configs never print.
 """
 import ipaddress
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -55,9 +56,9 @@ true
 '''
 
 
-def run(argv, timeout=7):
+def run(argv, timeout=7, env=None):
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
         return result.returncode == 0, result.stdout
     except (OSError, ValueError, subprocess.SubprocessError):
         return False, ''
@@ -84,6 +85,84 @@ def trace(prefix=(), interface=False):
         args += ['--interface', 'warp']
     ok, output = run([*args, TRACE], timeout=8)
     return trace_fields(output) if ok else {}
+
+
+BASE_TOOLS = ('curl', 'python3', 'ip', 'flock')
+PACKAGES = {
+    'apt-get': {'curl':'curl', 'python3':'python3', 'ip':'iproute2', 'flock':'util-linux', 'iptables':'iptables'},
+    'apk': {'curl':'curl', 'python3':'python3', 'ip':'iproute2', 'flock':'util-linux', 'iptables':'iptables'},
+    'dnf': {'curl':'curl', 'python3':'python3', 'ip':'iproute', 'flock':'util-linux', 'iptables':'iptables'},
+}
+
+
+def dependency_plan():
+    missing = [name for name in BASE_TOOLS if not shutil.which(name)]
+    manager = next((name for name in PACKAGES if shutil.which(name)), None)
+    packages = sorted({PACKAGES[manager][name] for name in missing}) if manager else []
+    return missing, manager, packages
+
+
+def dependency_report(mode):
+    report = Report(mode, '')
+    report.line('Базовые зависимости GoVPN', '36')
+    for name in BASE_TOOLS:
+        found = bool(shutil.which(name))
+        report.add('ok' if found else 'error', name, 'найден' if found else 'отсутствует; доступно отдельное исправление')
+    if mode in ('amnezia', 'combo'):
+        report.add('ok' if shutil.which('docker') else 'error', 'Docker CLI',
+                   'найден' if shutil.which('docker') else 'установите Docker и Amnezia по официальной инструкции; GoVPN их не переустанавливает')
+    report.line('wgcf нужен только для первой регистрации WARP и загружается его мастером с проверкой SHA256.', '37')
+    report.line('Системные wg/wg-quick, YAML, qrencode и сканеры не требуются для списка клиентов AWG.', '37')
+    report.line('Это проверка наличия команд. Состояние сети: главное меню 3.', '37')
+    report.line('Успешно: '+str(sum(row[0] == 'ok' for row in report.rows))+' | Ошибки: '+str(sum(row[0] == 'error' for row in report.rows)), '37')
+    return int(any(row[0] == 'error' for row in report.rows))
+
+
+def repair_dependencies(lock_path=Path('/etc/govpn-dependencies.lock')):
+    if os.geteuid() != 0:
+        print('Исправление зависимостей требует root.', file=sys.stderr)
+        return 1
+    missing, manager, packages = dependency_plan()
+    if not missing:
+        print('Базовые зависимости уже доступны. Изменения не нужны.')
+        return 0
+    if not manager:
+        print('Неизвестный пакетный менеджер. Автоматическое исправление не выполнялось.', file=sys.stderr)
+        return 1
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('Другое исправление уже выполняется.', file=sys.stderr)
+            return 1
+        # Recheck after acquiring the lock. Fixed package allowlist; no eval.
+        missing, current, packages = dependency_plan()
+        if current != manager:
+            print('Состав инструментов изменился. Повторите проверку.', file=sys.stderr)
+            return 1
+        if not missing:
+            return 0
+        if manager == 'apt-get':
+            print('[1/3] Обновляю список пакетов (до 120 с)...', flush=True)
+            ok, _ = run(['apt-get', 'update'], timeout=120)
+            if not ok:
+                print('Не удалось обновить список пакетов. Установка не начиналась.', file=sys.stderr)
+                return 1
+            command = ['apt-get', 'install', '-y', '--no-install-recommends', *packages]
+        elif manager == 'apk':
+            command = ['apk', 'add', '--no-cache', *packages]
+        else:
+            command = ['dnf', 'install', '-y', *packages]
+        print('[2/3] Устанавливаю: ' + ', '.join(packages) + ' (до 180 с)...', flush=True)
+        ok, _ = run(command, timeout=180, env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+        print('[3/3] Повторно проверяю наличие команд...', flush=True)
+        remaining = [name for name in BASE_TOOLS if not shutil.which(name)]
+        if not ok or remaining:
+            print('Исправление не завершено. Проверьте пакетный менеджер; недоступны: ' + ', '.join(remaining or missing), file=sys.stderr)
+            return 1
+        print('Базовые зависимости установлены и проверены. Docker, SSH, AWG и firewall-правила не перенастраивались.')
+        return 0
 
 
 class Report:
@@ -234,6 +313,7 @@ class Report:
         self.line('  На устройстве проверьте VPN, внешний IPv4 DNS и маршрут всего трафика.', '37')
         self.line('  При managed WARP IPv6 должен идти в VPN и блокироваться там либо быть отключен на устройстве.', '37')
         self.line('  Регион/аккаунт Gemini и утечки мимо VPN с VPS проверить нельзя.', '33')
+        self.line('  Исправление: меню диагностики -> действия исправления; WARP не нужен, если Gemini работает через VPS.', '36')
         return int(bool(counts['error']))
 
     def execute(self):
@@ -249,9 +329,16 @@ def main():
     if len(sys.argv) != 3 or sys.argv[1] not in ('amnezia', 'combo', '3xui', 'bridge'):
         return 2
     try:
+        scope = os.environ.get('GOVPN_DIAG_SCOPE', 'connection')
+        if scope == 'dependencies':
+            return dependency_report(sys.argv[1])
+        if scope == 'repair':
+            return repair_dependencies()
+        if scope != 'connection':
+            return 2
         return Report(sys.argv[1], sys.argv[2]).execute()
     except (OSError, ValueError, KeyError, TypeError):
-        print('Не удалось завершить диагностику. Настройки не изменялись; ключи и сырой вывод скрыты.', file=sys.stderr)
+        print('Исправление не завершено; проверьте состояние пакетов.' if os.environ.get('GOVPN_DIAG_SCOPE') == 'repair' else 'Не удалось завершить диагностику. Настройки не изменялись; ключи и сырой вывод скрыты.', file=sys.stderr)
         return 1
 
 

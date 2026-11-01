@@ -12,3 +12,10 @@ clients.list
 client-names/
 awg_clients/
 client-profiles/
+
+# Optional reserve credentials / generated client routing exports.
+secret.key
+client.link
+client.json
+exit.conf
+*-direct.json

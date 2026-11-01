@@ -80,7 +80,7 @@ class TerminalUXTests(unittest.TestCase):
         body = harness('amnezia') + '\n' + '\n'.join(function(n) for n in (
             '_menu_input', 'read_choice', 'ru_to_en', 'show_menu', '_clients_hub',
             'awg_peers_menu', '_awg_refresh_clients', '_awg_client_name',
-            '_awg_client_status', '_awg_route_label')) + '''
+            '_awg_client_status', '_awg_route_label', '_awg_route_badge', '_awg_activity_label')) + '''
 _awg_clients_data() {
  if [ "$1" = containers ]; then echo amnezia-awg2;
  else sleep .15; echo '10.8.1.2/32|Fixture Phone|0|не подключен'; fi

@@ -58,6 +58,11 @@ exit 1
         self.assertNotEqual(self.run_install().returncode, 0)
         self.assertEqual(self.install.read_text(), 'previous')
 
+    def test_invalid_access_tools_never_overwrite_installed_script(self):
+        self.fixture.write_text(self.fixture.read_text().replace('"""Optional OpenFlux L4 reserve', 'def !invalid():\n"""Optional OpenFlux L4 reserve', 1))
+        self.assertNotEqual(self.run_install().returncode,0)
+        self.assertEqual(self.install.read_text(),'previous')
+
     def test_invalid_report_never_overwrites_installed_script(self):
         text = self.fixture.read_text().replace('"""Bounded, read-only connection report.', 'def !invalid():\n"""Bounded, read-only connection report.', 1)
         self.fixture.write_text(text)

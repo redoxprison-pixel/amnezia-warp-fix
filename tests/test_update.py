@@ -149,6 +149,12 @@ exit 0
         self.assertNotEqual(self.run_update(FAIL_INSTALL=1).returncode, 0)
         self.assert_untouched()
 
+    def test_broken_access_module_is_rejected_before_install(self):
+        bad = self.good.replace('"""Optional OpenFlux L4 reserve', 'def !invalid():\n"""Optional OpenFlux L4 reserve', 1)
+        self.candidate.write_text(bad)
+        self.assertNotEqual(self.run_update().returncode,0)
+        self.assert_untouched()
+
     def test_broken_report_module_is_rejected_before_install(self):
         bad = self.good.replace('"""Bounded, read-only connection report.', 'def !invalid():\n"""Bounded, read-only connection report.', 1)
         self.candidate.write_text(bad)

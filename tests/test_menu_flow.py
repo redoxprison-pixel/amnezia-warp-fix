@@ -25,7 +25,7 @@ def harness(mode):
     return MENUS + '\n' + '''
 MODE=MODE_VALUE
 AWG_CONTAINER=amnezia-awg2
-VERSION=6.68
+VERSION=6.69
 clear() { :; }
 is_amnezia() { [[ "$MODE" = amnezia || "$MODE" = combo ]]; }
 is_3xui() { [[ "$MODE" = 3xui || "$MODE" = combo ]]; }
@@ -53,7 +53,7 @@ class MenuFlowTests(unittest.TestCase):
                     self.assert_consecutive(result.stdout)
 
     def test_main_header_rejects_old_notice_even_if_cache_reader_returns_it(self):
-        for version, expected in (('6.65', False), ('6.68', False), ('6.68.0', False), ('99.0', True)):
+        for version, expected in (('6.65', False), ('6.69', False), ('6.69.0', False), ('99.0', True)):
             body = harness('amnezia') + '\n' + function('_ver_lt') + '\n' + function('show_menu')
             body += f'\n_update_cached_ver() {{ echo {version}; }}\nshow_menu'
             result = shell(body)
@@ -93,7 +93,7 @@ system_menu
             docker.chmod(0o755)
             body = harness('amnezia') + '\n' + '\n'.join(function(n) for n in (
                 'show_menu', '_clients_hub', 'awg_peers_menu', '_awg_refresh_clients',
-                '_awg_client_name', '_awg_client_status', '_awg_route_label')) + '\n'
+                '_awg_client_name', '_awg_client_status', '_awg_route_label', '_awg_route_badge', '_awg_activity_label')) + '\n'
             body += '_awg_clients_data() { python3 ' + shlex.quote(str(Path(__file__).resolve().parents[1] / 'lib/awg_clients.py')) + ' "$AWG_CONTAINER" "$@"; }\n'
             body += '_awg_refresh_policy() { AWG_POLICY_ACTIVE=off; AWG_POLICY_IPS=(); }; show_menu\n'
             result = shell(body, '1\n0\n0\n', dict(os.environ, PATH=str(root) + ':' + os.environ['PATH']))

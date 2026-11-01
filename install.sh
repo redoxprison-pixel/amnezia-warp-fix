@@ -29,12 +29,13 @@ if not text.startswith('#!/bin/bash\n') or len(re.findall(r'^VERSION="\d+\.\d+(?
     sys.exit('Неверный формат скрипта.')
 for marker, name, delimiter in (('SAFE WARP', '_awg_safe', 'GOVPN_SAFE_PY'),
                                  ('AWG CLIENTS', '_awg_clients_data', 'GOVPN_CLIENTS_PY'),
-                                 ('DIAGNOSTICS', '_connection_report', 'GOVPN_DIAGNOSTICS_PY')):
+                                 ('DIAGNOSTICS', '_connection_report', 'GOVPN_DIAGNOSTICS_PY'),
+                                 ('ACCESS TOOLS', '_access_tools', 'GOVPN_ACCESS_PY')):
     begin, end = '# BEGIN GENERATED ' + marker + '\n', '# END GENERATED ' + marker + '\n'
     if text.count(begin) != 1 or text.count(end) != 1:
         sys.exit('Встроенный backend отсутствует.')
     block = text.split(begin, 1)[1].split(end, 1)[0]
-    arguments = '"$MODE" "$AWG_CONTAINER"' if marker == 'DIAGNOSTICS' else '"$AWG_CONTAINER" "$@"'
+    arguments = '"$@"' if marker == 'ACCESS TOOLS' else ('"$MODE" "$AWG_CONTAINER"' if marker == 'DIAGNOSTICS' else '"$AWG_CONTAINER" "$@"')
     prefix = name + '() {\n    python3 - ' + arguments + ' <<\'' + delimiter + '\'\n'
     suffix = '\n' + delimiter + '\n}\n'
     if not block.startswith(prefix) or not block.endswith(suffix):
