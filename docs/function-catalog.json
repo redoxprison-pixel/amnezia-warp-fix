@@ -1,5 +1,5 @@
 {
-  "version": "6.70",
+  "version": "6.71",
   "scope": "Product shell functions and Python backends; tests and generators are not product features.",
   "method": "Static definitions, heredoc-aware shell scan and Python AST. Category is an ownership/UX map, not a dynamic test guarantee.",
   "functions": [
@@ -909,7 +909,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5534,
+      "line": 5645,
       "function": "tools_menu",
       "category": "Диагностика",
       "destination": "3",
@@ -917,7 +917,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5553,
+      "line": 5664,
       "function": "_connection_repair_menu",
       "category": "Диагностика",
       "destination": "3",
@@ -925,7 +925,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5573,
+      "line": 5684,
       "function": "_run_ipregion",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -933,7 +933,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5626,
+      "line": 5737,
       "function": "_reality_scanner",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -941,7 +941,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5736,
+      "line": 5847,
       "function": "_reality_do_scan",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -949,7 +949,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5766,
+      "line": 5877,
       "function": "_reality_show_results",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -957,7 +957,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5834,
+      "line": 5945,
       "function": "_speed_test",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -965,7 +965,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5899,
+      "line": 6010,
       "function": "_chain_test",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -973,7 +973,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 5963,
+      "line": 6074,
       "function": "_site_check",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -981,7 +981,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6020,
+      "line": 6131,
       "function": "_servers_menu",
       "category": "Legacy диагностика",
       "destination": "скрыт из обычного меню",
@@ -989,7 +989,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6108,
+      "line": 6219,
       "function": "_hy2_list_users",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -997,7 +997,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6112,
+      "line": 6223,
       "function": "_hy2_ensure_userpass",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1005,7 +1005,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6116,
+      "line": 6227,
       "function": "_hy2_add_user",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1013,7 +1013,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6120,
+      "line": 6231,
       "function": "_hy2_del_user",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1021,7 +1021,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6124,
+      "line": 6235,
       "function": "_hy2_user_uri",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1029,7 +1029,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6138,
+      "line": 6249,
       "function": "_hy2_write_helpers",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1037,7 +1037,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6198,
+      "line": 6309,
       "function": "_hy2_users_menu",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1045,7 +1045,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6281,
+      "line": 6392,
       "function": "_install_hui",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1053,7 +1053,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6331,
+      "line": 6442,
       "function": "hysteria2_menu",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1061,7 +1061,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6444,
+      "line": 6555,
       "function": "_install_docker",
       "category": "Установка компонентов",
       "destination": "5 / 4",
@@ -1069,7 +1069,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6464,
+      "line": 6575,
       "function": "_install_amnezia_awg",
       "category": "Установка компонентов",
       "destination": "5 / 4",
@@ -1077,7 +1077,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6575,
+      "line": 6686,
       "function": "_3xui_backup_geofiles",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1085,7 +1085,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6615,
+      "line": 6726,
       "function": "_3xui_restore_geofiles",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1093,7 +1093,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6638,
+      "line": 6749,
       "function": "_3xui_qr_happ_urls",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1101,7 +1101,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6654,
+      "line": 6765,
       "function": "_3xui_export_bypass_list",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1109,7 +1109,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6679,
+      "line": 6790,
       "function": "_3xui_yukikras_info",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1117,7 +1117,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6706,
+      "line": 6817,
       "function": "_xui_check_clients",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1125,7 +1125,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6924,
+      "line": 7035,
       "function": "_set_server_flag",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1133,7 +1133,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6935,
+      "line": 7046,
       "function": "_get_server_flag",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1141,7 +1141,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6940,
+      "line": 7051,
       "function": "_choose_flag_interactive",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1149,7 +1149,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 6975,
+      "line": 7086,
       "function": "_get_flag_by_ip",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1157,7 +1157,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7037,
+      "line": 7148,
       "function": "_get_proto_label",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1165,7 +1165,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7066,
+      "line": 7177,
       "function": "_get_inbound_exit_ip",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1173,7 +1173,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7121,
+      "line": 7232,
       "function": "_is_warp_ip",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1181,7 +1181,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7139,
+      "line": 7250,
       "function": "_xui_rename_one",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1189,7 +1189,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7201,
+      "line": 7312,
       "function": "_xui_rename_all",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1197,7 +1197,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7282,
+      "line": 7393,
       "function": "_xui_bulk_reflag",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1205,7 +1205,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7435,
+      "line": 7546,
       "function": "_xui_rename_menu",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1213,7 +1213,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7491,
+      "line": 7602,
       "function": "_xui_gen_reality_keys",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1221,7 +1221,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7498,
+      "line": 7609,
       "function": "_xui_gen_uuid",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1229,7 +1229,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7503,
+      "line": 7614,
       "function": "_xui_get_flag",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1237,7 +1237,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7509,
+      "line": 7620,
       "function": "_xui_get_domain",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1245,7 +1245,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7524,
+      "line": 7635,
       "function": "_xui_get_reality_settings",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1253,7 +1253,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7542,
+      "line": 7653,
       "function": "_xui_db_insert",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1261,7 +1261,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7567,
+      "line": 7678,
       "function": "_xui_gen_link",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1269,7 +1269,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7603,
+      "line": 7714,
       "function": "_xui_add_redirect",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1277,7 +1277,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7629,
+      "line": 7740,
       "function": "_xui_create_reality_tcp",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1285,7 +1285,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7782,
+      "line": 7893,
       "function": "_xui_create_xhttp",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1293,7 +1293,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7900,
+      "line": 8011,
       "function": "_xui_create_grpc",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1301,7 +1301,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 7983,
+      "line": 8094,
       "function": "_3xui_inbound_templates",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1309,7 +1309,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8038,
+      "line": 8149,
       "function": "_xui_add_client_to_existing",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1317,7 +1317,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8109,
+      "line": 8220,
       "function": "_xui_show_links",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1325,7 +1325,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8174,
+      "line": 8285,
       "function": "_xui_select_for_analyze",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1333,7 +1333,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8204,
+      "line": 8315,
       "function": "_xui_analyze_security",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1341,7 +1341,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8447,
+      "line": 8558,
       "function": "_xui_add_reality_parallel",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1349,7 +1349,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8604,
+      "line": 8715,
       "function": "_xui_diagnose_fix",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1357,7 +1357,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 8849,
+      "line": 8960,
       "function": "_xui_create_warp_inbound",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1365,7 +1365,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9009,
+      "line": 9120,
       "function": "_xui_delete_inbound",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1373,7 +1373,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9043,
+      "line": 9154,
       "function": "_3xui_geo_menu",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1381,7 +1381,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9197,
+      "line": 9308,
       "function": "_3xui_update_geofiles",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1389,7 +1389,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9282,
+      "line": 9393,
       "function": "_3xui_setup_geo_autoupdate",
       "category": "3X-UI: дополнительные настройки",
       "destination": "5 / 6-8",
@@ -1397,7 +1397,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9299,
+      "line": 9410,
       "function": "_install_3xui",
       "category": "Установка компонентов",
       "destination": "5 / 4",
@@ -1405,7 +1405,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9345,
+      "line": 9456,
       "function": "_install_hysteria2",
       "category": "Установка компонентов",
       "destination": "5 / 4",
@@ -1413,7 +1413,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9520,
+      "line": 9631,
       "function": "_hy2_install_wgcf",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1421,7 +1421,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9542,
+      "line": 9653,
       "function": "_hy2_create_warp_conf",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1429,7 +1429,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9563,
+      "line": 9674,
       "function": "_hy2_warp_up",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1437,7 +1437,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9575,
+      "line": 9686,
       "function": "_hy2_apply_warp_routing",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1445,7 +1445,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9585,
+      "line": 9696,
       "function": "_hy2_warp_running",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1453,7 +1453,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9589,
+      "line": 9700,
       "function": "_hy2_warp_ip",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1461,7 +1461,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9593,
+      "line": 9704,
       "function": "_hy2_warp_persist",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1469,7 +1469,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9615,
+      "line": 9726,
       "function": "_hy2_warp_write_helper",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1477,7 +1477,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9634,
+      "line": 9745,
       "function": "_hy2_install_warp",
       "category": "Hysteria legacy",
       "destination": "скрыт; кандидат на отдельный модуль",
@@ -1485,7 +1485,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9674,
+      "line": 9785,
       "function": "install_wizard",
       "category": "Установка компонентов",
       "destination": "5 / 4",
@@ -1493,7 +1493,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9684,
+      "line": 9795,
       "function": "_domain_detect_short",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1501,7 +1501,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9727,
+      "line": 9838,
       "function": "_domain_detect_full",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1509,7 +1509,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9805,
+      "line": 9916,
       "function": "_domain_setup_ssl",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1517,7 +1517,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9932,
+      "line": 10043,
       "function": "_domain_create_stub",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1525,7 +1525,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 9966,
+      "line": 10077,
       "function": "domain_menu",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1533,7 +1533,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10032,
+      "line": 10143,
       "function": "_3xui_reorder_inbounds",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1541,7 +1541,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10074,
+      "line": 10185,
       "function": "_nginx_find_ssl_port",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1549,7 +1549,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10109,
+      "line": 10220,
       "function": "_3xui_selfsteal_setup",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1557,7 +1557,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10153,
+      "line": 10264,
       "function": "_3xui_selfsteal_diagnose",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1565,7 +1565,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10256,
+      "line": 10367,
       "function": "_3xui_selfsteal_manual",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1573,7 +1573,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10296,
+      "line": 10407,
       "function": "_3xui_selfsteal_wizard",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1581,7 +1581,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10399,
+      "line": 10510,
       "function": "_3xui_install_stub_site",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1589,7 +1589,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10441,
+      "line": 10552,
       "function": "_stub_cinemalab",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1597,7 +1597,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10451,
+      "line": 10562,
       "function": "_stub_techcorp",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1605,7 +1605,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10461,
+      "line": 10572,
       "function": "_stub_cloudstorage",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -1613,7 +1613,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10472,
+      "line": 10583,
       "function": "system_menu",
       "category": "Обслуживание",
       "destination": "4",
@@ -1621,7 +1621,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10532,
+      "line": 10643,
       "function": "do_backup",
       "category": "Резервные копии",
       "destination": "4 / 1",
@@ -1629,7 +1629,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10613,
+      "line": 10724,
       "function": "_backup_auto",
       "category": "Резервные копии",
       "destination": "4 / 1",
@@ -1637,7 +1637,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10618,
+      "line": 10729,
       "function": "_backup_restore",
       "category": "Резервные копии",
       "destination": "4 / 1",
@@ -1645,7 +1645,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10704,
+      "line": 10815,
       "function": "_backups_menu",
       "category": "Резервные копии",
       "destination": "4 / 1",
@@ -1653,7 +1653,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10845,
+      "line": 10956,
       "function": "_check_deps_full",
       "category": "Резервные копии",
       "destination": "4 / 1",
@@ -1661,7 +1661,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10864,
+      "line": 10975,
       "function": "_check_conflicts",
       "category": "Резервные копии",
       "destination": "4 / 1",
@@ -1669,7 +1669,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10919,
+      "line": 11030,
       "function": "_update_cached_ver",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1677,7 +1677,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10933,
+      "line": 11044,
       "function": "_update_validate",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1685,7 +1685,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 10996,
+      "line": 11107,
       "function": "_update_download",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1693,7 +1693,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11002,
+      "line": 11113,
       "function": "_update_write_cache",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1701,7 +1701,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11013,
+      "line": 11124,
       "function": "_update_fetch_bg",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1709,7 +1709,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11025,
+      "line": 11136,
       "function": "_update_check_async",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1717,7 +1717,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11034,
+      "line": 11145,
       "function": "_cmd_update_install",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1725,7 +1725,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11101,
+      "line": 11212,
       "function": "cmd_update",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1733,7 +1733,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11112,
+      "line": 11223,
       "function": "_ver_lt",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1741,7 +1741,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11127,
+      "line": 11238,
       "function": "_update_changelog",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1749,7 +1749,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11144,
+      "line": 11255,
       "function": "_self_update",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1757,7 +1757,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11148,
+      "line": 11259,
       "function": "_full_uninstall",
       "category": "Обновление и установка",
       "destination": "4 / 2; install.sh",
@@ -1765,7 +1765,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11181,
+      "line": 11292,
       "function": "_awg_emergency_restore",
       "category": "Восстановление WARP",
       "destination": "4 / 7",
@@ -1773,7 +1773,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11217,
+      "line": 11328,
       "function": "_awg_refresh_policy",
       "category": "Клиентские маршруты",
       "destination": "1 / клиент / 1",
@@ -1781,7 +1781,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11228,
+      "line": 11339,
       "function": "_awg_route_badge",
       "category": "Клиентские маршруты",
       "destination": "1 / клиент / 1",
@@ -1789,7 +1789,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11239,
+      "line": 11350,
       "function": "_awg_activity_label",
       "category": "Клиентские маршруты",
       "destination": "1 / клиент / 1",
@@ -1797,7 +1797,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11254,
+      "line": 11365,
       "function": "_awg_route_label",
       "category": "Клиентские маршруты",
       "destination": "1 / клиент / 1",
@@ -1805,7 +1805,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11266,
+      "line": 11377,
       "function": "_awg_change_client_route",
       "category": "Клиентские маршруты",
       "destination": "1 / клиент / 1",
@@ -1813,7 +1813,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11326,
+      "line": 11437,
       "function": "_awg_access_help",
       "category": "Клиентские маршруты",
       "destination": "1 / клиент / 1",
@@ -1821,7 +1821,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11336,
+      "line": 11447,
       "function": "_ssh_access_plan",
       "category": "Резервный SSH",
       "destination": "4 / 3",
@@ -1829,7 +1829,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11378,
+      "line": 11489,
       "function": "_ssh_access_menu",
       "category": "Резервный SSH",
       "destination": "4 / 3",
@@ -1837,7 +1837,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11421,
+      "line": 11532,
       "function": "_menu_begin",
       "category": "Общая навигация",
       "destination": "основные экраны",
@@ -1845,7 +1845,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11422,
+      "line": 11533,
       "function": "_menu_add",
       "category": "Общая навигация",
       "destination": "основные экраны",
@@ -1853,7 +1853,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11428,
+      "line": 11539,
       "function": "_menu_input",
       "category": "Общая навигация",
       "destination": "основные экраны",
@@ -1861,7 +1861,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11433,
+      "line": 11544,
       "function": "_menu_read",
       "category": "Общая навигация",
       "destination": "основные экраны",
@@ -1869,7 +1869,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11444,
+      "line": 11555,
       "function": "_clients_hub",
       "category": "Навигация клиентов",
       "destination": "1",
@@ -1877,7 +1877,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11455,
+      "line": 11566,
       "function": "_network_tools_menu",
       "category": "Навигация дополнительных функций",
       "destination": "5",
@@ -1885,7 +1885,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11465,
+      "line": 11576,
       "function": "_access_tools",
       "category": "Адаптеры backend",
       "destination": "2 / WARP; 1 / Клиенты",
@@ -1893,7 +1893,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11862,
+      "line": 11973,
       "function": "_country_direct_menu",
       "category": "Навигация дополнительных функций",
       "destination": "5",
@@ -1901,7 +1901,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11890,
+      "line": 12001,
       "function": "_openflux_menu",
       "category": "Навигация дополнительных функций",
       "destination": "5",
@@ -1909,7 +1909,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11920,
+      "line": 12031,
       "function": "_additional_services_menu",
       "category": "Навигация дополнительных функций",
       "destination": "5",
@@ -1917,7 +1917,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 11942,
+      "line": 12053,
       "function": "awg_peers_menu",
       "category": "Клиенты, профили и маршруты",
       "destination": "1",
@@ -1925,7 +1925,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12044,
+      "line": 12155,
       "function": "_awg_edit_client_route",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1933,7 +1933,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12063,
+      "line": 12174,
       "function": "_awg_show_client_menu",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1941,7 +1941,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12095,
+      "line": 12206,
       "function": "_awg_get_client_config",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1949,7 +1949,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12099,
+      "line": 12210,
       "function": "_awg_show_config",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1957,7 +1957,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12117,
+      "line": 12228,
       "function": "_awg_show_qr",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1965,7 +1965,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12162,
+      "line": 12273,
       "function": "_awg_show_roscomvpn_qr",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1973,7 +1973,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12196,
+      "line": 12307,
       "function": "_awg_next_ip",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1981,7 +1981,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12207,
+      "line": 12318,
       "function": "_awg_add_peer",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1989,7 +1989,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12212,
+      "line": 12323,
       "function": "_awg_del_peer",
       "category": "Выход клиента",
       "destination": "1 / клиент / 1",
@@ -1997,7 +1997,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12253,
+      "line": 12364,
       "function": "_mtg_list_instances",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2005,7 +2005,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12270,
+      "line": 12381,
       "function": "_mtg_count_running",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2013,7 +2013,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12287,
+      "line": 12398,
       "function": "_mtg_detect_type",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2021,7 +2021,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12297,
+      "line": 12408,
       "function": "_mtg_is_running",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2029,7 +2029,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12306,
+      "line": 12417,
       "function": "_mtg_connections",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2037,7 +2037,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12318,
+      "line": 12429,
       "function": "_mtg_get_link",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2045,7 +2045,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12323,
+      "line": 12434,
       "function": "_mtg_ping_domain",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2053,7 +2053,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12331,
+      "line": 12442,
       "function": "_mtg_detect_country",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2061,7 +2061,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12350,
+      "line": 12461,
       "function": "_mtg_check_port",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2069,7 +2069,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12355,
+      "line": 12466,
       "function": "_mtg_port_process",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2077,7 +2077,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12360,
+      "line": 12471,
       "function": "_mtg_add",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2085,7 +2085,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12676,
+      "line": 12787,
       "function": "_mtg_manage",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2093,7 +2093,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12848,
+      "line": 12959,
       "function": "_telemt_install",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2101,7 +2101,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12865,
+      "line": 12976,
       "function": "_telemt_is_installed",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2109,7 +2109,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 12869,
+      "line": 12980,
       "function": "_telemt_add",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2117,7 +2117,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13124,
+      "line": 13235,
       "function": "_telemt_add_user",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2125,7 +2125,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13142,
+      "line": 13253,
       "function": "_telemt_remove",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2133,7 +2133,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13163,
+      "line": 13274,
       "function": "_ssl_check_and_issue",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2141,7 +2141,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13205,
+      "line": 13316,
       "function": "_stub_templates",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2149,7 +2149,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13244,
+      "line": 13355,
       "function": "_stub_create_news",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2157,7 +2157,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13330,
+      "line": 13441,
       "function": "_stub_create_business",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2165,7 +2165,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13398,
+      "line": 13509,
       "function": "_stub_create_saas",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2173,7 +2173,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13462,
+      "line": 13573,
       "function": "_stub_create_education",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2181,7 +2181,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13554,
+      "line": 13665,
       "function": "_stub_create_shop",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2189,7 +2189,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13619,
+      "line": 13730,
       "function": "_stub_create_portfolio",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2197,7 +2197,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13693,
+      "line": 13804,
       "function": "_stub_create_under_construction",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2205,7 +2205,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13759,
+      "line": 13870,
       "function": "_stub_setup_full",
       "category": "Веб-сервер, домены и SSL",
       "destination": "5 / 3",
@@ -2213,7 +2213,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13840,
+      "line": 13951,
       "function": "_get_busy_ports",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2221,7 +2221,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13845,
+      "line": 13956,
       "function": "_find_free_port",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2229,7 +2229,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13860,
+      "line": 13971,
       "function": "_mtg_recommend_settings",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2237,7 +2237,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13898,
+      "line": 14009,
       "function": "mtproto_menu",
       "category": "Telegram-прокси",
       "destination": "5 / 1",
@@ -2245,7 +2245,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 13995,
+      "line": 14106,
       "function": "show_menu",
       "category": "Навигация и запуск",
       "destination": "главное меню",
@@ -2253,7 +2253,7 @@
     },
     {
       "file": "govpn.sh",
-      "line": 14066,
+      "line": 14177,
       "function": "run_startup",
       "category": "Навигация и запуск",
       "destination": "главное меню",
@@ -2709,7 +2709,31 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 98,
+      "line": 90,
+      "function": "route_fields",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 110,
+      "function": "public_addresses",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 134,
+      "function": "ssh_server_ipv4",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 158,
       "function": "dependency_plan",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2717,7 +2741,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 105,
+      "line": 165,
       "function": "dependency_report",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2725,7 +2749,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 121,
+      "line": 181,
       "function": "repair_dependencies",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2733,7 +2757,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 169,
+      "line": 229,
       "function": "Report.__init__",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2741,7 +2765,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 176,
+      "line": 238,
       "function": "Report.line",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2749,7 +2773,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 180,
+      "line": 242,
       "function": "Report.section",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2757,7 +2781,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 183,
+      "line": 245,
       "function": "Report.add",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2765,7 +2789,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 189,
+      "line": 251,
       "function": "Report.host",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2773,7 +2797,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 201,
+      "line": 275,
       "function": "Report.internet",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2781,7 +2805,15 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 215,
+      "line": 290,
+      "function": "Report.egress",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 326,
       "function": "Report.saved_policy",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2789,7 +2821,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 232,
+      "line": 343,
       "function": "Report.awg",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2797,7 +2829,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 265,
+      "line": 376,
       "function": "Report.warp",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2805,7 +2837,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 307,
+      "line": 418,
       "function": "Report.summary",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2813,7 +2845,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 319,
+      "line": 430,
       "function": "Report.execute",
       "category": "Диагностика",
       "destination": "3 / Диагностика",
@@ -2821,7 +2853,7 @@
     },
     {
       "file": "lib/diagnostics.py",
-      "line": 328,
+      "line": 439,
       "function": "main",
       "category": "Диагностика",
       "destination": "3 / Диагностика",

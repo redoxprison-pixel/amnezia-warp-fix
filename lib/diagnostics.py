@@ -87,6 +87,66 @@ def trace(prefix=(), interface=False):
     return trace_fields(output) if ok else {}
 
 
+def route_fields(text):
+    """Parse only the selected interface/source. Never display raw ip output."""
+    if len(text) > 65536:
+        raise ValueError('route size')
+    rows = json.loads(text)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError('route shape')
+    row = rows[0]
+    interface = row.get('dev', '')
+    if not isinstance(interface, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}', interface):
+        raise ValueError('interface')
+    value = row.get('prefsrc', row.get('src', ''))
+    if not isinstance(value, str):
+        raise ValueError('source type')
+    source = ipaddress.IPv4Address(value)
+    if source.is_unspecified or source.is_multicast:
+        raise ValueError('source')
+    return {'dev': interface, 'source': str(source)}
+
+
+def public_addresses(text, interface):
+    if len(text) > 65536:
+        raise ValueError('address size')
+    rows = json.loads(text)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or rows[0].get('ifname') != interface:
+        raise ValueError('address shape')
+    addresses = rows[0].get('addr_info')
+    if not isinstance(addresses, list) or len(addresses) > 256:
+        raise ValueError('address count')
+    result = set()
+    for entry in addresses:
+        if not isinstance(entry, dict):
+            raise ValueError('address entry')
+        if entry.get('family') != 'inet':
+            continue
+        value = entry.get('local', '')
+        if not isinstance(value, str):
+            raise ValueError('address type')
+        address = ipaddress.IPv4Address(value)
+        if address.is_global and not address.is_multicast:
+            result.add(str(address))
+    return sorted(result, key=ipaddress.IPv4Address)
+
+
+def ssh_server_ipv4(value):
+    """SSH_CONNECTION is an optional hint, not a trusted desired-IP setting."""
+    if len(value) > 1024:
+        return None
+    fields = value.split()
+    if len(fields) != 4:
+        return None
+    try:
+        ipaddress.ip_address(fields[0])
+        if not all(re.fullmatch(r'[0-9]{1,5}', fields[i]) and 1 <= int(fields[i]) <= 65535 for i in (1, 3)):
+            return None
+        return str(ipaddress.IPv4Address(fields[2]))
+    except ValueError:
+        return None
+
+
 BASE_TOOLS = ('curl', 'python3', 'ip', 'flock')
 PACKAGES = {
     'apt-get': {'curl':'curl', 'python3':'python3', 'ip':'iproute2', 'flock':'util-linux', 'iptables':'iptables'},
@@ -170,6 +230,8 @@ class Report:
         self.mode, self.container, self.root = mode, container, root
         self.output = output or sys.stdout
         self.rows = []
+        self.host_route = {}
+        self.addresses = None
         self.started = time.monotonic()
         self.color = self.output.isatty() and 'NO_COLOR' not in os.environ
 
@@ -188,10 +250,22 @@ class Report:
 
     def host(self):
         self.section(1, 'VPS и инструменты')
+        self.host_route, self.addresses = {}, None
         missing = [c for c in ('ip', 'curl', 'python3') if not shutil.which(c)]
         self.add('error' if missing else 'ok', 'Инструменты', ', '.join(missing) + ' отсутствуют' if missing else 'базовые команды доступны')
-        ok, _ = run(['ip', '-4', 'route', 'get', '1.1.1.1'])
-        self.add('ok' if ok else 'error', 'Маршрут VPS', 'найден' if ok else 'не удалось проверить за 7 с')
+        ok, output = run(['ip', '-j', '-4', 'route', 'get', '1.1.1.1'])
+        try:
+            if ok:
+                self.host_route = route_fields(output)
+                interface = self.host_route['dev']
+                found, addresses = run(['ip', '-j', '-4', 'address', 'show', 'dev', interface])
+                if found:
+                    self.addresses = public_addresses(addresses, interface)
+        except (ValueError, TypeError):
+            pass
+        detail = (f'{self.host_route["dev"]}; исходный IPv4 {self.host_route["source"]}' if self.host_route else
+                  'маршрут получен, но интерфейс/IPv4 не разобраны' if ok else 'не удалось проверить за 7 с')
+        self.add('ok' if self.host_route else 'warn' if ok else 'error', 'Маршрут VPS', detail)
         try:
             space = shutil.disk_usage('/').free // (1024**2)
             self.add('warn' if space < 256 else 'ok', 'Место на диске', f'{space} МБ свободно')
@@ -205,12 +279,49 @@ class Report:
             self.add('ok', 'DNS + TLS + HTTPS', f'IPv4 {data["ip"]}; страна по Cloudflare: {data.get("loc", "неизвестна")}')
         else:
             self.add('error', 'DNS + TLS + HTTPS', 'нет ответа Cloudflare за 6 с; DNS, сеть или удаленный сервис недоступны')
+        self.egress(data)
         ok, code = run(['curl', '-q', '-4', '-sS', '--noproxy', '*', '--connect-timeout', '3', '--max-time', '6',
                         '-o', '/dev/null', '-w', '%{http_code}', GEMINI], timeout=8)
         code = code.strip()
         valid = ok and re.fullmatch(r'[1-5][0-9]{2}', code)
         self.add('ok' if valid and int(code) < 400 else 'warn', 'HTTPS до Gemini',
                  f'HTTP {code}; это только ответ сайта, не проверка региона или аккаунта' if valid else 'ответ не получен за 6 с; доступ с устройства не определен')
+
+    def egress(self, data):
+        external = data.get('ip')
+        ssh = ssh_server_ipv4(os.environ.get('SSH_CONNECTION', ''))
+        if not self.host_route:
+            self.add('skip', 'Выбор IP выхода', 'сопоставление с локальной сетью не выполнено; маршрут не разобран')
+            return
+        source = self.host_route['source']
+        details = [f'исходный IP маршрута к 1.1.1.1: {source}']
+        if external:
+            details.append(f'внешний IP VPS: {external}')
+        if ssh:
+            details.append(f'адрес текущего SSH: {ssh}')
+        multiple = self.addresses is not None and len(self.addresses) > 1
+        different = bool(ssh and external and ssh != external)
+        translated = bool(external and external != source and ipaddress.IPv4Address(source).is_global)
+        if multiple:
+            shown = ', '.join(self.addresses[:8])
+            if len(self.addresses) > 8:
+                shown += f' (всего {len(self.addresses)})'
+            details.append(f'на {self.host_route["dev"]} несколько публичных IPv4: {shown}')
+        if different:
+            details.append('SSH и внешний выход различаются')
+        if translated:
+            details.append('внешний IP отличается от публичного исходного IP маршрута; возможны NAT/туннель или другой путь к сервису проверки')
+        if multiple or different or translated:
+            details.append('это может быть намеренно; после смены IP проверьте, через какой адрес должны выходить VPS и клиенты')
+            self.add('warn', 'Выбор IP выхода', '; '.join(details))
+            self.line('    Старый/новый IP автоматически не определяется. SSH_CONNECTION - подсказка, не целевая настройка.', '37')
+            self.line('    На устройстве с Amnezia и выходом VPS откройте https://api.ipify.org и сравните с нужным IP.', '36')
+            self.line('    Одного изменения маршрута VPS может быть недостаточно: проверьте Docker NAT/MASQUERADE и сохранение сетевой настройки.', '33')
+            self.line('    GoVPN не меняет адреса, маршруты или NAT автоматически и не проверяет право аккаунта на Gemini.', '37')
+        elif not external or self.addresses is None:
+            self.add('skip', 'Выбор IP выхода', '; '.join(details) + '; часть данных недоступна, сравнение неполное')
+        else:
+            self.add('ok', 'Выбор IP выхода', '; '.join(details) + '; это снимок выхода VPS, не проверка пути клиента')
 
     def saved_policy(self):
         path = self.root / self.container / 'state.json'
