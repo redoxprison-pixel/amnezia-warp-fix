@@ -23,10 +23,10 @@ if not endpoint.startswith('unix://'):
 name = 'govpn-update-test-' + uuid.uuid4().hex[:12]
 with tempfile.TemporaryDirectory() as temp:
     files = Path(temp)
-    for relative in ('govpn.sh', 'install.sh', 'lib/awg_warp.py', 'lib/awg_clients.py', 'tools/bundle.py',
+    for relative in ('govpn.sh', 'install.sh', 'lib/awg_warp.py', 'lib/awg_clients.py', 'lib/diagnostics.py', 'tools/bundle.py',
                      'tests/test_awg_warp.py', 'tests/test_update.py', 'tests/test_lifecycle.py',
                      'tests/test_clients.py', 'tests/test_bootstrap.py', 'tests/test_ux.py', 'tests/test_install.py',
-                     'tests/test_menu_flow.py'):
+                     'tests/test_menu_flow.py', 'tests/test_terminal_ux.py', 'tests/test_connection_report.py'):
         target = files / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)

@@ -26,6 +26,17 @@ if client_begin in updated:
     updated = before + client_block + after
 else:
     updated = updated.replace('_awg_conf() {', client_block + '\n_awg_conf() {', 1)
+diag_begin = '# BEGIN GENERATED DIAGNOSTICS\n'
+diag_end = '# END GENERATED DIAGNOSTICS\n'
+diag_source = (root / 'lib/diagnostics.py').read_text()
+diag_block = (diag_begin + '_connection_report() {\n    python3 - "$MODE" "$AWG_CONTAINER" <<\'GOVPN_DIAGNOSTICS_PY\'\n'
+              + diag_source + '\nGOVPN_DIAGNOSTICS_PY\n}\n' + diag_end)
+if diag_begin in updated:
+    before, rest = updated.split(diag_begin, 1)
+    _, after = rest.split(diag_end, 1)
+    updated = before + diag_block + after
+else:
+    updated = updated.replace('tools_menu() {', diag_block + '\ntools_menu() {', 1)
 if '--check' in sys.argv:
     if updated != text:
         sys.exit('Embedded controller is stale: run python3 tools/bundle.py')

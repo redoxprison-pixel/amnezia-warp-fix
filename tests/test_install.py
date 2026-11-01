@@ -58,6 +58,12 @@ exit 1
         self.assertNotEqual(self.run_install().returncode, 0)
         self.assertEqual(self.install.read_text(), 'previous')
 
+    def test_invalid_report_never_overwrites_installed_script(self):
+        text = self.fixture.read_text().replace('"""Bounded, read-only connection report.', 'def !invalid():\n"""Bounded, read-only connection report.', 1)
+        self.fixture.write_text(text)
+        self.assertNotEqual(self.run_install().returncode, 0)
+        self.assertEqual(self.install.read_text(), 'previous')
+
     def test_lock_and_symlink_are_refused(self):
         self.conf.mkdir()
         with (self.conf / 'update.lock').open('w') as lock:

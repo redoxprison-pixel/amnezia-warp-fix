@@ -17,6 +17,25 @@ import shutil
 import sys
 import tempfile
 import uuid
+import time
+
+_PROGRESS_START = None
+_PROGRESS_STEP = 0
+
+
+def progress(message):
+    """Only fixed messages, stderr; machine-readable stdout stays intact."""
+    global _PROGRESS_START, _PROGRESS_STEP
+    if os.environ.get('GOVPN_PROGRESS') != '1':
+        return
+    now = time.monotonic()
+    if _PROGRESS_START is None:
+        _PROGRESS_START = now
+    _PROGRESS_STEP += 1
+    color = sys.stderr.isatty() and 'NO_COLOR' not in os.environ
+    begin, end = ('\033[36m', '\033[0m') if color else ('', '')
+    print(f'{begin}  Шаг {_PROGRESS_STEP} | {int(now - _PROGRESS_START)} с | {message}{end}', file=sys.stderr, flush=True)
+
 
 ROOT = Path('/etc/amnezia-warp')
 REMOTE = '/opt/govpn-warp'
@@ -417,7 +436,7 @@ class Controller:
     def read_container(self, path, optional=False):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / 'data'
-            result = self.docker('cp', self.target + ':' + path, str(dest), check=not optional)
+            result = self.docker('cp', self.target + ':' + path, str(dest), check=not optional, timeout=getattr(self, 'read_timeout', 90))
             if result.returncode and optional:
                 return None
             if dest.is_symlink() or not dest.is_file():
@@ -535,6 +554,7 @@ if ip -4 rule show | grep -q '10900:.*fwmark 0x40000000/0x40000000 lookup 51888'
 
     def prepare_dependencies(self, install=False):
         """Preflight before account creation or ingress guard. Never restart AWG."""
+        progress('Проверка Docker, инструментов, IPv4/IPv6 firewall и ядра')
         if not self.inspect():
             raise SafeError('Первая установка требует работающего AWG контейнера.')
         check = 'for c in bash ip iptables ip6tables; do command -v "$c" >/dev/null || exit 1; done'
@@ -551,6 +571,7 @@ elif command -v apt-get >/dev/null; then
 else
     exit 1
 fi'''
+            progress('Установка недостающих пакетов; ожидание репозитория (до 90 с)')
             if self.docker('exec', self.target, 'sh', '-c', packages, check=False).returncode:
                 raise SafeError('Не удалось установить WARP packages в контейнере; AWG не перезапускался. Проверьте доступ к package repositories.')
             if self.docker('exec', self.target, 'sh', '-c', check, check=False).returncode:
@@ -588,6 +609,7 @@ fi'''
                 for binary in ('wg', 'wg-quick'):
                     self.docker('cp', str(cache / binary), self.target + ':' + remote + '/bin/' + binary)
             else:
+                progress('Подготовка отдельных WireGuard tools без замены AWG (до 90 с)')
                 script = r'''set -eu
 umask 077
 base=$1
@@ -648,6 +670,7 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                     and hashlib.sha256(path.read_bytes()).hexdigest() == digest)
 
         if not valid(binary):
+            progress('Загрузка wgcf с проверкой SHA256 (до 90 с)')
             with tempfile.TemporaryDirectory(dir=cache) as tmp:
                 download = Path(tmp) / 'wgcf'
                 url = f'https://github.com/ViRb3/wgcf/releases/download/v{WGCF_VERSION}/wgcf_{WGCF_VERSION}_linux_{arch}'
@@ -703,17 +726,20 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                 if attempt.exists():
                     raise SafeError('Предыдущая регистрация не дала локальный account. Повторная регистрация заблокирована: проверьте каталог registration или используйте --config с готовым профилем.')
                 write_private(attempt, json.dumps({'version': WGCF_VERSION, 'registration_started': True}) + '\n')
+                progress('Регистрация WARP в Cloudflare (до 120 с)')
                 run('register', '--accept-tos')
             if not account.is_file() or not account.stat().st_size:
                 raise SafeError('wgcf не сохранил account. Повторная регистрация заблокирована; сеть AWG не изменена.')
             account.chmod(0o600)
             # Resume with the same account after a failed generate; never delete it.
             if not generated.exists():
+                progress('Создание профиля из данных регистрации (до 120 с)')
                 run('generate', '--profile', str(generated), '--keepalive', '25')
             if not generated.is_file():
                 raise SafeError('Профиль не создан; account сохранен для повторной генерации.')
             generated.chmod(0o600)
             data = profile(generated.read_text())
+        progress('Проверка и сохранение профиля и выбранных клиентов')
         state = self.adopt(replacement=data, selection=selected)
         state['tools'] = validate_tools(tools)
         state['enabled'] = True
@@ -721,6 +747,7 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
 
     def remove(self):
         """Remove active WARP even when managed state was never imported."""
+        progress('Проверка текущей настройки и подготовка отключения')
         running = self.inspect()
         original = self.read_container(START)
         plain = unpatch_start(original)
@@ -740,6 +767,7 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                 mutated = True
                 self.docker('cp', str(empty) + '/.', self.target + ':' + REMOTE)
                 empty.rmdir()
+                progress('Копирование новой настройки в контейнер (до 90 с на операцию)')
                 self.docker('cp', str(directory) + '/.', self.target + ':' + remote)
                 if running:
                     self.docker('exec', self.target, 'sh', '-c', 'mv -f -- "$1" "$2"',
@@ -750,7 +778,9 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                     state['enabled'] = False
                     write_private(self.directory / 'state.json', json.dumps(state, indent=2) + '\n')
                 if running:
+                    progress('Удаление активного туннеля и правил WARP (до 90 с)')
                     self.docker('exec', self.target, 'sh', remote + '/runtime.sh', 'remove', iface)
+                progress('Отключение WARP завершено')
         except Exception:
             if mutated and running:
                 self.docker('stop', '--time', '0', self.target, check=False)
@@ -775,6 +805,7 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
         write_private(self.directory / 'state.json', json.dumps(state, indent=2) + '\n')
 
     def backup(self, start, state):
+        progress('Резервная копия текущего состояния')
         directory = self.directory / 'backups'
         private_dir(directory)
         # Back up the actual original BEFORE replacing anything. Never a deleted temp file.
@@ -828,8 +859,10 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                 empty.mkdir(mode=0o700)
                 self.docker('cp', str(empty) + '/.', self.target + ':' + REMOTE)
                 empty.rmdir()
+                progress('Копирование новой настройки в контейнер (до 90 с на операцию)')
                 self.docker('cp', str(directory) + '/.', self.target + ':' + remote)
                 if running:
+                    progress('Защита клиентов на время переключения и обновление запуска')
                     self.docker('exec', self.target, 'sh', remote + '/runtime.sh', 'guard', state['iface'])
                     self.docker('exec', self.target, 'sh', '-c', 'mv -f -- "$1" "$2"',
                                 'govpn', remote + '/start.sh', START)
@@ -839,7 +872,9 @@ chmod 700 "$base/bin/wg" "$base/bin/wg-quick"
                 # available for an explicit restore, alongside the previous backup.
                 write_private(self.directory / 'state.json', json.dumps(state, indent=2) + '\n')
                 if running:
+                    progress('Применение туннеля, маршрутов и защиты IPv6 (до 90 с)')
                     self.docker('exec', self.target, 'sh', remote + '/runtime.sh', 'apply', state['iface'])
+                progress('Применение настроек завершено')
         except Exception:
             if mutated and running:
                 # No automatic fail-open rollback. Stop pinned container on partial failure.
@@ -938,12 +973,14 @@ def main(argv=None):
             enabled = state.get('enabled', True) if state else 'legacy/unknown'
             print(f'{ctl.name}: running={running}; managed_state={exists}; enabled={enabled}; saved_clients={count}')
         elif args.action == 'profile-source':
-            ctl.inspect()
+            ctl.read_timeout = 6
+            ctl.inspect(timeout=6)
             print('saved' if ctl.existing_profile() is not None else 'missing')
         elif args.action == 'bootstrap':
             running = ctl.bootstrap(args.clients, args.accept_tos, args.install_deps, args.config, args.resume_only)
             print('Профиль создан/импортирован, сохранен и применен. IPv6 AWG заблокирован. Выбранных клиентов: ' + str(len(clients(args.clients))))
         else:
+            progress('Чтение текущей настройки и проверка совместимости')
             tools = None
             if (args.action == 'setup' or (args.action == 'apply' and args.install_deps)) and ctl.inspect():
                 tools = ctl.prepare_dependencies(install=args.install_deps)

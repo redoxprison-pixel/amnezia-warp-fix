@@ -16,6 +16,7 @@ GROUPS = {
     'awg_clients_menu': ('Маршруты клиентов', '1 / r'),
     'save_iptables': ('Сеть и каскады', '5 / 2'),
     'tools_menu': ('Диагностика', '3'),
+    '_run_ipregion': ('Legacy диагностика', 'скрыт из обычного меню'),
     '_hy2_list_users': ('Hysteria legacy', 'скрыт; кандидат на отдельный модуль'),
     '_install_docker': ('Установка компонентов', '5 / 4'),
     '_3xui_backup_geofiles': ('3X-UI: дополнительные настройки', '5 / 6-8'),
@@ -41,10 +42,10 @@ for number, line in enumerate(TEXT.splitlines(), 1):
     if line.startswith('# BEGIN GENERATED '):
         generated = True
     if generated:
-        adapter = re.match(r'^(_awg_safe|_awg_clients_data)\(\)', line)
+        adapter = re.match(r'^(_awg_safe|_awg_clients_data|_connection_report)\(\)', line)
         if adapter:
             entries.append({'file': 'govpn.sh', 'line': number, 'function': adapter[1],
-                            'category': 'Адаптеры backend', 'destination': '2 / WARP; 1 / Клиенты', 'kind': 'shell'})
+                            'category': 'Адаптеры backend', 'destination': '3 / Диагностика' if adapter[1] == '_connection_report' else '2 / WARP; 1 / Клиенты', 'kind': 'shell'})
         if line.startswith('# END GENERATED '):
             generated = False
         continue
@@ -75,14 +76,14 @@ def python_functions(nodes, file, scope=''):
             python_functions(node.body, file, scope + node.name + '.')
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             entries.append({'file': file, 'line': node.lineno, 'function': scope + node.name,
-                            'category': 'Backend WARP' if 'warp' in file else 'Backend клиентов/профилей',
-                            'destination': '2 / WARP; 1 / Клиенты', 'kind': 'python'})
+                            'category': 'Диагностика' if 'diagnostics' in file else ('Backend WARP' if 'warp' in file else 'Backend клиентов/профилей'),
+                            'destination': '3 / Диагностика' if 'diagnostics' in file else '2 / WARP; 1 / Клиенты', 'kind': 'python'})
             python_functions(node.body, file, scope + node.name + '.')
         else:
             python_functions(list(ast.iter_child_nodes(node)), file, scope)
 
 
-for file in ('lib/awg_warp.py', 'lib/awg_clients.py'):
+for file in ('lib/awg_warp.py', 'lib/awg_clients.py', 'lib/diagnostics.py'):
     python_functions(ast.parse((ROOT / file).read_text()).body, file)
 data = {'version': re.search(r'^VERSION="([^"]+)"', TEXT, re.M)[1],
         'scope': 'Product shell functions and Python backends; tests and generators are not product features.',

@@ -210,11 +210,12 @@ AWG_CONTAINER=amnezia-awg2
 _awg_safe() {
     if [ "$1" = profile-source ]; then echo SOURCE; else printf '%s\\n' "$*" >> CALLS; fi
 }
-_awg_choose_initial_clients() { AWG_INITIAL_CLIENTS=(10.8.1.2/32 10.9.1.2/32); }
+_awg_choose_initial_clients() { [ "CANCEL_CHOICE" != 1 ] || return 2; AWG_INITIAL_CLIENTS=(10.8.1.2/32 10.9.1.2/32); }
 read_yn() { echo ACCEPT; }
+_awg_run_operation() { _awg_safe "$@"; }
 _awg_create_warp_conf() { echo IMPORT >> CALLS; }
 _awg_install_warp
-'''.replace('SOURCE', source).replace('CALLS', shlex.quote(str(calls))).replace('ACCEPT', accepted)
+'''.replace('SOURCE', source).replace('CALLS', shlex.quote(str(calls))).replace('ACCEPT', accepted).replace('CANCEL_CHOICE', '1' if answer == '0' else '0')
             result = subprocess.run(['bash', '-c', harness], input=answer + '\n', text=True, capture_output=True)
             return result, calls.read_text() if calls.exists() else ''
 
@@ -267,6 +268,7 @@ _awg_create_warp_conf
     def test_combo_requires_selecting_one_warp_target(self):
         harness = function('warp_setup_wizard') + "\n" + function('_menu_begin') + "\n" + function('_menu_add') + "\n" + function('_menu_read') + '''
 is_amnezia() { return 0; }; is_3xui() { return 0; }
+_menu_input() { printf -v "$1" 1; }
 read_choice() { echo 1; }
 _awg_warp_screen() { echo AWG_ONLY; }
 _host_warp_screen() { echo UNEXPECTED_HOST; }

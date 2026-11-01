@@ -120,6 +120,7 @@ is_3xui() { return 1; }
 _awg_warp_running() { return 0; }
 _awg_warp_ip() { echo 203.0.113.18; }
 read_yn() { echo ANSWER; }
+_awg_run_operation() { _awg_safe "$@"; }
 _awg_safe() { [ "$1" = selected ] || echo "$*" >> CALLS; }
 '''.replace('CALLS', shlex.quote(str(calls))).replace('ANSWER', answer)
         wizard = wizard.replace('< /dev/tty', '< /dev/null')

@@ -149,6 +149,13 @@ exit 0
         self.assertNotEqual(self.run_update(FAIL_INSTALL=1).returncode, 0)
         self.assert_untouched()
 
+    def test_broken_report_module_is_rejected_before_install(self):
+        bad = self.good.replace('"""Bounded, read-only connection report.', 'def !invalid():\n"""Bounded, read-only connection report.', 1)
+        self.candidate.write_text(bad)
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_untouched()
+
     def test_same_version_is_noop_without_force(self):
         self.candidate.write_text(SCRIPT)
         self.assertEqual(self.run_update().returncode, 0)

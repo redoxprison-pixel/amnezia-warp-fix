@@ -126,7 +126,7 @@ class IdentityTests(unittest.TestCase):
 
 class MenuTests(unittest.TestCase):
     def run_bash(self, body, data=''):
-        return subprocess.run(['bash', '-c', body], input=data, text=True, capture_output=True)
+        return subprocess.run(['bash', '-c', body], input=data, text=True, capture_output=True, timeout=10)
 
     def test_index_selects_exact_ip_with_duplicate_last_octets(self):
         with tempfile.TemporaryDirectory() as root:
@@ -134,6 +134,7 @@ class MenuTests(unittest.TestCase):
             body = function('awg_clients_menu') + '''
 AWG_CONTAINER=amnezia-awg2
 is_amnezia() { return 0; }; docker() { :; }; clear() { :; }
+_awg_clients_data() { echo amnezia-awg2; }
 _awg_iface() { echo awg0; }; _awg_warp_running() { return 1; }
 _awg_refresh_clients() { AWG_CLIENT_IPS=(10.8.1.2/32 10.9.1.2/32); }
 _awg_client_name() { echo Phone; }; _awg_selected_clients() { :; }
@@ -149,6 +150,7 @@ log_action() { :; }
         body = function('awg_clients_menu') + '''
 AWG_CONTAINER=amnezia-awg2
 is_amnezia() { return 0; }; docker() { :; }; clear() { :; }
+_awg_clients_data() { echo amnezia-awg2; }
 _awg_iface() { echo awg0; }; _awg_warp_running() { return 1; }
 _awg_refresh_clients() { return 1; }
 _awg_apply_rules() { echo UNSAFE; }

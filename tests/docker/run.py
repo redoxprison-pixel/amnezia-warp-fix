@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from test_awg_warp import PROFILE, safe
 from test_clients import clients
+sys.path.insert(0, str(ROOT / 'lib'))
+import diagnostics
+import io
 
 
 def docker(*args, check=True):
@@ -82,6 +85,20 @@ with tempfile.TemporaryDirectory() as temp:
         assert first.state()['clients'] == ['10.8.1.2/32']
         assert first.state()['enabled']
         assert first.phase()['stage'] == 'ready'
+        # Exercise the actual read-only report against real kernel rules.
+        report = diagnostics.Report('amnezia', name, first.root, io.StringIO())
+        flags = report.awg()
+        assert flags['selection'] == 'yes'
+        report.warp(flags)
+        assert not any(row[0] == 'error' for row in report.rows), report.rows
+        docker('exec', name, 'ip6tables', '-D', 'INPUT', '-i', 'awg0', '-m', 'comment',
+               '--comment', 'govpn-warp-ipv6', '-j', 'DROP')
+        broken = diagnostics.Report('amnezia', name, first.root, io.StringIO())
+        broken.warp(broken.awg())
+        assert any(row[0] == 'error' and row[1] == 'Запрет IPv6 INPUT' for row in broken.rows)
+        docker('exec', name, 'ip6tables', '-I', 'INPUT', '1', '-i', 'awg0', '-m', 'comment',
+               '--comment', 'govpn-warp-ipv6', '-j', 'DROP')
+        print('read-only report detects selected-client rules and missing IPv6 guard: PASS')
         startup = docker('exec', name, 'cat', '/opt/amnezia/start.sh').stdout
         release = re.search(r'/opt/govpn-warp/[a-f0-9]+', startup)[0]
         docker('exec', name, release + '/tool-bin/wg', 'show', 'interfaces')
