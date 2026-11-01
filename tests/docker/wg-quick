@@ -1,0 +1,14 @@
+#!/bin/sh
+# Deterministic failure injection. Real kernel routing/filter/NAT are used, but
+# no registration, external WARP connection, or real private key is needed.
+set -eu
+case "$1" in
+    up)
+        [ ! -f /tmp/fail-warp ]
+        ip link add warp type dummy
+        ip addr add 172.16.0.2/32 dev warp
+        ip link set warp up
+        ;;
+    down) ip link delete warp ;;
+    *) exit 1 ;;
+esac

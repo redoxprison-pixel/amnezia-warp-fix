@@ -1,0 +1,3063 @@
+{
+  "version": "6.71",
+  "scope": "Product shell functions and Python backends; tests and generators are not product features.",
+  "method": "Static definitions, heredoc-aware shell scan and Python AST. Category is an ownership/UX map, not a dynamic test guarantee.",
+  "functions": [
+    {
+      "file": "govpn.sh",
+      "line": 46,
+      "function": "log_action",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 48,
+      "function": "check_root",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 52,
+      "function": "get_my_ip",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 61,
+      "function": "detect_interface",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 65,
+      "function": "check_deps",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 77,
+      "function": "init_config",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 91,
+      "function": "save_config",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 105,
+      "function": "ru_to_en",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 124,
+      "function": "read_choice",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 141,
+      "function": "read_yn",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 153,
+      "function": "prepare_system",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 163,
+      "function": "detect_mode",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 232,
+      "function": "is_3xui",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 233,
+      "function": "is_amnezia",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 234,
+      "function": "is_bridge",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 235,
+      "function": "is_hysteria2",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 246,
+      "function": "get_sys_stats",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 274,
+      "function": "get_awg_stats",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 299,
+      "function": "warp_overall_status",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 336,
+      "function": "_3xui_warp_installed",
+      "category": "Служебные функции",
+      "destination": "внутренние helpers",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 347,
+      "function": "_3xui_load_config",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 367,
+      "function": "_3xui_save_password",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 380,
+      "function": "_3xui_login_request",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 393,
+      "function": "_3xui_auth",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 428,
+      "function": "_3xui_api",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 444,
+      "function": "_3xui_get_inbounds",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 449,
+      "function": "_3xui_write_helpers",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 614,
+      "function": "_3xui_parse_clients",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 623,
+      "function": "_3xui_select_inbounds",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 636,
+      "function": "_3xui_inbound_name",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 645,
+      "function": "_3xui_sub_link",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 658,
+      "function": "_gen_uuid",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 662,
+      "function": "_gen_subid",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 668,
+      "function": "_fmt_bytes",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 681,
+      "function": "_3xui_restart_xray",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 691,
+      "function": "_3xui_add_client_to_inbound",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 712,
+      "function": "_3xui_del_client_from_inbound",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 728,
+      "function": "_3xui_update_client_field",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 769,
+      "function": "_3xui_email_for_inbound",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 775,
+      "function": "_3xui_base_email",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 781,
+      "function": "_3xui_add_client_menu",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 868,
+      "function": "_3xui_add_inbound_to_client",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 955,
+      "function": "_3xui_del_inbound_from_client",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1010,
+      "function": "_3xui_toggle_inbounds_menu",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1108,
+      "function": "_3xui_client_profile",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1432,
+      "function": "_3xui_disabled_clients_menu",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1519,
+      "function": "_3xui_clients_list_menu",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1614,
+      "function": "_3xui_clients_menu",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1789,
+      "function": "_3xui_warp_running",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1794,
+      "function": "_3xui_warp_ip",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1799,
+      "function": "_3xui_install_warp",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1885,
+      "function": "_3xui_setup_ru_outbound",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1951,
+      "function": "_3xui_remove_ru_outbound",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 1972,
+      "function": "_3xui_add_geo_routing",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 2138,
+      "function": "_3xui_patch_db",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 2182,
+      "function": "_3xui_warp_status",
+      "category": "3X-UI: клиенты и API",
+      "destination": "1 / Клиенты 3X-UI",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 2226,
+      "function": "_awg_safe",
+      "category": "Адаптеры backend",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3262,
+      "function": "_awg_clients_data",
+      "category": "Адаптеры backend",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3685,
+      "function": "_awg_conf",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3691,
+      "function": "_awg_iface",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3696,
+      "function": "_awg_warp_running",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3700,
+      "function": "_awg_warp_ip",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3705,
+      "function": "_docker_read",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3719,
+      "function": "_awg_refresh_clients",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3732,
+      "function": "_awg_all_clients",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3737,
+      "function": "_awg_client_name",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3747,
+      "function": "_awg_client_status",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3756,
+      "function": "_awg_selected_clients",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3760,
+      "function": "_awg_save_clients",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3764,
+      "function": "_awg_install_wgcf",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3775,
+      "function": "_cf_scanner_install",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3807,
+      "function": "_cf_scanner_run",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3836,
+      "function": "_awg_ping_endpoint",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3863,
+      "function": "_awg_select_region",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3918,
+      "function": "_awg_change_region",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3926,
+      "function": "_awg_create_warp_conf",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3945,
+      "function": "_awg_choose_initial_clients",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3979,
+      "function": "_awg_tunnel_up",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3983,
+      "function": "_awg_apply_rules",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3987,
+      "function": "_awg_patch_start_sh",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 3991,
+      "function": "_awg_run_operation",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4023,
+      "function": "_awg_install_warp",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4047,
+      "function": "_awg_warp_status",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4108,
+      "function": "_3xui_warp_change_region",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4278,
+      "function": "_3xui_warp_instruction",
+      "category": "Amnezia и WARP",
+      "destination": "1 / Клиенты; 2 / WARP",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4349,
+      "function": "_awg_read_phase",
+      "category": "Подключение WARP",
+      "destination": "2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4365,
+      "function": "_awg_remove_from_menu",
+      "category": "Подключение WARP",
+      "destination": "2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4372,
+      "function": "_warp_help",
+      "category": "Подключение WARP",
+      "destination": "2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4386,
+      "function": "_awg_warp_screen",
+      "category": "Подключение WARP",
+      "destination": "2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4430,
+      "function": "_host_warp_screen",
+      "category": "Подключение WARP",
+      "destination": "2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4466,
+      "function": "warp_setup_wizard",
+      "category": "Подключение WARP",
+      "destination": "2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4482,
+      "function": "_service_restart_menu",
+      "category": "Перезапуск сервисов",
+      "destination": "4 / 6",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4507,
+      "function": "warp_test",
+      "category": "Диагностика WARP",
+      "destination": "2 / проверка подключения",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4605,
+      "function": "awg_clients_menu",
+      "category": "Маршруты клиентов",
+      "destination": "1 / r",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4711,
+      "function": "save_iptables",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4716,
+      "function": "validate_ip",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4717,
+      "function": "validate_port",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4719,
+      "function": "tcp_ping",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4728,
+      "function": "probe_server",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4742,
+      "function": "get_alias",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4747,
+      "function": "fmt_ip",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4753,
+      "function": "get_rules_list",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4766,
+      "function": "get_govpn_rules",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4777,
+      "function": "apply_rule",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4795,
+      "function": "_iptables_hosts_setup",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4836,
+      "function": "_iptables_diagnose",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 4901,
+      "function": "iptables_menu",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5017,
+      "function": "_read_ip",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5028,
+      "function": "_read_port",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5040,
+      "function": "_add_rule",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5080,
+      "function": "_add_custom_rule",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5127,
+      "function": "_delete_rule",
+      "category": "Сеть и каскады",
+      "destination": "5 / 2",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5181,
+      "function": "_connection_report",
+      "category": "Адаптеры backend",
+      "destination": "3 / Диагностика",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5645,
+      "function": "tools_menu",
+      "category": "Диагностика",
+      "destination": "3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5664,
+      "function": "_connection_repair_menu",
+      "category": "Диагностика",
+      "destination": "3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5684,
+      "function": "_run_ipregion",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5737,
+      "function": "_reality_scanner",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5847,
+      "function": "_reality_do_scan",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5877,
+      "function": "_reality_show_results",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 5945,
+      "function": "_speed_test",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6010,
+      "function": "_chain_test",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6074,
+      "function": "_site_check",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6131,
+      "function": "_servers_menu",
+      "category": "Legacy диагностика",
+      "destination": "скрыт из обычного меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6219,
+      "function": "_hy2_list_users",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6223,
+      "function": "_hy2_ensure_userpass",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6227,
+      "function": "_hy2_add_user",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6231,
+      "function": "_hy2_del_user",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6235,
+      "function": "_hy2_user_uri",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6249,
+      "function": "_hy2_write_helpers",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6309,
+      "function": "_hy2_users_menu",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6392,
+      "function": "_install_hui",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6442,
+      "function": "hysteria2_menu",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6555,
+      "function": "_install_docker",
+      "category": "Установка компонентов",
+      "destination": "5 / 4",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6575,
+      "function": "_install_amnezia_awg",
+      "category": "Установка компонентов",
+      "destination": "5 / 4",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6686,
+      "function": "_3xui_backup_geofiles",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6726,
+      "function": "_3xui_restore_geofiles",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6749,
+      "function": "_3xui_qr_happ_urls",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6765,
+      "function": "_3xui_export_bypass_list",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6790,
+      "function": "_3xui_yukikras_info",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 6817,
+      "function": "_xui_check_clients",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7035,
+      "function": "_set_server_flag",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7046,
+      "function": "_get_server_flag",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7051,
+      "function": "_choose_flag_interactive",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7086,
+      "function": "_get_flag_by_ip",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7148,
+      "function": "_get_proto_label",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7177,
+      "function": "_get_inbound_exit_ip",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7232,
+      "function": "_is_warp_ip",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7250,
+      "function": "_xui_rename_one",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7312,
+      "function": "_xui_rename_all",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7393,
+      "function": "_xui_bulk_reflag",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7546,
+      "function": "_xui_rename_menu",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7602,
+      "function": "_xui_gen_reality_keys",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7609,
+      "function": "_xui_gen_uuid",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7614,
+      "function": "_xui_get_flag",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7620,
+      "function": "_xui_get_domain",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7635,
+      "function": "_xui_get_reality_settings",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7653,
+      "function": "_xui_db_insert",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7678,
+      "function": "_xui_gen_link",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7714,
+      "function": "_xui_add_redirect",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7740,
+      "function": "_xui_create_reality_tcp",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 7893,
+      "function": "_xui_create_xhttp",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8011,
+      "function": "_xui_create_grpc",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8094,
+      "function": "_3xui_inbound_templates",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8149,
+      "function": "_xui_add_client_to_existing",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8220,
+      "function": "_xui_show_links",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8285,
+      "function": "_xui_select_for_analyze",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8315,
+      "function": "_xui_analyze_security",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8558,
+      "function": "_xui_add_reality_parallel",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8715,
+      "function": "_xui_diagnose_fix",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 8960,
+      "function": "_xui_create_warp_inbound",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9120,
+      "function": "_xui_delete_inbound",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9154,
+      "function": "_3xui_geo_menu",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9308,
+      "function": "_3xui_update_geofiles",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9393,
+      "function": "_3xui_setup_geo_autoupdate",
+      "category": "3X-UI: дополнительные настройки",
+      "destination": "5 / 6-8",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9410,
+      "function": "_install_3xui",
+      "category": "Установка компонентов",
+      "destination": "5 / 4",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9456,
+      "function": "_install_hysteria2",
+      "category": "Установка компонентов",
+      "destination": "5 / 4",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9631,
+      "function": "_hy2_install_wgcf",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9653,
+      "function": "_hy2_create_warp_conf",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9674,
+      "function": "_hy2_warp_up",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9686,
+      "function": "_hy2_apply_warp_routing",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9696,
+      "function": "_hy2_warp_running",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9700,
+      "function": "_hy2_warp_ip",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9704,
+      "function": "_hy2_warp_persist",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9726,
+      "function": "_hy2_warp_write_helper",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9745,
+      "function": "_hy2_install_warp",
+      "category": "Hysteria legacy",
+      "destination": "скрыт; кандидат на отдельный модуль",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9785,
+      "function": "install_wizard",
+      "category": "Установка компонентов",
+      "destination": "5 / 4",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9795,
+      "function": "_domain_detect_short",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9838,
+      "function": "_domain_detect_full",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 9916,
+      "function": "_domain_setup_ssl",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10043,
+      "function": "_domain_create_stub",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10077,
+      "function": "domain_menu",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10143,
+      "function": "_3xui_reorder_inbounds",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10185,
+      "function": "_nginx_find_ssl_port",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10220,
+      "function": "_3xui_selfsteal_setup",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10264,
+      "function": "_3xui_selfsteal_diagnose",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10367,
+      "function": "_3xui_selfsteal_manual",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10407,
+      "function": "_3xui_selfsteal_wizard",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10510,
+      "function": "_3xui_install_stub_site",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10552,
+      "function": "_stub_cinemalab",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10562,
+      "function": "_stub_techcorp",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10572,
+      "function": "_stub_cloudstorage",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10583,
+      "function": "system_menu",
+      "category": "Обслуживание",
+      "destination": "4",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10643,
+      "function": "do_backup",
+      "category": "Резервные копии",
+      "destination": "4 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10724,
+      "function": "_backup_auto",
+      "category": "Резервные копии",
+      "destination": "4 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10729,
+      "function": "_backup_restore",
+      "category": "Резервные копии",
+      "destination": "4 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10815,
+      "function": "_backups_menu",
+      "category": "Резервные копии",
+      "destination": "4 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10956,
+      "function": "_check_deps_full",
+      "category": "Резервные копии",
+      "destination": "4 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 10975,
+      "function": "_check_conflicts",
+      "category": "Резервные копии",
+      "destination": "4 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11030,
+      "function": "_update_cached_ver",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11044,
+      "function": "_update_validate",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11107,
+      "function": "_update_download",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11113,
+      "function": "_update_write_cache",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11124,
+      "function": "_update_fetch_bg",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11136,
+      "function": "_update_check_async",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11145,
+      "function": "_cmd_update_install",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11212,
+      "function": "cmd_update",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11223,
+      "function": "_ver_lt",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11238,
+      "function": "_update_changelog",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11255,
+      "function": "_self_update",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11259,
+      "function": "_full_uninstall",
+      "category": "Обновление и установка",
+      "destination": "4 / 2; install.sh",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11292,
+      "function": "_awg_emergency_restore",
+      "category": "Восстановление WARP",
+      "destination": "4 / 7",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11328,
+      "function": "_awg_refresh_policy",
+      "category": "Клиентские маршруты",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11339,
+      "function": "_awg_route_badge",
+      "category": "Клиентские маршруты",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11350,
+      "function": "_awg_activity_label",
+      "category": "Клиентские маршруты",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11365,
+      "function": "_awg_route_label",
+      "category": "Клиентские маршруты",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11377,
+      "function": "_awg_change_client_route",
+      "category": "Клиентские маршруты",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11437,
+      "function": "_awg_access_help",
+      "category": "Клиентские маршруты",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11447,
+      "function": "_ssh_access_plan",
+      "category": "Резервный SSH",
+      "destination": "4 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11489,
+      "function": "_ssh_access_menu",
+      "category": "Резервный SSH",
+      "destination": "4 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11532,
+      "function": "_menu_begin",
+      "category": "Общая навигация",
+      "destination": "основные экраны",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11533,
+      "function": "_menu_add",
+      "category": "Общая навигация",
+      "destination": "основные экраны",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11539,
+      "function": "_menu_input",
+      "category": "Общая навигация",
+      "destination": "основные экраны",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11544,
+      "function": "_menu_read",
+      "category": "Общая навигация",
+      "destination": "основные экраны",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11555,
+      "function": "_clients_hub",
+      "category": "Навигация клиентов",
+      "destination": "1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11566,
+      "function": "_network_tools_menu",
+      "category": "Навигация дополнительных функций",
+      "destination": "5",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11576,
+      "function": "_access_tools",
+      "category": "Адаптеры backend",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 11973,
+      "function": "_country_direct_menu",
+      "category": "Навигация дополнительных функций",
+      "destination": "5",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12001,
+      "function": "_openflux_menu",
+      "category": "Навигация дополнительных функций",
+      "destination": "5",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12031,
+      "function": "_additional_services_menu",
+      "category": "Навигация дополнительных функций",
+      "destination": "5",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12053,
+      "function": "awg_peers_menu",
+      "category": "Клиенты, профили и маршруты",
+      "destination": "1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12155,
+      "function": "_awg_edit_client_route",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12174,
+      "function": "_awg_show_client_menu",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12206,
+      "function": "_awg_get_client_config",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12210,
+      "function": "_awg_show_config",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12228,
+      "function": "_awg_show_qr",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12273,
+      "function": "_awg_show_roscomvpn_qr",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12307,
+      "function": "_awg_next_ip",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12318,
+      "function": "_awg_add_peer",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12323,
+      "function": "_awg_del_peer",
+      "category": "Выход клиента",
+      "destination": "1 / клиент / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12364,
+      "function": "_mtg_list_instances",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12381,
+      "function": "_mtg_count_running",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12398,
+      "function": "_mtg_detect_type",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12408,
+      "function": "_mtg_is_running",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12417,
+      "function": "_mtg_connections",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12429,
+      "function": "_mtg_get_link",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12434,
+      "function": "_mtg_ping_domain",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12442,
+      "function": "_mtg_detect_country",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12461,
+      "function": "_mtg_check_port",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12466,
+      "function": "_mtg_port_process",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12471,
+      "function": "_mtg_add",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12787,
+      "function": "_mtg_manage",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12959,
+      "function": "_telemt_install",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12976,
+      "function": "_telemt_is_installed",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 12980,
+      "function": "_telemt_add",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13235,
+      "function": "_telemt_add_user",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13253,
+      "function": "_telemt_remove",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13274,
+      "function": "_ssl_check_and_issue",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13316,
+      "function": "_stub_templates",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13355,
+      "function": "_stub_create_news",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13441,
+      "function": "_stub_create_business",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13509,
+      "function": "_stub_create_saas",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13573,
+      "function": "_stub_create_education",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13665,
+      "function": "_stub_create_shop",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13730,
+      "function": "_stub_create_portfolio",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13804,
+      "function": "_stub_create_under_construction",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13870,
+      "function": "_stub_setup_full",
+      "category": "Веб-сервер, домены и SSL",
+      "destination": "5 / 3",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13951,
+      "function": "_get_busy_ports",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13956,
+      "function": "_find_free_port",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 13971,
+      "function": "_mtg_recommend_settings",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 14009,
+      "function": "mtproto_menu",
+      "category": "Telegram-прокси",
+      "destination": "5 / 1",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 14106,
+      "function": "show_menu",
+      "category": "Навигация и запуск",
+      "destination": "главное меню",
+      "kind": "shell"
+    },
+    {
+      "file": "govpn.sh",
+      "line": 14177,
+      "function": "run_startup",
+      "category": "Навигация и запуск",
+      "destination": "главное меню",
+      "kind": "shell"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 26,
+      "function": "progress",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 245,
+      "function": "clients",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 258,
+      "function": "endpoint",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 273,
+      "function": "profile",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 328,
+      "function": "unpatch_start",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 361,
+      "function": "patch_start",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 370,
+      "function": "private_dir",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 379,
+      "function": "write_private",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 397,
+      "function": "validate_tools",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 409,
+      "function": "Controller.__init__",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 417,
+      "function": "Controller.docker",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 423,
+      "function": "Controller.inspect",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 436,
+      "function": "Controller.read_container",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 446,
+      "function": "Controller.state",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 461,
+      "function": "Controller.find_iface",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 468,
+      "function": "Controller.saved_clients",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 482,
+      "function": "Controller.phase",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 521,
+      "function": "Controller.existing_profile",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 538,
+      "function": "Controller.adopt",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 555,
+      "function": "Controller.prepare_dependencies",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 598,
+      "function": "Controller.private_wireguard",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 659,
+      "function": "Controller.wgcf_binary",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 668,
+      "function": "Controller.wgcf_binary.valid",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 687,
+      "function": "Controller.bootstrap",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 714,
+      "function": "Controller.bootstrap.run",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 748,
+      "function": "Controller.remove",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 789,
+      "function": "Controller.import_state",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 807,
+      "function": "Controller.backup",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 815,
+      "function": "Controller.deploy",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 825,
+      "function": "Controller.install",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 884,
+      "function": "Controller.prepare_stopped",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 896,
+      "function": "main",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_warp.py",
+      "line": 1012,
+      "function": "entry",
+      "category": "Backend WARP",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 30,
+      "function": "container_names",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 41,
+      "function": "fast_snapshot",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 89,
+      "function": "label",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 96,
+      "function": "addresses",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 112,
+      "function": "metadata",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 125,
+      "function": "config_peers",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 139,
+      "function": "live_peers",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 144,
+      "function": "records",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 175,
+      "function": "docker",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 186,
+      "function": "read_config",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 198,
+      "function": "snapshot",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 214,
+      "function": "sections",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 233,
+      "function": "public_key",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 248,
+      "function": "validate_client_profile",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 282,
+      "function": "profile_path",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 286,
+      "function": "saved_profile",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 295,
+      "function": "import_profile",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 318,
+      "function": "load_aliases",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 332,
+      "function": "rename",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/awg_clients.py",
+      "line": 357,
+      "function": "main",
+      "category": "Backend клиентов/профилей",
+      "destination": "2 / WARP; 1 / Клиенты",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 59,
+      "function": "run",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 67,
+      "function": "trace_fields",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 81,
+      "function": "trace",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 90,
+      "function": "route_fields",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 110,
+      "function": "public_addresses",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 134,
+      "function": "ssh_server_ipv4",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 158,
+      "function": "dependency_plan",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 165,
+      "function": "dependency_report",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 181,
+      "function": "repair_dependencies",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 229,
+      "function": "Report.__init__",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 238,
+      "function": "Report.line",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 242,
+      "function": "Report.section",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 245,
+      "function": "Report.add",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 251,
+      "function": "Report.host",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 275,
+      "function": "Report.internet",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 290,
+      "function": "Report.egress",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 326,
+      "function": "Report.saved_policy",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 343,
+      "function": "Report.awg",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 376,
+      "function": "Report.warp",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 418,
+      "function": "Report.summary",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 430,
+      "function": "Report.execute",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/diagnostics.py",
+      "line": 439,
+      "function": "main",
+      "category": "Диагностика",
+      "destination": "3 / Диагностика",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 38,
+      "function": "directory",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 49,
+      "function": "atomic",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 70,
+      "function": "command",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 80,
+      "function": "download",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 88,
+      "function": "document_url",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 98,
+      "function": "node_config",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 105,
+      "function": "service_unit",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 146,
+      "function": "Reserve.__init__",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 150,
+      "function": "Reserve.lock",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 160,
+      "function": "Reserve.read",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 166,
+      "function": "Reserve.ensure_binary",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 176,
+      "function": "Reserve.ensure_binary.valid",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 188,
+      "function": "Reserve.preflight",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 197,
+      "function": "Reserve.state",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 206,
+      "function": "Reserve.existing",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 214,
+      "function": "Reserve.verify_unit",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 218,
+      "function": "Reserve.configure",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 268,
+      "function": "Reserve.stop",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 279,
+      "function": "Reserve.detach",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 290,
+      "function": "Reserve.status",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 303,
+      "function": "Reserve.show_link",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 312,
+      "function": "country_networks",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 335,
+      "function": "country_export",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 361,
+      "function": "main",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    },
+    {
+      "file": "lib/access_tools.py",
+      "line": 380,
+      "function": "entry",
+      "category": "Маршрутизация и резерв",
+      "destination": "5 / Маршрутизация и резерв",
+      "kind": "python"
+    }
+  ]
+}
