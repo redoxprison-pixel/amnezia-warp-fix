@@ -6,12 +6,12 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 # ══════════════════════════════════════════════════════════════
-#  GoVPN Manager v6.69
+#  GoVPN Manager v6.70
 #  Автоопределение режима · WARP мастер · iptables каскад
 #  Поддержка: 3X-UI · AmneziaWG · Bridge · Combo
 # ══════════════════════════════════════════════════════════════
 
-VERSION="6.69"
+VERSION="6.70"
 SCRIPT_NAME="govpn"
 INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
 # Keep draft updates on the reviewed branch; switch this ref to main at release.
@@ -141,8 +141,8 @@ read_choice() {
 read_yn() {
     local prompt="$1"
     local raw
-    echo -ne "$prompt" > /dev/tty
-    read raw < /dev/tty
+    printf '%b' "$prompt" >&2
+    IFS= read -r raw < /dev/tty || { echo n; return; }
     raw=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
     case "$raw" in
         y|н|yes|да) echo "y" ;;
@@ -290,7 +290,7 @@ printf "%s|%s\n" "$counts" "${traffic:-0|0}"
 ' 2>/dev/null) || { echo "статистика недоступна (Docker: лимит 6 с)"; return; }
     if [[ "$stats" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
         IFS='|' read -r total active rx tx <<< "$stats"
-        printf '%s клиентов (%s активны)  ↓%s ↑%s\n' "$total" "$active" "$(_fmt_bytes "$rx")" "$(_fmt_bytes "$tx")"
+        printf '%s клиентов  ↓%s ↑%s\n' "$total" "$(_fmt_bytes "$rx")" "$(_fmt_bytes "$tx")"
     else
         echo "статистика недоступна"
     fi
@@ -4370,9 +4370,17 @@ _awg_remove_from_menu() {
 }
 
 _warp_help() {
-    echo "WARP - дополнительный выход VPS -> Cloudflare, не гарантированная смена страны."
-    echo "Для выбранного клиента нужен внешний IPv4 DNS. Managed WARP блокирует IPv6 AWG."
-    echo "Gemini нужно проверять на самом устройстве. Если работает через VPS, WARP для него не нужен."
+    printf '\n%bЧто дает WARP на этом VPS%b\n\n' "$CYAN" "$NC"
+    echo "  - Другой выходной IP: сайты видят адрес Cloudflare вместо адреса VPS."
+    echo "  - Зашифрованный участок от VPS до Cloudflare."
+    echo "  - Другой сетевой путь: иногда полезен при проблемах обычного выхода."
+    echo
+    echo "Для Gemini, который уже работает через VPS, преимуществ может не быть."
+    echo "WARP не выбирает страну, не гарантирует доступ к сайтам и может снизить скорость."
+    echo
+    printf '%bОграничения этой реализации%b\n' "$YELLOW" "$NC"
+    echo "На устройстве нужен внешний IPv4 DNS. При включенном WARP IPv6 AWG блокируется у всех клиентов."
+    echo "Телефон -> VPS защищает Amnezia; WARP добавляет участок VPS -> Cloudflare."
 }
 
 _awg_warp_screen() {
@@ -4396,7 +4404,7 @@ _awg_warp_screen() {
         else
             echo "Для первой настройки запустите контейнер через Amnezia и вернитесь сюда."
         fi
-        _menu_add help "О WARP, DNS и ограничениях"
+        _menu_add help "Зачем нужен WARP - преимущества и ограничения"
         [ "$AWG_PHASE_ACTIVE" != 1 ] || _menu_add remove "Отключить WARP"
         echo "  [0] Назад"
         local action; _menu_read; action="$MENU_ACTION"
@@ -10500,6 +10508,7 @@ system_menu() {
         _menu_add deps "Диагностика зависимостей"
         _menu_add conflicts "Проверка конфликтов"
         _menu_add restart "Перезапуск сервисов"
+        is_amnezia && _menu_add recovery "Восстановление сохраненного WARP"
         _menu_add reboot "Перезагрузить VPS"
         echo "Опасная зона"
         _menu_add uninstall "Удалить GoVPN"
@@ -10508,6 +10517,7 @@ system_menu() {
         case "$action" in
             backups) _backups_menu ;; update) _self_update ;; ssh) _ssh_access_menu ;;
             deps) _check_deps_full ;; conflicts) _check_conflicts ;; restart) _service_restart_menu ;;
+            recovery) _awg_emergency_restore ;;
             reboot) local answer; answer=$(read_yn "Перезагрузить VPS? (y/n): "); [ "$answer" != y ] || reboot ;;
             uninstall) _full_uninstall ;; back) return ;; invalid) echo "Нет такого пункта." ;;
         esac
@@ -11169,18 +11179,39 @@ _full_uninstall() {
 # ═══════════════════════════════════════════════════════════════
 
 _awg_emergency_restore() {
-    echo "Восстановление только выбранного контейнера: ${AWG_CONTAINER}."
-    echo "[1] Установить сохраненный hook в остановленный контейнер"
-    echo "[2] Восстановить WARP в работающем контейнере"
-    echo "[0] Назад"
-    local answer
-    read -r -p "Выбор: " answer < /dev/tty
-    case "$answer" in
-        1) _awg_safe prepare-stopped ;;
-        2) _awg_safe restore ;;
-        *) return ;;
-    esac
-    read -r -p "Enter..." < /dev/tty
+    local -a MENU_ACTIONS=()
+    clear
+    printf '%bВосстановление сохраненного WARP%b\n\n' "$CYAN" "$NC"
+    echo "Проверяю состояние..."
+    _awg_read_phase || { echo "Состояние прочитать не удалось. Изменения не выполнялись."; read -r -p "Enter - назад..." < /dev/tty; return 1; }
+    if [ "$AWG_PHASE_MANAGED" != 1 ] || [ "$AWG_PHASE_ACTIVE" != 1 ]; then
+        echo "Нет включенной управляемой настройки WARP для восстановления."
+        echo "Первая настройка или повторное включение: главное меню 2."
+        read -r -p "Enter - назад..." < /dev/tty
+        return
+    fi
+    _menu_begin
+    local operation question
+    if [ "$AWG_PHASE" = stopped ]; then
+        echo "Amnezia остановлена. Можно подготовить прежний WARP к следующему запуску."
+        echo "Контейнер останется остановленным; ключи и выбор клиентов сохранятся."
+        _menu_add restore "Подготовить WARP к следующему запуску Amnezia"
+        operation=prepare-stopped
+        question="Подготовить сохраненные настройки без запуска Amnezia? (y/n): "
+    else
+        echo "Amnezia запущена. Можно повторно применить прежний туннель и маршруты WARP."
+        echo "Новая регистрация не выполняется. Возможен перерыв связи."
+        _menu_add restore "Повторно применить сохраненную настройку WARP"
+        operation=restore
+        question="Повторно применить сохраненный WARP? (y/n): "
+    fi
+    echo "  [0] или Enter - назад"
+    local action answer; _menu_read; action="$MENU_ACTION"
+    [ "$action" = restore ] || return 0
+    answer=$(read_yn "$question")
+    [ "$answer" = y ] || return 0
+    _awg_run_operation "$operation"
+    read -r -p "Enter - назад..." < /dev/tty
 }
 
 _awg_refresh_policy() {
@@ -11233,19 +11264,63 @@ _awg_route_label() {
 }
 
 _awg_change_client_route() {
-    local target="$1" mode="$2" ip confirmation
-    _awg_refresh_policy || { echo "Не удалось прочитать политику. Изменения не применялись." >&2; return 1; }
-    if [ "$AWG_POLICY_ACTIVE" = off ] && [ "$mode" = direct ]; then
-        echo "WARP выключен. Клиент использует выход VPS."; return 0
+    local target="$1" mode="$2" label="${3:-$1}" ip confirmation current=direct matched=0 rc=0
+    case "$mode" in direct|warp) ;; *) echo "Неизвестный выход. Изменения не выполнялись." >&2; return 1 ;; esac
+    printf '%bПроверяю текущий выбор...%b\n' "$CYAN" "$NC"
+    _awg_refresh_policy || { echo "Выбор выхода прочитать не удалось. Изменения не выполнялись." >&2; return 1; }
+    [ "$AWG_POLICY_ACTIVE" != unknown ] || { echo "Текущий выход неизвестен. Сначала запустите диагностику."; return 1; }
+    if [ "$AWG_POLICY_ACTIVE" = on ]; then
+        for ip in "${AWG_POLICY_IPS[@]}"; do [ "$ip" != "$target" ] || current=warp; done
+    fi
+    if [ "$current" = "$mode" ]; then
+        printf '\nДля %s этот выход уже выбран. Настройки не менялись.\n' "$label"
+        return 0
     fi
     local -a selected=()
-    for ip in "${AWG_POLICY_IPS[@]}"; do [ "$ip" = "$target" ] || selected+=("$ip"); done
+    if [ "$AWG_POLICY_ACTIVE" = on ]; then
+        for ip in "${AWG_POLICY_IPS[@]}"; do [ "$ip" = "$target" ] || selected+=("$ip"); done
+    fi
     [ "$mode" != warp ] || selected+=("$target")
-    echo "Маршрут: ${target} -> ${mode}. Managed WARP блокирует весь IPv6 AWG."
-    echo "Для WARP нужен внешний IPv4 DNS на устройстве; доступность Gemini не гарантируется."
-    confirmation=$(read_yn "Применить? (y/n): ")
-    [ "$confirmation" = y ] || return 2
-    _awg_apply_rules "${selected[@]}"
+    local destination=VPS source=VPS
+    [ "$mode" != warp ] || destination=WARP
+    [ "$current" != warp ] || source=WARP
+    printf '\n%bПроверьте изменение%b\n\n' "$CYAN" "$NC"
+    printf '  Клиент: %s\n  IP:     %s\n  Выход:  %s -> %s\n\n' "$label" "$target" "$source" "$destination"
+    if [ "$mode" = warp ]; then
+        echo "Нужен внешний IPv4 DNS на устройстве, например 1.1.1.1."
+        echo "При включенном WARP IPv6 AWG блокируется у всех клиентов."
+    else
+        echo "Остальные клиенты сохранят свой выход."
+        echo "Ограничение IPv6 сохранится, пока WARP включен."
+    fi
+    echo
+    confirmation=$(read_yn "Сохранить этот выбор? (y/n): ")
+    [ "$confirmation" = y ] || { echo "Отменено. Настройки не менялись."; return 2; }
+    local started=$SECONDS
+    printf '\n%b[1/2] Применяю выбранный выход...%b\n' "$CYAN" "$NC"
+    _awg_apply_rules "${selected[@]}" > /dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '\n%bИзменение не завершено.%b\n' "$RED" "$NC"
+        echo "Связь могла быть приостановлена защитой. Откройте диагностику в главном меню 3."
+        return "$rc"
+    fi
+    printf '%b[2/2] Проверяю сохраненный выбор...%b\n' "$CYAN" "$NC"
+    if _awg_refresh_policy --host-only && [ "$AWG_POLICY_ACTIVE" != unknown ]; then
+        matched=1
+        local actual=direct
+        if [ "$AWG_POLICY_ACTIVE" = on ]; then
+            for ip in "${AWG_POLICY_IPS[@]}"; do [ "$ip" != "$target" ] || actual=warp; done
+        fi
+        [ "$actual" = "$mode" ] || matched=0
+    fi
+    if [ "$matched" != 1 ]; then
+        printf '\n%bКоманда завершена, но выбранный выход подтвердить не удалось.%b\n' "$YELLOW" "$NC"
+        echo "Проверьте состояние через диагностику. Успех не подтвержден."
+        return 1
+    fi
+    printf '\n%bВыбор сохранен%b\n' "$GREEN" "$NC"
+    printf '  Клиент: %s\n  Выход:  %s\n  Время:  %d с\n' "$label" "$destination" "$((SECONDS-started))"
+    echo "Доступ к сайтам этим шагом не проверялся."
 }
 
 _awg_access_help() {
@@ -11886,7 +11961,7 @@ awg_peers_menu() {
         esac
     fi
 
-    local sort_mode="name"  # name | ip | activity
+    local sort_mode="name"  # name | ip
 
     while true; do
         clear
@@ -11912,17 +11987,12 @@ awg_peers_menu() {
                 case "$sort_mode" in
                     name) pairs+=("${name:-zzz_$bare}|${ip}") ;;
                     ip)   pairs+=("$(printf '%03d.%03d.%03d.%03d' ${bare//./ })|${ip}") ;;
-                    activity)
-                        local j stamp=0
-                        for j in "${!AWG_CLIENT_IPS[@]}"; do
-                            [ "${AWG_CLIENT_IPS[$j]}" = "$ip" ] && stamp="${AWG_CLIENT_STAMPS[$j]}"
-                        done
-                        pairs+=("$(printf '%020d' "$stamp")|${ip}") ;;
+
                 esac
             done
             while IFS='|' read -r _ ip; do
                 sorted_ips+=("$ip")
-            done < <(printf '%s\n' "${pairs[@]}" | { if [ "$sort_mode" = activity ]; then sort -r; else sort -f; fi; })
+            done < <(printf '%s\n' "${pairs[@]}" | sort -f)
         fi
 
         if [ ${#sorted_ips[@]} -gt 0 ]; then
@@ -11935,7 +12005,7 @@ awg_peers_menu() {
                 [ "${#short_name}" -le 28 ] || short_name="${short_name:0:25}..."
                 printf '  %b[%d]%b %b%s%b  %s  ' "$YELLOW" "$((i+1))" "$NC" "$WHITE" "$short_name" "$NC" "$ip"
                 _awg_route_badge "$ip"
-                printf '  %b%s%b\n' "$WHITE" "$(_awg_activity_label "$ip")" "$NC"
+                printf '\n'
             done
         else
             echo -e "  ${YELLOW}Клиентов нет${NC}"
@@ -11944,10 +12014,9 @@ awg_peers_menu() {
         echo ""
         echo -e "  ${YELLOW}[r]${NC}   Маршруты нескольких клиентов (VPS / WARP)"
         echo "  Доступ создается и отзывается через приложение Amnezia."
-        echo -e "  ${RED}[!]${NC}   Экстренное восстановление AWG"
         echo -e "  ${YELLOW}[/]${NC}   Сменить сортировку (${sort_mode})"
         echo -e "  ${YELLOW}[0]${NC}   Назад"
-        echo "  Номер клиента - выход, имя и сведения о связи."
+        echo "  Номер клиента - выбрать выход или изменить имя."
         echo "  Метка VPS/WARP показывает выбранный выход; интернет проверяется в диагностике."
         echo ""
         ch=$(read_choice "Выбор (Enter = обновить): ")
@@ -11957,12 +12026,10 @@ awg_peers_menu() {
 
         case "$ch" in
             r|R) awg_clients_menu ;;
-            "!") _awg_emergency_restore ;;
             /)
                 case "$sort_mode" in
                     name)     sort_mode="ip" ;;
-                    ip)       sort_mode="activity" ;;
-                    activity) sort_mode="name" ;;
+                    ip)       sort_mode="name" ;;
                 esac ;;
             0)  return ;;
             *)
@@ -11974,6 +12041,25 @@ awg_peers_menu() {
     done
 }
 
+_awg_edit_client_route() {
+    local client_ip="$1" label="$2"
+    local -a MENU_ACTIONS=()
+    clear
+    printf '%bВыберите выход в интернет%b\n\n' "$CYAN" "$NC"
+    printf '  Клиент: %s\n  IP:     %s\n  Сейчас: ' "$label" "$client_ip"
+    _awg_route_badge "$client_ip"; printf '\n\n'
+    _menu_begin
+    _menu_add direct "VPS - обычный выход сервера"
+    _menu_add warp "WARP - дополнительный выход через Cloudflare"
+    echo "  [0] или Enter - к клиенту"
+    local action rc=0; _menu_read; action="$MENU_ACTION"
+    case "$action" in direct|warp) ;; *) return ;; esac
+    clear
+    _awg_change_client_route "$client_ip" "$action" "$label" || rc=$?
+    [ "$rc" != 2 ] || return 0
+    read -r -p "Enter - к карточке клиента..." < /dev/tty
+}
+
 _awg_show_client_menu() {
     local client_ip="$1" name label
     local -a MENU_ACTIONS=()
@@ -11981,36 +12067,25 @@ _awg_show_client_menu() {
         name=$(_awg_client_name "$client_ip"); label="${name:-${client_ip%/32}}"
         clear
         printf '\n%bКлиент: %s%b\n\n' "$CYAN" "$label" "$NC"
-        printf '  IP: %s\n' "$client_ip"
+        printf '  IP:    %s\n  Выход: ' "$client_ip"
         _awg_refresh_policy --host-only || { AWG_POLICY_ACTIVE=unknown; AWG_POLICY_IPS=(); }
-        printf '  Выход: '; _awg_route_badge "$client_ip"; echo
+        _awg_route_badge "$client_ip"; printf '\n\n'
         _menu_begin
-        _menu_add route "Изменить выход: VPS / WARP"
-        _menu_add name "Имя в GoVPN"
-        _menu_add details "Сведения о связи"
-        echo "  [0] или Enter - назад"
+        _menu_add route "Выбрать выход в интернет"
+        _menu_add name "Изменить имя в GoVPN"
+        echo "  [0] или Enter - к списку клиентов"
         local action; _menu_read; action="$MENU_ACTION"
         case "$action" in
-            route)
-                echo "[1] Через VPS [2] Через WARP [0] или Enter - назад"
-                echo "Если Gemini работает через VPS, оставьте VPS: WARP не исправляет регион Google."
-                local route_choice; route_choice=$(read_choice "Выход: ")
-                case "$route_choice" in 1) _awg_change_client_route "$client_ip" direct ;; 2) _awg_change_client_route "$client_ip" warp ;; esac
-                [ -z "$route_choice" ] || read -r -p "Enter..." < /dev/tty ;;
+            route) _awg_edit_client_route "$client_ip" "$label" ;;
             name)
                 local new_name
                 read -r -p "Новое имя (Enter - отмена): " new_name < /dev/tty
                 [ -n "$new_name" ] || continue
                 if _awg_clients_data rename "$client_ip" "$new_name"; then
                     _awg_refresh_clients || return 1
-                    echo "Подпись GoVPN сохранена. Имя в приложении изменяется отдельно."
+                    echo "Имя в GoVPN сохранено. Имя в приложении Amnezia изменяется отдельно."
                 else echo "Имя не изменено." >&2; fi
-                read -r -p "Enter..." < /dev/tty ;;
-            details)
-                printf 'Последний обмен ключами: %s\n' "$(_awg_client_status "$client_ip")"
-                echo "Это сведения о связи с AWG, не проверка доступа в интернет."
-                echo "Создание, удаление и выдача доступа выполняются в приложении Amnezia."
-                read -r -p "Enter..." < /dev/tty ;;
+                read -r -p "Enter - к карточке клиента..." < /dev/tty ;;
             back) return ;;
         esac
     done
@@ -13973,13 +14048,12 @@ show_menu() {
         _menu_add system "Обслуживание - резервные копии и обновление"
         printf '\n%bДополнительно%b\n' "$CYAN" "$NC"
         _menu_add extra "Маршрутизация и резерв"
-        is_amnezia && _menu_add recovery "Восстановление AWG после сбоя"
         echo "  [0] Выход"
         local action; _menu_read; action="$MENU_ACTION"
         case "$action" in
             clients) printf '%bОткрываю клиентов...%b\n' "$CYAN" "$NC"; _clients_hub ;; warp) warp_setup_wizard ;;
             diagnostics) tools_menu ;; system) system_menu ;;
-            extra) _additional_services_menu ;; recovery) _awg_emergency_restore ;;
+            extra) _additional_services_menu ;;
             back) clear; return 0 ;; invalid) echo "Нет такого пункта." ;;
         esac
     done

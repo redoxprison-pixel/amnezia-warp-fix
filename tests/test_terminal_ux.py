@@ -168,7 +168,8 @@ get_awg_stats
             result = subprocess.run(['bash', '-c', body], env=dict(os.environ, PATH=temp + ':' + os.environ['PATH']),
                                     text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('2 клиентов (1 активны)', result.stdout)
+            self.assertIn('2 клиентов', result.stdout)
+            self.assertNotIn('активны', result.stdout)
 
     def test_simplified_warp_and_diagnostics_hide_manual_tools(self):
         warp = function('_awg_warp_screen')

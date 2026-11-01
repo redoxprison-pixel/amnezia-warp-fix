@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory() as temp:
     for relative in ('govpn.sh', 'install.sh', 'lib/awg_warp.py', 'lib/awg_clients.py', 'lib/diagnostics.py', 'lib/access_tools.py', 'tools/bundle.py',
                      'tests/test_awg_warp.py', 'tests/test_update.py', 'tests/test_lifecycle.py',
                      'tests/test_clients.py', 'tests/test_bootstrap.py', 'tests/test_ux.py', 'tests/test_install.py',
-                     'tests/test_menu_flow.py', 'tests/test_terminal_ux.py', 'tests/test_connection_report.py', 'tests/test_access_tools.py', 'tests/test_669_ux.py'):
+                     'tests/test_menu_flow.py', 'tests/test_terminal_ux.py', 'tests/test_connection_report.py', 'tests/test_access_tools.py', 'tests/test_669_ux.py', 'tests/test_route_ux.py'):
         target = files / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)

@@ -83,15 +83,15 @@ class ProfileTests(unittest.TestCase):
 
 class NavigationTests(unittest.TestCase):
     def test_card_and_bulk_routes_share_same_backend_and_preserve_other_clients(self):
-        body = function('_awg_change_client_route') + '''
-_awg_refresh_policy() { AWG_POLICY_ACTIVE=on; AWG_POLICY_IPS=(10.8.1.2/32 10.9.1.2/32); }
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'selection'
+            body = function('_awg_change_client_route') + '''
+_awg_refresh_policy() { if [ "$1" = --host-only ]; then AWG_POLICY_IPS=(10.9.1.2/32); else AWG_POLICY_IPS=(10.8.1.2/32 10.9.1.2/32); fi; AWG_POLICY_ACTIVE=on; }
 read_yn() { echo y; }
-_awg_apply_rules() { printf 'APPLY:%s\\n' "$*"; }
-_awg_change_client_route 10.8.1.2/32 direct
-'''
-        result = subprocess.run(['bash', '-c', body], text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('APPLY:10.9.1.2/32', result.stdout)
+''' + '_awg_apply_rules() { printf \'%s\\n\' "$*" > ' + shlex.quote(str(path)) + '; }\n_awg_change_client_route 10.8.1.2/32 direct'
+            result = subprocess.run(['bash', '-c', body], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(path.read_text().strip(), '10.9.1.2/32')
 
     def test_direct_when_warp_removed_does_not_reenable_it(self):
         body = function('_awg_change_client_route') + '''

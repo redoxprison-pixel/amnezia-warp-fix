@@ -20,7 +20,7 @@ class MenuCleanupTests(unittest.TestCase):
         card = function('_awg_show_client_menu')
         for action in ('profile-hint','profile-import','_awg_show_qr','_awg_show_config','_awg_del_peer'):
             self.assertNotIn(action,card)
-        self.assertIn('_awg_change_client_route',card)
+        self.assertIn('_awg_edit_client_route',card)
 
     def test_retired_creation_and_deletion_cannot_touch_docker_even_if_called(self):
         for name in ('_awg_add_peer','_awg_del_peer','install_wizard'):

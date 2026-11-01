@@ -25,7 +25,7 @@ def harness(mode):
     return MENUS + '\n' + '''
 MODE=MODE_VALUE
 AWG_CONTAINER=amnezia-awg2
-VERSION=6.69
+VERSION=6.70
 clear() { :; }
 is_amnezia() { [[ "$MODE" = amnezia || "$MODE" = combo ]]; }
 is_3xui() { [[ "$MODE" = 3xui || "$MODE" = combo ]]; }
@@ -53,7 +53,7 @@ class MenuFlowTests(unittest.TestCase):
                     self.assert_consecutive(result.stdout)
 
     def test_main_header_rejects_old_notice_even_if_cache_reader_returns_it(self):
-        for version, expected in (('6.65', False), ('6.69', False), ('6.69.0', False), ('99.0', True)):
+        for version, expected in (('6.65', False), ('6.70', False), ('6.70.0', False), ('99.0', True)):
             body = harness('amnezia') + '\n' + function('_ver_lt') + '\n' + function('show_menu')
             body += f'\n_update_cached_ver() {{ echo {version}; }}\nshow_menu'
             result = shell(body)
